@@ -1,0 +1,179 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCQ Anchor | Continuous practice. Anchored assessment.</title>
+  <meta name="description" content="MCQ Anchor is a pilot-stage assessment concept that rewards regular online practice and uses short controlled validation to anchor marks fairly in the age of generative AI.">
+  <link rel="stylesheet" href="{% static 'website/css/styles.css' %}">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+
+  <header class="site-header">
+    <nav class="site-nav" aria-label="Primary">
+      <a class="brand" href="#top" aria-label="MCQ Anchor home">
+        <img src="{% static 'website/images/mcq-anchor-logo.png' %}" alt="MCQ Anchor logo">
+      </a>
+      <div class="nav-links" id="nav-links">
+        <a href="#handout">Overview</a>
+        <a href="#contact">Contact</a>
+        <a class="button button-primary nav-cta" href="#contact">Pilot for free</a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main-content">
+    <section class="hero section" id="top">
+      <div class="hero-copy">
+        <div class="eyebrow">Designed for fair, scalable assessment in the age of generative AI.</div>
+        <h1>Continuous practice. Anchored assessment.</h1>
+        <p class="hero-text">MCQ Anchor rewards regular online learning while using a short, controlled validation test to establish what students can do independently.</p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="#contact">Pilot for free</a>
+          <a class="button button-secondary" href="#handout">Download overview</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section handout-section" id="handout">
+      <div class="handout-card">
+        <div class="handout-copy">
+          <p class="eyebrow">Download the overview</p>
+          <h2>Get the full picture</h2>
+          <p>We could have built a website that kept you scrolling through every detail. Instead, we distilled the essentials into a single printable handout you can read quickly, save, or share with colleagues.</p>
+          <p>If you want more, ask the <a href="#chat-panel" class="chat-open-link">MCQ Anchor guide</a>. It has the full MCQ Anchor story.</p>
+          <a class="button button-primary" href="{% static 'website/files/what_is_mcq_anchor.pdf' %}" download>Download the handout</a>
+        </div>
+        <a class="handout-preview" href="{% static 'website/files/what_is_mcq_anchor.pdf' %}" download aria-label="Download the MCQ Anchor handout PDF">
+          <img src="{% static 'website/images/infographic-mockup.png' %}" alt="MCQ Anchor handout shown on a laptop and printed sheet">
+        </a>
+      </div>
+    </section>
+
+    <section class="section" id="contact">
+      <div class="section-heading">
+        <p class="eyebrow">CONTACT</p>
+        <h2>Start a conversation.</h2>
+        <p>No lengthy application. No commitment. Just a quick conversation.</p>
+      </div>
+      {% if messages %}
+        <div class="message-stack" aria-live="polite">
+          {% for message in messages %}
+            <div class="flash flash-{{ message.tags }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      <form class="contact-form" method="post" action="{% url 'website:home' %}">
+        {% csrf_token %}
+        {% if form.non_field_errors %}
+          <div class="form-errors">{{ form.non_field_errors }}</div>
+        {% endif %}
+        <div class="form-grid">
+          <div class="field">
+            <label for="{{ form.name.id_for_label }}">Name</label>
+            {{ form.name }}
+            {% for error in form.name.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+          </div>
+          <div class="field">
+            <label for="{{ form.email.id_for_label }}">Work email</label>
+            {{ form.email }}
+            {% for error in form.email.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+          </div>
+          <div class="field">
+            <label for="{{ form.institution.id_for_label }}">Institution</label>
+            {{ form.institution }}
+            {% for error in form.institution.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+          </div>
+          <div class="field">
+            <label for="{{ form.module_or_subject.id_for_label }}">Module or subject area</label>
+            {{ form.module_or_subject }}
+            {% for error in form.module_or_subject.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+          </div>
+          <div class="field field-full">
+            <label for="{{ form.message.id_for_label }}">Message</label>
+            {{ form.message }}
+            {% for error in form.message.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+          </div>
+          <div class="honeypot" aria-hidden="true">
+            <label for="{{ form.website.id_for_label }}">Leave this field empty</label>
+            {{ form.website }}
+            {% for error in form.website.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+          </div>
+        </div>
+        <button class="button button-primary contact-submit" type="submit">Submit</button>
+      </form>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-brand">
+      <img src="{% static 'website/images/mcq-anchor-logo.png' %}" alt="MCQ Anchor logo">
+      <p>Continuous practice. Anchored assessment.</p>
+    </div>
+  </footer>
+
+  <button class="chat-launcher" type="button" aria-expanded="false" aria-controls="chat-panel">
+    <span class="chat-launcher-mark" aria-hidden="true">⚓</span>
+    Ask a question
+  </button>
+
+  <section class="chat-panel" id="chat-panel" aria-label="MCQ Anchor guide" hidden>
+    <div class="chat-header">
+      <button class="chat-close" type="button" aria-label="Close chat">Close</button>
+    </div>
+    <div class="chat-discovery" aria-label="Walkthrough scenarios and frequently asked questions">
+      <div class="scenario-list" aria-label="Walkthrough scenarios">
+        <p class="starter-list-title">Walkthrough Scenarios</p>
+        <button class="scenario-button" type="button" data-scenario="student">Student perspective</button>
+        <button class="scenario-button" type="button" data-scenario="teacher">Teacher walkthrough</button>
+      </div>
+      <div class="starter-list" aria-label="Frequently asked questions">
+        <p class="starter-list-title">FAQs</p>
+        <button class="starter-question" type="button">What problem is MCQ Anchor trying to solve?</button>
+        <button class="starter-question" type="button">How does MCQ Anchor respond to generative AI?</button>
+        <button class="starter-question" type="button">How does the controlled validation test work?</button>
+        <button class="starter-question" type="button">How are practice marks and validation combined?</button>
+        <button class="starter-question" type="button">Why not just move everything back to invigilated exams?</button>
+        <button class="starter-question" type="button">Why not rely on online surveillance instead?</button>
+        <button class="starter-question" type="button">Can the scoring model be customised?</button>
+        <button class="starter-question" type="button">What kinds of question pools work best?</button>
+        <button class="starter-question" type="button">How much extra workload does this create for staff?</button>
+        <button class="starter-question" type="button">How does MCQ Anchor support student accessibility?</button>
+        <button class="starter-question" type="button">Could MCQ Anchor work better for some neurodiverse students?</button>
+        <button class="starter-question" type="button">Is MCQ Anchor LTI 1.3 enabled?</button>
+        <button class="starter-question" type="button">Can we use MCQ Anchor without a VLE?</button>
+        <button class="starter-question" type="button">What would a pilot involve?</button>
+      </div>
+    </div>
+    <div class="walkthrough-panel" aria-live="polite" hidden>
+      <p class="starter-list-title">Walkthrough Scenarios</p>
+      <div class="walkthrough-meta">
+        <h3 class="walkthrough-title">Student perspective</h3>
+        <p class="walkthrough-progress">Step 1 of 6</p>
+      </div>
+      <article class="walkthrough-card">
+        <p class="walkthrough-stage">Stage 1</p>
+        <h4 class="walkthrough-step-title">Starting the module</h4>
+        <div class="walkthrough-body"></div>
+      </article>
+      <div class="walkthrough-actions">
+        <button class="button button-secondary walkthrough-exit" type="button">Back to chat</button>
+        <button class="button button-primary walkthrough-next" type="button">Next</button>
+      </div>
+    </div>
+    <div class="chat-transcript" aria-live="polite" aria-label="Chat transcript"></div>
+    <form class="chat-form">
+      <p class="chat-status" role="status" aria-live="polite"></p>
+      <label class="sr-only" for="chat-question">Ask a question about MCQ Anchor</label>
+      <div class="chat-composer">
+        <textarea id="chat-question" name="question" rows="1" maxlength="500" placeholder="Ask about MCQ Anchor"></textarea>
+        <button class="button button-primary" type="submit">Send</button>
+      </div>
+    </form>
+  </section>
+
+  <script src="{% static 'website/js/site.js' %}"></script>
+</body>
+</html>
