@@ -894,6 +894,26 @@ body.chat-open {
   align-content: start;
 }
 
+.walkthrough-panel > * {
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease,
+    filter 220ms ease;
+  transform-origin: center top;
+}
+
+.walkthrough-panel.is-step-exiting > *:not(.walkthrough-actions) {
+  opacity: 0;
+  transform: translateX(-18px) translateY(6px);
+  filter: blur(4px);
+}
+
+.walkthrough-panel.is-step-entering > *:not(.walkthrough-actions) {
+  opacity: 0;
+  transform: translateX(18px) translateY(-6px);
+  filter: blur(4px);
+}
+
 .walkthrough-meta {
   display: grid;
   gap: 0.25rem;

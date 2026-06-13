@@ -34,8 +34,10 @@ let hasShownContactPrompt = false;
 let resetAction = null;
 let activeScenarioId = null;
 let activeScenarioStepIndex = 0;
+let walkthroughTransitionTimer = null;
 const MAX_HISTORY_ITEMS = 6;
 const MAX_HISTORY_MESSAGE_LENGTH = 280;
+const WALKTHROUGH_TRANSITION_MS = 220;
 const WALKTHROUGH_SCENARIOS = {
   student: {
     title: "Student perspective",
@@ -249,6 +251,39 @@ function renderWalkthroughStep() {
   walkthroughNextButton.textContent = activeScenarioStepIndex === scenario.steps.length - 1 ? "Finish" : "Next";
 }
 
+function clearWalkthroughTransition() {
+  if (walkthroughTransitionTimer) {
+    clearTimeout(walkthroughTransitionTimer);
+    walkthroughTransitionTimer = null;
+  }
+
+  walkthroughPanel?.classList.remove("is-step-exiting", "is-step-entering");
+  walkthroughNextButton?.removeAttribute("disabled");
+}
+
+function transitionWalkthroughStep(updateStep) {
+  if (!walkthroughPanel) {
+    updateStep();
+    return;
+  }
+
+  clearWalkthroughTransition();
+  walkthroughNextButton?.setAttribute("disabled", "disabled");
+  walkthroughPanel.classList.add("is-step-exiting");
+
+  walkthroughTransitionTimer = window.setTimeout(() => {
+    updateStep();
+    walkthroughPanel.classList.remove("is-step-exiting");
+    walkthroughPanel.classList.add("is-step-entering");
+
+    walkthroughTransitionTimer = window.setTimeout(() => {
+      walkthroughPanel?.classList.remove("is-step-entering");
+      walkthroughNextButton?.removeAttribute("disabled");
+      walkthroughTransitionTimer = null;
+    }, WALKTHROUGH_TRANSITION_MS);
+  }, 140);
+}
+
 function openWalkthrough(scenarioId) {
   if (!WALKTHROUGH_SCENARIOS[scenarioId]) {
     return;
@@ -258,6 +293,7 @@ function openWalkthrough(scenarioId) {
   removeResetAction();
   activeScenarioId = scenarioId;
   activeScenarioStepIndex = 0;
+  clearWalkthroughTransition();
   renderWalkthroughStep();
   updateChatMode();
 }
@@ -277,11 +313,14 @@ function advanceWalkthrough() {
     return;
   }
 
-  activeScenarioStepIndex += 1;
-  renderWalkthroughStep();
+  transitionWalkthroughStep(() => {
+    activeScenarioStepIndex += 1;
+    renderWalkthroughStep();
+  });
 }
 
 function exitWalkthrough() {
+  clearWalkthroughTransition();
   activeScenarioId = null;
   activeScenarioStepIndex = 0;
   updateChatMode();
