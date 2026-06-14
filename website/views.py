@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 
 from django.conf import settings
 from django.contrib import messages
@@ -10,6 +11,7 @@ from django.views.decorators.http import require_http_methods
 
 from .chatbot import ChatbotError, get_chatbot_reply
 from .forms import PilotEnquiryForm
+from .models import ChatConversation, ChatMessage
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +33,22 @@ def home(request: HttpRequest) -> HttpResponse:
     return render(request, "website/home.html", context)
 
 
-def _get_rate_limit_key(request: HttpRequest) -> str:
+def _get_session_key(request: HttpRequest) -> str:
     if not request.session.session_key:
         request.session.create()
-    identifier = request.session.session_key or request.META.get("REMOTE_ADDR", "anonymous")
+    return request.session.session_key or request.META.get("REMOTE_ADDR", "anonymous")
+
+
+def _get_rate_limit_key(request: HttpRequest) -> str:
+    identifier = _get_session_key(request)
     return f"product-chat:{identifier}"
+
+
+def _get_client_ip(request: HttpRequest) -> str:
+    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR", "").strip()
 
 
 def _rate_limit_exceeded(request: HttpRequest) -> bool:
@@ -74,6 +87,43 @@ def _validate_history(history):
     return clean_history
 
 
+def _get_or_create_chat_conversation(
+    request: HttpRequest,
+    conversation_id: str | None,
+) -> ChatConversation:
+    public_id = None
+    if conversation_id:
+        try:
+            public_id = uuid.UUID(str(conversation_id))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Conversation ID is invalid.") from exc
+
+    session_key = _get_session_key(request)
+    defaults = {
+        "session_key": session_key,
+        "ip_address": _get_client_ip(request) or None,
+        "user_agent": request.META.get("HTTP_USER_AGENT", "")[:1000],
+    }
+
+    if public_id is None:
+        return ChatConversation.objects.create(**defaults)
+
+    conversation, created = ChatConversation.objects.get_or_create(
+        public_id=public_id,
+        session_key=session_key,
+        defaults=defaults,
+    )
+    if not created:
+        conversation.ip_address = defaults["ip_address"]
+        conversation.user_agent = defaults["user_agent"]
+        conversation.save(update_fields=["ip_address", "user_agent", "last_message_at"])
+    return conversation
+
+
+def _log_chat_message(conversation: ChatConversation, role: str, content: str) -> None:
+    ChatMessage.objects.create(conversation=conversation, role=role, content=content)
+
+
 @require_http_methods(["POST"])
 def product_chat(request: HttpRequest) -> JsonResponse:
     if _rate_limit_exceeded(request):
@@ -100,9 +150,20 @@ def product_chat(request: HttpRequest) -> JsonResponse:
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
 
+    try:
+        conversation = _get_or_create_chat_conversation(request, payload.get("conversation_id"))
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    _log_chat_message(conversation, ChatMessage.Role.USER, question)
+
     if not settings.OPENAI_API_KEY:
+        error_message = (
+            "The chat assistant is not configured yet. Please use the pilot form and we will reply directly."
+        )
+        _log_chat_message(conversation, ChatMessage.Role.ERROR, error_message)
         return JsonResponse(
-            {"error": "The chat assistant is not configured yet. Please use the pilot form and we will reply directly."},
+            {"error": error_message, "conversation_id": str(conversation.public_id)},
             status=503,
         )
 
@@ -115,9 +176,12 @@ def product_chat(request: HttpRequest) -> JsonResponse:
         )
     except ChatbotError as exc:
         logger.warning("Product chat failed: %s", exc)
+        error_message = "The chat assistant is unavailable right now. Please try again shortly or use the pilot form."
+        _log_chat_message(conversation, ChatMessage.Role.ERROR, error_message)
         return JsonResponse(
-            {"error": "The chat assistant is unavailable right now. Please try again shortly or use the pilot form."},
+            {"error": error_message, "conversation_id": str(conversation.public_id)},
             status=502,
         )
 
-    return JsonResponse({"answer": answer})
+    _log_chat_message(conversation, ChatMessage.Role.ASSISTANT, answer)
+    return JsonResponse({"answer": answer, "conversation_id": str(conversation.public_id)})

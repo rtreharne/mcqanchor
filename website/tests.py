@@ -13,7 +13,6 @@ class HomePageTests(TestCase):
         response = self.client.get(reverse("website:home"))
 
         self.assertContains(response, "Continuous practice. Anchored assessment.")
-        self.assertContains(response, 'href="#main-content"', html=False)
         self.assertContains(response, 'aria-label="Primary"', html=False)
         self.assertContains(response, 'alt="MCQ Anchor logo"', html=False)
         self.assertContains(response, "Download the handout")

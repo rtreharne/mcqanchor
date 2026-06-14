@@ -631,7 +631,13 @@ async function sendQuestion(question) {
       }),
     });
 
-    const payload = await response.json();
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (parseError) {
+      throw new Error("The chat returned an unexpected server response. Please refresh the page and try again.");
+    }
+
     if (!response.ok) {
       throw new Error(payload.error || "Something went wrong.");
     }
