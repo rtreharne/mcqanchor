@@ -19,6 +19,10 @@ services:
         value: "https://*.onrender.com,https://mcqanchor.com,https://www.mcqanchor.com"
       - key: SQLITE_PATH
         value: /app/data/db.sqlite3
+      - key: DJANGO_ADMIN_USERNAME
+        sync: false
+      - key: DJANGO_ADMIN_PASSWORD
+        sync: false
       - key: CONTACT_EMAIL
         sync: false
       - key: OPENAI_API_KEY

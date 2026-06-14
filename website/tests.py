@@ -1,7 +1,10 @@
 import json
+import os
 from unittest.mock import Mock, patch
 
+from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.management import call_command
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
@@ -65,6 +68,44 @@ class ContactFormTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(PilotEnquiry.objects.count(), 0)
         self.assertContains(response, "Please leave this field empty.")
+
+
+class AdminBootstrapCommandTests(TestCase):
+    @patch.dict(
+        os.environ,
+        {
+            "DJANGO_ADMIN_USERNAME": "renderadmin",
+            "DJANGO_ADMIN_PASSWORD": "super-secret-pass",
+        },
+        clear=False,
+    )
+    def test_ensure_admin_user_creates_superuser(self):
+        call_command("ensure_admin_user")
+
+        user = get_user_model().objects.get(username="renderadmin")
+        self.assertTrue(user.is_staff)
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.check_password("super-secret-pass"))
+
+    @patch.dict(
+        os.environ,
+        {
+            "DJANGO_ADMIN_USERNAME": "renderadmin",
+            "DJANGO_ADMIN_PASSWORD": "new-secret-pass",
+        },
+        clear=False,
+    )
+    def test_ensure_admin_user_updates_existing_superuser_password(self):
+        user = get_user_model().objects.create_superuser(
+            username="renderadmin",
+            email="old@example.com",
+            password="old-pass",
+        )
+
+        call_command("ensure_admin_user")
+
+        user.refresh_from_db()
+        self.assertTrue(user.check_password("new-secret-pass"))
 
 
 @override_settings(

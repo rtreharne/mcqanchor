@@ -51,6 +51,8 @@ DJANGO_DEBUG=True
 DJANGO_ALLOWED_HOSTS=127.0.0.1,localhost
 DJANGO_CSRF_TRUSTED_ORIGINS=
 SQLITE_PATH=
+DJANGO_ADMIN_USERNAME=
+DJANGO_ADMIN_PASSWORD=
 OPENAI_API_KEY=your-openai-api-key
 OPENAI_MODEL=gpt-4.1-mini
 CONTACT_EMAIL=replace-me@example.com
@@ -102,6 +104,8 @@ These are set up for a single Docker-based Render web service using a Blueprint 
 5. When prompted, provide values for:
 
 ```text
+DJANGO_ADMIN_USERNAME
+DJANGO_ADMIN_PASSWORD
 CONTACT_EMAIL
 OPENAI_API_KEY
 ```
@@ -111,8 +115,13 @@ OPENAI_API_KEY
 ### Runtime behavior on Render
 
 - The container runs `python manage.py migrate --noinput` on startup.
+- The container runs `python manage.py ensure_admin_user` on startup after migrations.
 - Static files are collected on startup and served by WhiteNoise.
 - Gunicorn binds to Render's `PORT` environment variable.
+
+### Admin login on Render
+
+If `DJANGO_ADMIN_USERNAME` and `DJANGO_ADMIN_PASSWORD` are set, each startup will create or update that Django superuser automatically. You can then sign in at `/admin`.
 
 ### Custom domain
 

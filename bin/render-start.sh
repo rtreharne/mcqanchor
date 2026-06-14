@@ -8,6 +8,7 @@ export SQLITE_PATH
 mkdir -p "$(dirname "$SQLITE_PATH")"
 
 python manage.py migrate --noinput
+python manage.py ensure_admin_user
 python manage.py collectstatic --noinput
 
 exec gunicorn config.wsgi:application \
