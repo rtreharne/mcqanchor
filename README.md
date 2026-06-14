@@ -114,6 +114,25 @@ OPENAI_API_KEY
 - Static files are collected on startup and served by WhiteNoise.
 - Gunicorn binds to Render's `PORT` environment variable.
 
+### Custom domain
+
+The Render Blueprint registers `mcqanchor.com` as the service custom domain. Render automatically adds the corresponding `www.mcqanchor.com` host and redirects it to the root domain.
+
+Django is configured through `render.yaml` to accept:
+
+```text
+mcqanchor.com
+www.mcqanchor.com
+*.onrender.com
+```
+
+After deploying the Blueprint, finish setup in Render's Custom Domains section:
+
+1. Verify that `mcqanchor.com` is listed for the `mcq-anchor` web service.
+2. Add the DNS records Render shows at your domain provider.
+3. Remove any conflicting `AAAA` records for the domain.
+4. Return to Render and click Verify.
+
 ### Important limitation of the single free-service setup
 
 The initial Render setup uses SQLite inside the web service so everything stays in one app. This is suitable for demos and early pilot review, but not for durable production storage on the free plan.
