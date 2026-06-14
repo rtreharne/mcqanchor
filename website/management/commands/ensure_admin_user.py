@@ -26,6 +26,8 @@ class Command(BaseCommand):
                 "email": f"{username}@example.com",
                 "is_staff": True,
                 "is_superuser": True,
+                "role": getattr(User.Role, "INTERNAL", "internal") if hasattr(User, "Role") else "internal",
+                "is_email_verified": True,
             },
         )
 
@@ -39,6 +41,12 @@ class Command(BaseCommand):
         if not user.is_superuser:
             user.is_superuser = True
             updated_fields.append("is_superuser")
+        if hasattr(user, "role") and user.role != getattr(User.Role, "INTERNAL", "internal"):
+            user.role = getattr(User.Role, "INTERNAL", "internal")
+            updated_fields.append("role")
+        if hasattr(user, "is_email_verified") and not user.is_email_verified:
+            user.is_email_verified = True
+            updated_fields.append("is_email_verified")
 
         user.set_password(password)
         updated_fields.append("password")

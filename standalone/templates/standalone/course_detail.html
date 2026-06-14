@@ -1,0 +1,99 @@
+{% extends "standalone/base.html" %}
+{% block content %}
+<section class="panel">
+  <div class="section-head">
+    <div>
+      <h1>{{ course.title }}</h1>
+      <p class="lead">{{ course.summary|default:"No summary yet." }}</p>
+    </div>
+    <div class="action-row">
+      <a class="button secondary" href="{% url 'standalone:course_config' course.pk %}">Edit config</a>
+      <a class="button" href="{% url 'standalone:block_create' course.pk %}">Add block</a>
+    </div>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-card"><span>Draft questions</span><strong>{{ draft_questions }}</strong></div>
+    <div class="stat-card"><span>Approved questions</span><strong>{{ approved_questions }}</strong></div>
+    <div class="stat-card"><span>Allowed emails</span><strong>{{ allowed_emails|length }}</strong></div>
+    <div class="stat-card"><span>Validation events</span><strong>{{ events|length }}</strong></div>
+  </div>
+
+  <div class="action-row">
+    <a class="button secondary" href="{% url 'standalone:student_invite' course.pk %}">Invite student</a>
+    <a class="button secondary" href="{% url 'standalone:allowed_email_add' course.pk %}">Add self-enrol email</a>
+    <a class="button secondary" href="{% url 'standalone:magic_link_create' course.pk %}">Create magic link</a>
+    <a class="button secondary" href="{% url 'standalone:validation_event_create' course.pk %}">Create validation event</a>
+  </div>
+
+  <div class="action-row">
+    <form method="post" action="{% url 'standalone:generate_course_bank' course.pk %}">
+      {% csrf_token %}
+      <button class="button" type="submit">Generate question bank</button>
+    </form>
+    <form method="post" action="{% url 'standalone:approve_course_questions' course.pk %}">
+      {% csrf_token %}
+      <button class="button secondary" type="submit">Approve all draft questions</button>
+    </form>
+  </div>
+
+  <section class="panel nested">
+    <h2>Course blocks</h2>
+    {% for block in blocks %}
+      <article class="card">
+        <div class="section-head compact">
+          <div>
+            <h3>{{ block.order }}. {{ block.title }}</h3>
+            <p>{{ block.summary|default:"No summary." }}</p>
+          </div>
+          <a class="button secondary" href="{% url 'standalone:asset_upload' block.pk %}">Upload content</a>
+        </div>
+        <h4>Assets</h4>
+        {% for asset in block.assets.all %}
+          <div class="row-card">
+            <div>
+              <strong>{{ asset.original_filename }}</strong>
+              <p>{{ asset.processing_status }}{% if asset.processing_error %} • {{ asset.processing_error }}{% endif %}</p>
+            </div>
+            <form method="post" action="{% url 'standalone:toggle_asset_generation' asset.pk %}">
+              {% csrf_token %}
+              <button class="button secondary" type="submit">
+                {% if asset.include_in_generation %}Exclude from generation{% else %}Include in generation{% endif %}
+              </button>
+            </form>
+          </div>
+        {% empty %}
+          <p>No content assets yet.</p>
+        {% endfor %}
+
+        <h4>Learning objectives</h4>
+        <ul class="simple-list">
+          {% for objective in block.learning_objectives.all %}
+            <li>{{ objective.code }} — {{ objective.text }}</li>
+          {% empty %}
+            <li>No objectives generated yet.</li>
+          {% endfor %}
+        </ul>
+      </article>
+    {% empty %}
+      <p>No blocks yet.</p>
+    {% endfor %}
+  </section>
+
+  <section class="panel nested">
+    <h2>Validation events</h2>
+    {% for event in events %}
+      <article class="row-card">
+        <div>
+          <strong>{{ event.title }}</strong>
+          <p>{{ event.starts_at|date:"j M Y, H:i" }} • {{ event.location }} • Capacity {{ event.capacity }}</p>
+        </div>
+        <a class="button secondary" href="{% url 'standalone:validation_pack_pdf' event.pk %}">Download printable pack</a>
+      </article>
+    {% empty %}
+      <p>No validation events yet.</p>
+    {% endfor %}
+  </section>
+</section>
+{% endblock %}
+

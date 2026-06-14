@@ -6,3 +6,4 @@ db.sqlite3
 data/
 .env
 staticfiles/
+media/

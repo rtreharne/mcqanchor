@@ -1,0 +1,35 @@
+from django.urls import path
+
+from standalone import views
+
+app_name = "standalone"
+
+urlpatterns = [
+    path("", views.home, name="home"),
+    path("login/", views.login_view, name="login"),
+    path("logout/", views.StandaloneLogoutView.as_view(), name="logout"),
+    path("dashboard/", views.dashboard, name="dashboard"),
+    path("teacher/", views.teacher_dashboard, name="teacher_dashboard"),
+    path("teacher/invite/", views.teacher_invite_create, name="teacher_invite"),
+    path("teacher/activate/<uuid:token>/", views.teacher_activate, name="teacher_activate"),
+    path("teacher/courses/new/", views.course_create, name="course_create"),
+    path("teacher/courses/<int:course_id>/", views.course_detail, name="course_detail"),
+    path("teacher/courses/<int:course_id>/config/", views.course_config_edit, name="course_config"),
+    path("teacher/courses/<int:course_id>/allowed-emails/new/", views.add_allowed_email, name="allowed_email_add"),
+    path("teacher/courses/<int:course_id>/invite-student/", views.student_invite_create, name="student_invite"),
+    path("teacher/courses/<int:course_id>/magic-link/", views.magic_link_create, name="magic_link_create"),
+    path("teacher/courses/<int:course_id>/blocks/new/", views.block_create, name="block_create"),
+    path("teacher/courses/<int:course_id>/generate-bank/", views.generate_course_bank, name="generate_course_bank"),
+    path("teacher/courses/<int:course_id>/approve-questions/", views.approve_course_questions, name="approve_course_questions"),
+    path("teacher/courses/<int:course_id>/validation-events/new/", views.validation_event_create, name="validation_event_create"),
+    path("teacher/blocks/<int:block_id>/upload/", views.asset_upload, name="asset_upload"),
+    path("teacher/assets/<int:asset_id>/toggle/", views.toggle_asset_generation, name="toggle_asset_generation"),
+    path("teacher/validation-events/<int:event_id>/pack.pdf", views.validation_pack_pdf, name="validation_pack_pdf"),
+    path("student/", views.student_dashboard, name="student_dashboard"),
+    path("student/invite/<uuid:token>/", views.student_activate, name="student_activate"),
+    path("courses/<slug:course_slug>/self-enrol/", views.self_enrol, name="self_enrol"),
+    path("courses/magic/<uuid:token>/", views.magic_enrol, name="magic_enrol"),
+    path("student/validation-events/<int:event_id>/book/", views.validation_book, name="validation_book"),
+    path("student/bookings/<int:booking_id>/cancel/", views.validation_cancel, name="validation_cancel"),
+    path("student/courses/<int:course_id>/practice/", views.practice_quiz, name="practice_quiz"),
+]

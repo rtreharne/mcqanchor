@@ -1,0 +1,53 @@
+{% extends "standalone/base.html" %}
+{% block content %}
+<section class="panel">
+  <h1>Student dashboard</h1>
+  <p class="lead">Track your practice metrics, continue course activity, and manage short controlled validation bookings.</p>
+  <div class="card-grid">
+    {% for enrollment in enrollments %}
+      <article class="card">
+        <h2>{{ enrollment.course.title }}</h2>
+        <div class="metrics">
+          <div><span>Mastery</span><strong>{{ enrollment.mastery_score }}%</strong><em>{{ enrollment.mastery_delta|floatformat:2 }}</em></div>
+          <div><span>Coverage</span><strong>{{ enrollment.coverage_score }}%</strong><em>{{ enrollment.coverage_delta|floatformat:2 }}</em></div>
+          <div><span>Engagement</span><strong>{{ enrollment.engagement_score }}%</strong><em>{{ enrollment.engagement_delta|floatformat:2 }}</em></div>
+          <div><span>Target</span><strong>{{ enrollment.target_score }}%</strong><em>{{ enrollment.target_delta|floatformat:2 }}</em></div>
+        </div>
+        <div class="action-row">
+          <a class="button" href="{% url 'standalone:practice_quiz' enrollment.course.pk %}">Start practice</a>
+          <a class="button secondary" href="{% url 'standalone:practice_quiz' enrollment.course.pk %}?mode=validation_practice">Validation practice</a>
+        </div>
+        {% with booking=enrollment.validation_bookings.first %}
+          {% if booking %}
+            <p><strong>Validation:</strong> {{ booking.event.title }} on {{ booking.event.starts_at|date:"j M Y, H:i" }}</p>
+            {% if booking.status == "booked" %}
+              <form method="post" action="{% url 'standalone:validation_cancel' booking.pk %}">
+                {% csrf_token %}
+                <button class="link-button" type="submit">Cancel booking</button>
+              </form>
+            {% endif %}
+          {% endif %}
+        {% endwith %}
+      </article>
+    {% empty %}
+      <p>You are not enrolled on any courses yet.</p>
+    {% endfor %}
+  </div>
+
+  <section class="panel nested">
+    <h2>Available validation sessions</h2>
+    {% for event in upcoming_events %}
+      <article class="row-card">
+        <div>
+          <strong>{{ event.course.title }}</strong>
+          <p>{{ event.title }} • {{ event.starts_at|date:"j M Y, H:i" }} • {{ event.location }}</p>
+        </div>
+        <a class="button" href="{% url 'standalone:validation_book' event.pk %}">Book</a>
+      </article>
+    {% empty %}
+      <p>No validation sessions are currently visible.</p>
+    {% endfor %}
+  </section>
+</section>
+{% endblock %}
+

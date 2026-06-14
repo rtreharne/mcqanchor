@@ -1,0 +1,20 @@
+{% extends "standalone/base.html" %}
+{% block content %}
+<section class="panel narrow">
+  <h1>{{ title }}</h1>
+  <form method="post" enctype="multipart/form-data" class="stack-form">
+    {% csrf_token %}
+    {{ form.non_field_errors }}
+    {% for field in form %}
+      <div class="field">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}
+        {% for error in field.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+      </div>
+    {% endfor %}
+    <button type="submit" class="button">Save</button>
+  </form>
+</section>
+{% endblock %}
+
