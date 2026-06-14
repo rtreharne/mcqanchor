@@ -7,6 +7,8 @@ function getCookie(name) {
 }
 
 const launcher = document.querySelector(".chat-launcher");
+const launcherBubbleStream = document.querySelector(".chat-launcher-bubbles");
+const heroSection = document.querySelector(".hero");
 const chatPanel = document.querySelector(".chat-panel");
 const closeButton = document.querySelector(".chat-close");
 const discoveryPanel = document.querySelector(".chat-discovery");
@@ -27,6 +29,8 @@ const walkthroughBody = document.querySelector(".walkthrough-body");
 const walkthroughNextButton = document.querySelector(".walkthrough-next");
 const walkthroughExitButton = document.querySelector(".walkthrough-exit");
 const chatOpenLinks = document.querySelectorAll(".chat-open-link");
+const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+const desktopAutoOpenQuery = window.matchMedia("(min-width: 1024px)");
 
 const history = [];
 let thinkingMessage = null;
@@ -35,19 +39,25 @@ let resetAction = null;
 let activeScenarioId = null;
 let activeScenarioStepIndex = 0;
 let walkthroughTransitionTimer = null;
+let bubbleSpawnTimer = null;
+let chatPanelHideTimer = null;
+let chatPanelShowFrame = null;
+let hasAutoOpenedLauncher = false;
+let lastScrollY = window.scrollY;
 const MAX_HISTORY_ITEMS = 6;
 const MAX_HISTORY_MESSAGE_LENGTH = 280;
 const WALKTHROUGH_TRANSITION_MS = 220;
+const CHAT_PANEL_TRANSITION_MS = 260;
 const WALKTHROUGH_SCENARIOS = {
   student: {
     title: "Student perspective",
     steps: [
       {
         stage: "Stage 1",
-        title: "Joining the module",
+        title: "Joining the course",
         body: [
           "At the start of the semester, the student sees MCQ Anchor set up inside their course area or accesses it directly as a standalone platform.",
-          "They can immediately see the module topics, the practice expectations for the term, and how their learning will connect to a short controlled validation later on.",
+          "They can immediately see the course topics, the practice expectations for the term, and how their learning will connect to a short controlled validation later on.",
         ],
       },
       {
@@ -62,7 +72,7 @@ const WALKTHROUGH_SCENARIOS = {
         stage: "Stage 3",
         title: "Using feedback to improve",
         body: [
-          "Because the practice MCQs are built directly from approved course materials, the feedback stays closely tied to the actual content of the module.",
+          "Because the practice MCQs are built directly from approved course materials, the feedback stays closely tied to the actual content of the course.",
           "After each practice set, the student receives immediate feedback, explanations, and a clearer sense of which topics still need attention.",
           "Over the semester, they build coverage across the curriculum instead of relying on one last-minute revision push.",
         ],
@@ -98,7 +108,7 @@ const WALKTHROUGH_SCENARIOS = {
     steps: [
       {
         stage: "Stage 1",
-        title: "Setting up the module",
+        title: "Setting up the course",
         body: [
           "At the start of the semester, the teacher uploads or confirms the approved course materials that will be used for learning and assessment.",
           "They define the relevant topics, learning outcomes, and the broad structure of practice across the term.",
@@ -108,7 +118,7 @@ const WALKTHROUGH_SCENARIOS = {
         stage: "Stage 2",
         title: "Generating practice from the course content",
         body: [
-          "MCQ Anchor generates practice MCQs dynamically from the module materials, rather than relying on a detached generic bank.",
+          "MCQ Anchor generates practice MCQs dynamically from the course materials, rather than relying on a detached generic bank.",
           "That means the weekly practice is closely aligned with the actual content, language, and teaching sequence of the course.",
         ],
       },
@@ -171,6 +181,109 @@ function updateChatLayout() {
 
   const composerClearance = chatForm.offsetHeight + 24;
   chatPanel.style.setProperty("--chat-form-clearance", `${composerClearance}px`);
+}
+
+function randomBetween(min, max) {
+  return Math.random() * (max - min) + min;
+}
+
+function scheduleNextBubble() {
+  if (!launcherBubbleStream || reducedMotionQuery.matches) {
+    bubbleSpawnTimer = null;
+    return;
+  }
+
+  const nextDelay = randomBetween(180, 640);
+  bubbleSpawnTimer = window.setTimeout(() => {
+    spawnLauncherBubble();
+
+    if (Math.random() < 0.3) {
+      window.setTimeout(spawnLauncherBubble, randomBetween(90, 180));
+    }
+
+    scheduleNextBubble();
+  }, nextDelay);
+}
+
+function spawnLauncherBubble() {
+  if (!launcherBubbleStream || reducedMotionQuery.matches) {
+    return;
+  }
+
+  const bubble = document.createElement("span");
+  const bubbleSize = randomBetween(0.36, 1.02);
+  const bubbleRise = randomBetween(3.8, 5.8);
+  const bubbleDuration = randomBetween(2.2, 4.1);
+  const bubbleXStart = randomBetween(-0.45, 0.45);
+  const bubbleXEnd = bubbleXStart + randomBetween(-0.75, 0.75);
+
+  bubble.className = "chat-launcher-bubble";
+  bubble.style.setProperty("--bubble-size", `${bubbleSize.toFixed(2)}rem`);
+  bubble.style.setProperty("--bubble-rise", `${bubbleRise.toFixed(2)}rem`);
+  bubble.style.setProperty("--bubble-duration", `${bubbleDuration.toFixed(2)}s`);
+  bubble.style.setProperty("--bubble-x-start", `${bubbleXStart.toFixed(2)}rem`);
+  bubble.style.setProperty("--bubble-x-end", `${bubbleXEnd.toFixed(2)}rem`);
+  launcherBubbleStream.appendChild(bubble);
+
+  bubble.addEventListener("animationend", () => {
+    bubble.remove();
+  }, { once: true });
+}
+
+function startBubbleStream() {
+  if (!launcherBubbleStream || reducedMotionQuery.matches || bubbleSpawnTimer !== null) {
+    return;
+  }
+
+  spawnLauncherBubble();
+  scheduleNextBubble();
+}
+
+function stopBubbleStream() {
+  if (bubbleSpawnTimer !== null) {
+    window.clearTimeout(bubbleSpawnTimer);
+    bubbleSpawnTimer = null;
+  }
+
+  launcherBubbleStream?.replaceChildren();
+}
+
+function scheduleLauncherWiggle() {
+  if (!launcher || reducedMotionQuery.matches) {
+    return;
+  }
+
+  window.setTimeout(() => {
+    launcher.classList.add("is-wiggle");
+  }, 5000);
+}
+
+function maybeAutoOpenLauncherOnScroll() {
+  if (
+    hasAutoOpenedLauncher ||
+    !launcher ||
+    !heroSection ||
+    !desktopAutoOpenQuery.matches ||
+    !chatPanel?.hidden
+  ) {
+    lastScrollY = window.scrollY;
+    return;
+  }
+
+  const currentScrollY = window.scrollY;
+  const isScrollingDown = currentScrollY > lastScrollY;
+  const heroRect = heroSection.getBoundingClientRect();
+  const heroMidpoint = heroRect.top + heroRect.height / 2;
+
+  lastScrollY = currentScrollY;
+
+  if (!isScrollingDown || heroMidpoint > 0) {
+    return;
+  }
+
+  hasAutoOpenedLauncher = true;
+  launcher.click();
+  window.removeEventListener("scroll", maybeAutoOpenLauncherOnScroll);
 }
 
 function updateChatMode() {
@@ -379,7 +492,7 @@ function appendContactPrompt() {
   const message = document.createElement("article");
   message.className = "chat-message chat-message-assistant chat-cta";
   message.innerHTML =
-    '<p>If you want module-specific advice or a pilot conversation, the quickest next step is the contact form.</p><a href="#contact">Start a conversation</a>';
+    '<p>If you want course-specific advice or a pilot conversation, the quickest next step is the contact form.</p><a href="#contact">Start a conversation</a>';
   transcript.appendChild(message);
   updateChatMode();
   scrollTranscriptToBottom();
@@ -428,9 +541,24 @@ function openChat() {
   if (!launcher || !chatPanel) {
     return;
   }
+
+  if (chatPanelHideTimer) {
+    window.clearTimeout(chatPanelHideTimer);
+    chatPanelHideTimer = null;
+  }
+
+  if (chatPanelShowFrame) {
+    window.cancelAnimationFrame(chatPanelShowFrame);
+    chatPanelShowFrame = null;
+  }
+
   launcher.setAttribute("aria-expanded", "true");
   document.body.classList.add("chat-open");
   chatPanel.hidden = false;
+  chatPanelShowFrame = window.requestAnimationFrame(() => {
+    chatPanel.classList.add("is-visible");
+    chatPanelShowFrame = null;
+  });
   updateChatLayout();
   questionInput?.focus();
 }
@@ -439,9 +567,34 @@ function closeChat() {
   if (!launcher || !chatPanel) {
     return;
   }
+
+  if (chatPanelHideTimer) {
+    window.clearTimeout(chatPanelHideTimer);
+    chatPanelHideTimer = null;
+  }
+
+  if (chatPanelShowFrame) {
+    window.cancelAnimationFrame(chatPanelShowFrame);
+    chatPanelShowFrame = null;
+  }
+
   launcher.setAttribute("aria-expanded", "false");
   document.body.classList.remove("chat-open");
-  chatPanel.hidden = true;
+  chatPanel.classList.remove("is-visible");
+
+  if (reducedMotionQuery.matches) {
+    chatPanel.hidden = true;
+    launcher.focus();
+    return;
+  }
+
+  chatPanelHideTimer = window.setTimeout(() => {
+    if (!chatPanel.classList.contains("is-visible")) {
+      chatPanel.hidden = true;
+    }
+    chatPanelHideTimer = null;
+  }, CHAT_PANEL_TRANSITION_MS);
+
   launcher.focus();
 }
 
@@ -562,10 +715,35 @@ chatOpenLinks.forEach((link) => {
   });
 });
 
+launcher?.addEventListener("animationend", (event) => {
+  if (event.animationName === "chat-launcher-wiggle") {
+    launcher.classList.remove("is-wiggle");
+  }
+});
+
+if (typeof reducedMotionQuery.addEventListener === "function") {
+  reducedMotionQuery.addEventListener("change", (event) => {
+    if (event.matches) {
+      stopBubbleStream();
+      return;
+    }
+
+    startBubbleStream();
+  });
+}
+
 window.addEventListener("resize", () => {
   updateChatLayout();
   scrollTranscriptToBottom();
 });
 
+window.addEventListener("scroll", maybeAutoOpenLauncherOnScroll, { passive: true });
+
 updateChatMode();
 updateChatLayout();
+startBubbleStream();
+if (document.readyState === "complete") {
+  scheduleLauncherWiggle();
+} else {
+  window.addEventListener("load", scheduleLauncherWiggle, { once: true });
+}

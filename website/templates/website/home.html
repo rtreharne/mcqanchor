@@ -9,8 +9,6 @@
   <link rel="stylesheet" href="{% static 'website/css/styles.css' %}">
 </head>
 <body>
-  <a class="skip-link" href="#main-content">Skip to content</a>
-
   <header class="site-header">
     <nav class="site-nav" aria-label="Primary">
       <a class="brand" href="#top" aria-label="MCQ Anchor home">
@@ -87,7 +85,7 @@
             {% for error in form.institution.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
           </div>
           <div class="field">
-            <label for="{{ form.module_or_subject.id_for_label }}">Module or subject area</label>
+            <label for="{{ form.module_or_subject.id_for_label }}">Course or subject area</label>
             {{ form.module_or_subject }}
             {% for error in form.module_or_subject.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
           </div>
@@ -115,8 +113,8 @@
   </footer>
 
   <button class="chat-launcher" type="button" aria-expanded="false" aria-controls="chat-panel">
-    <span class="chat-launcher-mark" aria-hidden="true">⚓</span>
-    Ask a question
+    <span class="chat-launcher-label">Ask Anything</span>
+    <span class="chat-launcher-bubbles" aria-hidden="true"></span>
   </button>
 
   <section class="chat-panel" id="chat-panel" aria-label="MCQ Anchor guide" hidden>
@@ -155,7 +153,7 @@
       </div>
       <article class="walkthrough-card">
         <p class="walkthrough-stage">Stage 1</p>
-        <h4 class="walkthrough-step-title">Starting the module</h4>
+        <h4 class="walkthrough-step-title">Starting the course</h4>
         <div class="walkthrough-body"></div>
       </article>
       <div class="walkthrough-actions">
