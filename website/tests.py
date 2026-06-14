@@ -8,7 +8,7 @@ from django.core.management import call_command
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
-from .models import PilotEnquiry
+from .models import ChatConversation, ChatMessage, PilotEnquiry
 
 
 class HomePageTests(TestCase):
@@ -106,6 +106,75 @@ class AdminBootstrapCommandTests(TestCase):
 
         user.refresh_from_db()
         self.assertTrue(user.check_password("new-secret-pass"))
+
+
+class AdminCsvExportTests(TestCase):
+    def setUp(self):
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="admin",
+            email="admin@example.com",
+            password="password123",
+        )
+        self.client.force_login(self.admin_user)
+
+    def test_pilot_enquiries_can_be_exported_as_csv(self):
+        enquiry = PilotEnquiry.objects.create(
+            name="Alex Morgan",
+            email="alex@example.com",
+            institution="Northshore University",
+            module_or_subject="Biochemistry",
+            message="Interested in a pilot.",
+        )
+
+        response = self.client.post(
+            reverse("admin:website_pilotenquiry_changelist"),
+            {
+                "action": "export_selected_as_csv",
+                "_selected_action": [str(enquiry.pk)],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv")
+        self.assertIn("pilot-enquiries.csv", response["Content-Disposition"])
+        content = response.content.decode("utf-8")
+        self.assertIn("Alex Morgan", content)
+        self.assertIn("alex@example.com", content)
+        self.assertIn("Biochemistry", content)
+
+    def test_chat_conversations_can_be_exported_as_csv(self):
+        conversation = ChatConversation.objects.create(
+            session_key="session-123",
+            ip_address="127.0.0.1",
+            user_agent="Test Browser",
+        )
+        ChatMessage.objects.create(
+            conversation=conversation,
+            role=ChatMessage.Role.USER,
+            content="How does validation work?",
+        )
+        ChatMessage.objects.create(
+            conversation=conversation,
+            role=ChatMessage.Role.ASSISTANT,
+            content="It uses a short controlled paper-based MCQ.",
+        )
+
+        response = self.client.post(
+            reverse("admin:website_chatconversation_changelist"),
+            {
+                "action": "export_selected_as_csv",
+                "_selected_action": [str(conversation.pk)],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv")
+        self.assertIn("chat-conversations.csv", response["Content-Disposition"])
+        content = response.content.decode("utf-8")
+        self.assertIn(str(conversation.public_id), content)
+        self.assertIn("session-123", content)
+        self.assertIn("How does validation work?", content)
+        self.assertIn("assistant: It uses a short controlled paper-based MCQ.", content)
 
 
 @override_settings(
