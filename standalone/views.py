@@ -84,7 +84,7 @@ def home(request: HttpRequest) -> HttpResponse:
 
 
 def login_view(request: HttpRequest) -> HttpResponse:
-    form = EmailOrUsernameAuthenticationForm(request, data=request.POST or None)
+    form = EmailOrUsernameAuthenticationForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
         identifier = form.cleaned_data["username"].strip()
         password = form.cleaned_data["password"]

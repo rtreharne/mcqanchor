@@ -2,7 +2,6 @@ from datetime import timedelta
 
 from django import forms
 from django.conf import settings
-from django.contrib.auth.forms import AuthenticationForm
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -21,8 +20,9 @@ from standalone.models import (
 from standalone.services.content import SUPPORTED_EXTENSIONS
 
 
-class EmailOrUsernameAuthenticationForm(AuthenticationForm):
-    username = forms.CharField(label="Email or username")
+class EmailOrUsernameAuthenticationForm(forms.Form):
+    username = forms.CharField(label="Email or username", max_length=150)
+    password = forms.CharField(label="Password", widget=forms.PasswordInput())
 
 
 class TeacherInvitationForm(forms.ModelForm):

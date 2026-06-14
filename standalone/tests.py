@@ -75,6 +75,26 @@ class StandaloneFlowTests(TestCase):
         invitation.refresh_from_db()
         self.assertIsNotNone(invitation.accepted_at)
 
+    def test_teacher_can_log_in_with_email_address(self):
+        response = self.client.post(
+            reverse("standalone:login"),
+            {
+                "username": "teacher@example.com",
+                "password": "password123",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("standalone:dashboard"))
+
+    def test_logout_requires_post_and_nav_uses_post_flow(self):
+        self.client.force_login(self.teacher)
+        get_response = self.client.get(reverse("standalone:logout"))
+        self.assertEqual(get_response.status_code, 405)
+
+        post_response = self.client.post(reverse("standalone:logout"))
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(post_response.url, reverse("website:home"))
+
     def test_student_invitation_acceptance_creates_enrollment(self):
         course = self.create_course()
         self.client.force_login(self.teacher)
@@ -165,6 +185,38 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(course.question_bank_items.filter(bank_type=QuestionBankItem.BankType.PRACTICE).exists())
         self.assertTrue(course.question_bank_items.filter(bank_type=QuestionBankItem.BankType.VALIDATION).exists())
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_question_bank_generation_falls_back_when_openai_output_is_not_json(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile("notes.txt", b"Approved content for fallback generation.", content_type="text/plain"),
+            original_filename="notes.txt",
+            extension=".txt",
+            include_in_generation=True,
+            processing_status=ContentAsset.ProcessingStatus.PENDING,
+        )
+        from standalone.services.content import ingest_content_asset
+
+        ingest_content_asset(asset)
+        self.client.force_login(self.teacher)
+
+        class DummyResponse:
+            output_text = "Here is your question as requested."
+
+        with self.settings(OPENAI_API_KEY="test-key"):
+            with self.subTest("fallback generation"):
+                from unittest.mock import patch
+
+                with patch("standalone.services.questions.OpenAI") as mock_client:
+                    mock_client.return_value.responses.create.return_value = DummyResponse()
+                    response = self.client.post(reverse("standalone:generate_course_bank", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(course.question_bank_items.filter(bank_type=QuestionBankItem.BankType.PRACTICE).exists())
 
     def test_practice_quiz_does_not_repeat_question_for_student(self):
         course = self.create_course()

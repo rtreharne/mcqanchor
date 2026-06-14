@@ -64,6 +64,20 @@ select {
 .app-nav-links {
   display: flex;
   gap: 1rem;
+  align-items: center;
+}
+
+.inline-form {
+  margin: 0;
+}
+
+.nav-link-button {
+  padding: 0;
+  border: none;
+  background: none;
+  color: #155bc8;
+  font: inherit;
+  cursor: pointer;
 }
 
 .app-shell {

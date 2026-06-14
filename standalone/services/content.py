@@ -146,9 +146,12 @@ def derive_learning_objectives(text: str, max_items: int = 8) -> list[str]:
 def generate_embeddings(texts: list[str]) -> list[list[float]]:
     if not settings.OPENAI_API_KEY:
         return [[] for _ in texts]
-    client = OpenAI(api_key=settings.OPENAI_API_KEY)
-    response = client.embeddings.create(model=settings.OPENAI_EMBEDDING_MODEL, input=texts)
-    return [item.embedding for item in response.data]
+    try:
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        response = client.embeddings.create(model=settings.OPENAI_EMBEDDING_MODEL, input=texts)
+        return [item.embedding for item in response.data]
+    except Exception:  # noqa: BLE001
+        return [[] for _ in texts]
 
 
 def ingest_content_asset(asset: ContentAsset) -> None:

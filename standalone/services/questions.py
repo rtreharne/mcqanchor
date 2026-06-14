@@ -1,6 +1,7 @@
 import hashlib
 import json
 import random
+import re
 
 from django.conf import settings
 from openai import OpenAI
@@ -46,7 +47,24 @@ Content:
             {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
         ],
     )
-    return json.loads(response.output_text)
+    raw_output = (getattr(response, "output_text", "") or "").strip()
+    if not raw_output:
+        raise ValueError("OpenAI returned an empty question payload.")
+
+    try:
+        return json.loads(raw_output)
+    except json.JSONDecodeError:
+        pass
+
+    fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_output, re.DOTALL)
+    if fenced_match:
+        return json.loads(fenced_match.group(1))
+
+    object_match = re.search(r"\{.*\}", raw_output, re.DOTALL)
+    if object_match:
+        return json.loads(object_match.group(0))
+
+    raise ValueError("OpenAI did not return parseable JSON for question generation.")
 
 
 def generate_question_banks(course: Course, *, approve: bool = False) -> int:
@@ -58,11 +76,12 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
         objective = (
             LearningObjective.objects.filter(course=course, block=chunk.block).order_by("created_at").first()
         )
-        payload = (
-            _openai_question_payload(chunk, objective, config.distractor_count)
-            if settings.OPENAI_API_KEY
-            else _fallback_question_payload(chunk, objective, config.distractor_count)
-        )
+        payload = _fallback_question_payload(chunk, objective, config.distractor_count)
+        if settings.OPENAI_API_KEY:
+            try:
+                payload = _openai_question_payload(chunk, objective, config.distractor_count)
+            except (ValueError, json.JSONDecodeError, KeyError, TypeError):
+                payload = _fallback_question_payload(chunk, objective, config.distractor_count)
 
         stem = payload["stem"].strip()
         if any(char.isdigit() for char in stem) and any(token in stem.lower() for token in ("calculate", "solve", "compute")):
@@ -108,4 +127,3 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
         question_count += 2
 
     return question_count
-
