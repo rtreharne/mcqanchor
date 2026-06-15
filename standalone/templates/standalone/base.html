@@ -4,20 +4,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}MCQ Anchor Standalone{% endblock %}</title>
-  <link rel="icon" href="{% static 'website/images/mcq-anchor-logo.png' %}">
+  <title>{% block title %}MCQ Anchor{% endblock %}</title>
   <link rel="stylesheet" href="{% static 'standalone/css/app.css' %}">
 </head>
 <body>
   <header class="app-header">
     <nav class="app-nav">
-      <a class="app-brand" href="{% if user.is_authenticated %}{% url 'standalone:dashboard' %}{% else %}{% url 'website:home' %}{% endif %}">MCQ Anchor</a>
+      <a class="app-brand" href="{% if user.is_authenticated %}{% url 'standalone:dashboard' %}{% else %}{% url 'website:home' %}{% endif %}" aria-label="MCQ Anchor home">
+        <img src="{% static 'website/images/mcq-anchor-logo.png' %}" alt="MCQ Anchor logo">
+      </a>
       <div class="app-nav-links">
         {% if user.is_authenticated %}
-          <a href="{% url 'standalone:dashboard' %}">Dashboard</a>
+          <span class="app-user-status">Logged in as: {{ user.email|default:user.username }}</span>
           <form method="post" action="{% url 'standalone:logout' %}" class="inline-form">
             {% csrf_token %}
-            <button type="submit" class="nav-link-button">Sign out</button>
+            <button type="submit" class="nav-link-button">Log out</button>
           </form>
         {% else %}
           <a href="{% url 'website:home' %}">Public site</a>

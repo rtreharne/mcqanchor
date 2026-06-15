@@ -60,6 +60,9 @@ DJANGO_ADMIN_PASSWORD=
 OPENAI_API_KEY=your-openai-api-key
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+CELERY_BROKER_URL=
+CELERY_RESULT_BACKEND=
+CELERY_TASK_ALWAYS_EAGER=False
 CONTACT_EMAIL=replace-me@example.com
 EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
 DEFAULT_FROM_EMAIL=no-reply@mcqanchor.local
@@ -83,7 +86,15 @@ If you are switching from the earlier marketing-site-only branch, use a fresh SQ
 python manage.py runserver
 ```
 
-8. Run tests:
+8. If you want background processing for content ingestion and learning-objective generation, start a Celery worker and set a broker URL such as Redis in `.env`:
+
+```bash
+celery -A config worker --loglevel=info
+```
+
+If `CELERY_BROKER_URL` is left blank, the app will process uploads inline instead.
+
+9. Run tests:
 
 ```bash
 python manage.py test
@@ -97,6 +108,7 @@ Then open:
 ## Notes
 
 - The chatbot is server-side only. `OPENAI_API_KEY` is never exposed to browser code.
+- Standalone learning objectives and block/course summaries use the OpenAI API when `OPENAI_API_KEY` is set, with heuristic fallback if the API is unavailable.
 - The site stores pilot enquiries in SQLite via the `PilotEnquiry` model.
 - The standalone app uses a custom Django user model plus course, enrolment, content-ingestion, question-bank, practice, and validation tables under the `standalone` app.
 - Supported standalone upload types are `.html`, `.docx`, `.pdf`, `.txt`, `.R`, `.py`, `.ipynb`, `.Rmd`, `.md`, `.pptx`, and `.xlsx`.

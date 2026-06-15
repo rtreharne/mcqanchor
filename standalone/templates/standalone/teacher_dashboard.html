@@ -15,13 +15,12 @@
   </div>
   <div class="card-grid">
     {% for course in courses %}
-      <article class="card">
+      <a class="card course-card" href="{% url 'standalone:course_detail' course.pk %}">
         <h2>{{ course.title }}</h2>
         <p>{{ course.summary|default:"No summary yet." }}</p>
         <p><strong>Questions:</strong> {{ course.question_bank_items.count }}</p>
         <p><strong>Students:</strong> {{ course.enrollments.count }}</p>
-        <a href="{% url 'standalone:course_detail' course.pk %}">Open course</a>
-      </article>
+      </a>
     {% empty %}
       <p>No courses yet.</p>
     {% endfor %}

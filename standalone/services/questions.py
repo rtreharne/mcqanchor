@@ -74,7 +74,7 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
 
     for chunk in ContentChunk.objects.filter(course=course, asset__include_in_generation=True).select_related("block"):
         objective = (
-            LearningObjective.objects.filter(course=course, block=chunk.block).order_by("created_at").first()
+            LearningObjective.objects.filter(course=course, block=chunk.block).order_by("position", "pk").first()
         )
         payload = _fallback_question_payload(chunk, objective, config.distractor_count)
         if settings.OPENAI_API_KEY:

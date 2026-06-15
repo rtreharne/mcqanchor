@@ -6,18 +6,21 @@ from django.contrib.auth import authenticate, login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LogoutView
 from django.db import transaction
-from django.http import FileResponse, Http404, HttpRequest, HttpResponse
+from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 
 from standalone.forms import (
+    BlockSummaryInlineForm,
+    BlockTitleInlineForm,
     ContentAssetForm,
     CourseAllowedEmailForm,
     CourseBlockForm,
     CourseConfigForm,
     CourseForm,
     EmailOrUsernameAuthenticationForm,
+    LearningObjectiveInlineForm,
     MagicLinkCreateForm,
     MagicLinkEmailForm,
     SelfEnrolForm,
@@ -36,6 +39,7 @@ from standalone.models import (
     CourseConfig,
     CourseMagicLink,
     Enrollment,
+    LearningObjective,
     PracticeAttempt,
     PracticeAttemptQuestion,
     QuestionBankItem,
@@ -48,11 +52,18 @@ from standalone.models import (
     ValidationEvent,
     ValidationPack,
 )
-from standalone.services.content import ingest_content_asset
+from standalone.services.content import (
+    delete_learning_objective_and_resequence,
+    ingest_content_asset,
+    move_learning_objective,
+    regenerate_block_descriptions_and_objectives,
+    regenerate_course_descriptions_and_objectives,
+)
 from standalone.services.metrics import refresh_enrollment_metrics
 from standalone.services.notifications import send_logged_email
 from standalone.services.questions import generate_question_banks
 from standalone.services.validation_pdf import build_validation_pack_pdf
+from standalone.tasks import process_content_asset_task, regenerate_block_content_task, regenerate_course_content_task
 
 
 def _is_teacher(user: User) -> bool:
@@ -61,6 +72,10 @@ def _is_teacher(user: User) -> bool:
 
 def _is_student(user: User) -> bool:
     return user.is_authenticated and user.role == User.Role.STUDENT
+
+
+def _celery_is_enabled() -> bool:
+    return bool(settings.CELERY_BROKER_URL or settings.CELERY_TASK_ALWAYS_EAGER)
 
 
 def _teacher_course_or_404(user: User, course_id: int) -> Course:
@@ -216,6 +231,112 @@ def course_detail(request: HttpRequest, course_id: int) -> HttpResponse:
         "allowed_emails": course.allowed_emails.all(),
     }
     return render(request, "standalone/course_detail.html", context)
+
+
+@login_required
+def update_block_field(request: HttpRequest, block_id: int, field_name: str) -> JsonResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id)
+    _teacher_course_or_404(request.user, block.course_id)
+
+    form_class = {
+        "title": BlockTitleInlineForm,
+        "summary": BlockSummaryInlineForm,
+    }.get(field_name)
+    if form_class is None:
+        raise Http404
+
+    form = form_class(request.POST, instance=block)
+    if not form.is_valid():
+        return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
+
+    updated_block = form.save()
+    display_value = getattr(updated_block, field_name) or ("No summary." if field_name == "summary" else "")
+    return JsonResponse({"ok": True, "value": getattr(updated_block, field_name), "display_value": display_value})
+
+
+@login_required
+def update_learning_objective(request: HttpRequest, objective_id: int) -> JsonResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    objective = get_object_or_404(LearningObjective.objects.select_related("course"), pk=objective_id)
+    _teacher_course_or_404(request.user, objective.course_id)
+
+    form = LearningObjectiveInlineForm(request.POST, instance=objective)
+    if not form.is_valid():
+        return JsonResponse({"ok": False, "errors": form.errors.get("text", form.non_field_errors())}, status=400)
+
+    updated_objective = form.save()
+    return JsonResponse({"ok": True, "value": updated_objective.text, "display_value": updated_objective.text})
+
+
+@login_required
+def move_learning_objective_view(request: HttpRequest, objective_id: int, direction: str) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    objective = get_object_or_404(LearningObjective.objects.select_related("course", "block"), pk=objective_id)
+    course = _teacher_course_or_404(request.user, objective.course_id)
+    moved = move_learning_objective(objective, direction)
+    if moved:
+        messages.success(request, "Learning objective order updated.")
+    else:
+        messages.info(request, "Learning objective could not be moved further.")
+    return redirect("standalone:course_detail", course.pk)
+
+
+@login_required
+def delete_learning_objective_view(request: HttpRequest, objective_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    objective = get_object_or_404(LearningObjective.objects.select_related("course", "block"), pk=objective_id)
+    course = _teacher_course_or_404(request.user, objective.course_id)
+    delete_learning_objective_and_resequence(objective)
+    messages.success(request, "Learning objective deleted.")
+    return redirect("standalone:course_detail", course.pk)
+
+
+@login_required
+def regenerate_block_content(request: HttpRequest, block_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id)
+    course = _teacher_course_or_404(request.user, block.course_id)
+    if _celery_is_enabled():
+        regenerate_block_content_task.delay(block.pk)
+        messages.success(request, f"Regeneration for {block.title} has been queued.")
+        return redirect("standalone:course_detail", course.pk)
+
+    refreshed = regenerate_block_descriptions_and_objectives(block)
+    if refreshed["blocks"] == 0:
+        messages.info(request, f"No included content was available to regenerate {block.title}.")
+    else:
+        messages.success(
+            request,
+            f"Regenerated {block.title} and refreshed {refreshed['objectives']} learning objective(s).",
+        )
+    return redirect("standalone:course_detail", course.pk)
+
+
+@login_required
+def regenerate_course_content(request: HttpRequest, course_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    if _celery_is_enabled():
+        regenerate_course_content_task.delay(course.pk)
+        messages.success(request, "Regeneration has been queued. Refresh this page shortly to see updated descriptions and learning objectives.")
+        return redirect("standalone:course_detail", course.pk)
+
+    refreshed = regenerate_course_descriptions_and_objectives(course)
+    if refreshed["blocks"] == 0:
+        messages.info(request, "No included content was available to regenerate descriptions and learning objectives.")
+    else:
+        messages.success(
+            request,
+            f"Regenerated descriptions for {refreshed['blocks']} block(s) and refreshed {refreshed['objectives']} learning objective(s).",
+        )
+    return redirect("standalone:course_detail", course.pk)
 
 
 @login_required
@@ -430,8 +551,13 @@ def asset_upload(request: HttpRequest, block_id: int) -> HttpResponse:
     form = ContentAssetForm(request.POST or None, request.FILES or None)
     if request.method == "POST" and form.is_valid():
         asset = form.save(block=block, uploaded_by=request.user)
+        if _celery_is_enabled():
+            process_content_asset_task.delay(asset.pk)
+            messages.success(request, "Content uploaded. Processing has been queued and summaries/objectives will refresh when it completes.")
+            return redirect("standalone:course_detail", course.pk)
         try:
             ingest_content_asset(asset)
+            regenerate_course_descriptions_and_objectives(course)
             messages.success(request, "Content uploaded and processed.")
         except Exception as exc:  # noqa: BLE001
             asset.processing_status = ContentAsset.ProcessingStatus.FAILED

@@ -2,9 +2,11 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 from bs4 import BeautifulSoup
 from django.conf import settings
+from django.db import transaction
 from markdown import markdown
 from openai import OpenAI
 from openpyxl import load_workbook
@@ -122,11 +124,51 @@ def chunk_text(text: str, target_size: int = 1200) -> list[str]:
     return chunks
 
 
+def sanitize_learning_objective(text: str) -> str:
+    value = text.strip().strip("\"'`")
+    value = value.replace("\u2013", "-").replace("\u2014", "-").replace("\u2212", "-")
+    value = value.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
+    value = re.sub(r"^\s*[•●◦▪·*-]+\s*", "", value)
+    value = re.sub(r"^\s*(?:learning\s*objective|objective|outcome|lo)\s*[:#-]?\s*\d+[a-z]?\s*[:.)-]?\s*", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^\s*\(?\d+[a-z]?\)?\s*[.)-]\s*", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^\s*\(?[ivxlcdm]+\)?\s*[.)-]\s*", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^\s*[A-Z]\s*[.)-]\s*", "", value)
+    value = value.strip(" -:\t")
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"[;:,.\-]+$", "", value)
+    if not value:
+        return ""
+    if value[0].isalpha():
+        value = value[0].upper() + value[1:]
+    return value
+
+
+def sanitize_summary(text: str) -> str:
+    value = normalize_text(text)
+    value = value.replace("\u2013", "-").replace("\u2014", "-")
+    value = value.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
+    value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+    value = re.sub(r"[ \t]+", " ", value)
+    return value.strip()
+
+
+def _dedupe_texts(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        key = re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def derive_learning_objectives(text: str, max_items: int = 8) -> list[str]:
     candidates = []
     for line in text.splitlines():
-        stripped = line.strip(" -*\t")
-        if 40 <= len(stripped) <= 180 and stripped not in candidates:
+        stripped = sanitize_learning_objective(line)
+        if 30 <= len(stripped) <= 180 and stripped not in candidates:
             candidates.append(stripped)
         if len(candidates) >= max_items:
             break
@@ -134,13 +176,224 @@ def derive_learning_objectives(text: str, max_items: int = 8) -> list[str]:
     if not candidates:
         sentences = re.split(r"(?<=[.!?])\s+", text)
         for sentence in sentences:
-            stripped = sentence.strip()
-            if 5 <= len(stripped) <= 160:
+            stripped = sanitize_learning_objective(sentence)
+            if 30 <= len(stripped) <= 160:
                 candidates.append(stripped)
             if len(candidates) >= max_items:
                 break
 
-    return candidates[:max_items]
+    return _dedupe_texts(candidates)[:max_items]
+
+
+def _fallback_summary(text: str, max_sentences: int = 2, max_length: int = 320) -> str:
+    sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", normalize_text(text)) if segment.strip()]
+    summary = " ".join(sentences[:max_sentences]).strip()
+    if not summary:
+        summary = normalize_text(text)[:max_length]
+    if len(summary) > max_length:
+        summary = summary[: max_length - 1].rsplit(" ", 1)[0].rstrip(",;:-") + "."
+    if summary and summary[-1] not in ".!?":
+        summary += "."
+    return sanitize_summary(summary)
+
+
+def _parse_json_object(raw_output: str) -> dict[str, Any]:
+    if not raw_output:
+        raise ValueError("OpenAI returned an empty payload.")
+    try:
+        return json.loads(raw_output)
+    except json.JSONDecodeError:
+        pass
+
+    fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_output, re.DOTALL)
+    if fenced_match:
+        return json.loads(fenced_match.group(1))
+
+    object_match = re.search(r"\{.*\}", raw_output, re.DOTALL)
+    if object_match:
+        return json.loads(object_match.group(0))
+
+    raise ValueError("OpenAI did not return parseable JSON.")
+
+
+def _openai_block_content_payload(block_title: str, text: str, max_items: int) -> dict[str, Any]:
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    prompt = f"""
+Summarise the teaching content below for an educator-facing course authoring workflow.
+
+Return strict JSON with exactly these keys:
+- summary: one or two sentences in plain English
+- learning_objectives: an array of 3 to {max_items} concise learning objectives
+
+Rules:
+- no numbering or bullets in the output
+- no ambiguous references such as "this", "that", "it", or "etc."
+- each learning objective should start with a clear action verb
+- remove odd characters and formatting noise
+- keep the wording specific enough to make sense on its own
+
+Block title:
+{block_title}
+
+Content:
+{text[:12000]}
+""".strip()
+    response = client.responses.create(
+        model=settings.OPENAI_MODEL,
+        input=[
+            {"role": "system", "content": [{"type": "input_text", "text": "Return only valid JSON."}]},
+            {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+        ],
+    )
+    return _parse_json_object((getattr(response, "output_text", "") or "").strip())
+
+
+def summarize_block_content(block_title: str, text: str, max_items: int = 6) -> tuple[str, list[str]]:
+    fallback_summary = _fallback_summary(text)
+    fallback_objectives = derive_learning_objectives(text, max_items=max_items)
+
+    summary = fallback_summary
+    objectives = fallback_objectives
+
+    if settings.OPENAI_API_KEY:
+        try:
+            payload = _openai_block_content_payload(block_title, text, max_items)
+            summary = sanitize_summary(str(payload.get("summary", ""))) or fallback_summary
+            objective_candidates = payload.get("learning_objectives", [])
+            if isinstance(objective_candidates, list):
+                objectives = _dedupe_texts(
+                    [
+                        sanitized
+                        for item in objective_candidates
+                        if isinstance(item, str)
+                        for sanitized in [sanitize_learning_objective(item)]
+                        if sanitized
+                    ]
+                )[:max_items] or fallback_objectives
+        except Exception:  # noqa: BLE001
+            summary = fallback_summary
+            objectives = fallback_objectives
+
+    return summary, objectives
+
+
+def _asset_text_for_regeneration(asset: ContentAsset) -> str:
+    return asset.extracted_text or extract_text_from_asset(asset)
+
+
+def resequence_learning_objectives(block, objectives: list[LearningObjective] | None = None) -> list[LearningObjective]:
+    objectives = objectives or list(block.learning_objectives.order_by("position", "pk"))
+    for index, objective in enumerate(objectives, start=1):
+        objective.position = index
+        objective.code = f"{block.order}.{index}"
+    if objectives:
+        LearningObjective.objects.bulk_update(objectives, ["position", "code"])
+    return objectives
+
+
+def _replace_block_objectives(block, source_asset: ContentAsset, objective_texts: list[str]) -> int:
+    existing = list(block.learning_objectives.order_by("position", "pk"))
+    created_or_updated = 0
+    for index, text in enumerate(objective_texts, start=1):
+        defaults = {
+            "course": block.course,
+            "block": block,
+            "source_asset": source_asset,
+            "position": index,
+            "code": f"{block.order}.{index}",
+            "text": text,
+        }
+        if index <= len(existing):
+            objective = existing[index - 1]
+            changed = False
+            for field, value in defaults.items():
+                if getattr(objective, field) != value:
+                    setattr(objective, field, value)
+                    changed = True
+            if changed:
+                objective.save(update_fields=["course", "block", "source_asset", "position", "code", "text", "updated_at"])
+            created_or_updated += 1
+            continue
+
+        LearningObjective.objects.create(**defaults)
+        created_or_updated += 1
+
+    for objective in existing[len(objective_texts) :]:
+        objective.delete()
+
+    return created_or_updated
+
+
+def _refresh_course_summary_from_blocks(course) -> bool:
+    course_fragments = [
+        f"{block.title}: {block.summary}"
+        for block in course.blocks.all()
+        if block.summary.strip()
+    ]
+    if not course_fragments:
+        return False
+
+    course_summary, _ = summarize_block_content(course.title, "\n\n".join(course_fragments), max_items=4)
+    course.summary = course_summary
+    course.save(update_fields=["summary", "updated_at"])
+    return True
+
+
+def regenerate_block_descriptions_and_objectives(block) -> dict[str, int]:
+    assets = [asset for asset in block.assets.all() if asset.include_in_generation]
+    if not assets:
+        return {"blocks": 0, "objectives": 0}
+
+    texts = [text for asset in assets if (text := _asset_text_for_regeneration(asset))]
+    combined_text = normalize_text("\n\n".join(texts))
+    if not combined_text:
+        return {"blocks": 0, "objectives": 0}
+
+    block_summary, objectives = summarize_block_content(block.title, combined_text)
+    block.summary = block_summary
+    block.save(update_fields=["summary", "updated_at"])
+    objective_count = _replace_block_objectives(block, assets[0], objectives)
+    _refresh_course_summary_from_blocks(block.course)
+    return {"blocks": 1, "objectives": objective_count}
+
+
+@transaction.atomic
+def move_learning_objective(objective: LearningObjective, direction: str) -> bool:
+    objectives = list(objective.block.learning_objectives.order_by("position", "pk"))
+    try:
+        current_index = next(index for index, item in enumerate(objectives) if item.pk == objective.pk)
+    except StopIteration:
+        return False
+
+    if direction == "up" and current_index > 0:
+        swap_index = current_index - 1
+    elif direction == "down" and current_index < len(objectives) - 1:
+        swap_index = current_index + 1
+    else:
+        return False
+
+    objectives[current_index], objectives[swap_index] = objectives[swap_index], objectives[current_index]
+    resequence_learning_objectives(objective.block, objectives)
+    return True
+
+
+@transaction.atomic
+def delete_learning_objective_and_resequence(objective: LearningObjective) -> None:
+    block = objective.block
+    objective.delete()
+    resequence_learning_objectives(block)
+
+
+def regenerate_course_descriptions_and_objectives(course) -> dict[str, int]:
+    block_count = 0
+    objective_count = 0
+
+    for block in course.blocks.prefetch_related("assets", "learning_objectives").all():
+        refreshed = regenerate_block_descriptions_and_objectives(block)
+        block_count += refreshed["blocks"]
+        objective_count += refreshed["objectives"]
+
+    return {"blocks": block_count, "objectives": objective_count}
 
 
 def generate_embeddings(texts: list[str]) -> list[list[float]]:
@@ -179,12 +432,14 @@ def ingest_content_asset(asset: ContentAsset) -> None:
             checksum=hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
         )
 
-    objectives = derive_learning_objectives(extracted_text)
+    _, objectives = summarize_block_content(asset.block.title, extracted_text)
+    objectives = [text for text in objectives if text]
     for index, objective in enumerate(objectives, start=1):
         LearningObjective.objects.create(
             course=asset.block.course,
             block=asset.block,
             source_asset=asset,
+            position=index,
             code=f"{asset.block.order}.{index}",
             text=objective,
         )

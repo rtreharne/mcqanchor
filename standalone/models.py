@@ -260,11 +260,12 @@ class LearningObjective(TimeStampedModel):
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="learning_objectives")
     block = models.ForeignKey(CourseBlock, on_delete=models.CASCADE, related_name="learning_objectives")
     source_asset = models.ForeignKey(ContentAsset, on_delete=models.CASCADE, related_name="learning_objectives")
+    position = models.PositiveSmallIntegerField(default=1)
     code = models.CharField(max_length=50)
     text = models.TextField()
 
     class Meta:
-        ordering = ["block__order", "code"]
+        ordering = ["block__order", "position", "pk"]
 
     def __str__(self) -> str:
         return f"{self.code}: {self.text[:60]}"

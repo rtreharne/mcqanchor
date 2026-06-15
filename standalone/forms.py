@@ -12,12 +12,13 @@ from standalone.models import (
     CourseBlock,
     CourseConfig,
     CourseMagicLink,
+    LearningObjective,
     StudentInvitation,
     TeacherInvitation,
     User,
     ValidationEvent,
 )
-from standalone.services.content import SUPPORTED_EXTENSIONS
+from standalone.services.content import SUPPORTED_EXTENSIONS, sanitize_learning_objective, sanitize_summary
 
 
 class EmailOrUsernameAuthenticationForm(forms.Form):
@@ -134,6 +135,39 @@ class CourseBlockForm(forms.ModelForm):
     class Meta:
         model = CourseBlock
         fields = ["title", "summary", "order"]
+
+
+class BlockTitleInlineForm(forms.ModelForm):
+    class Meta:
+        model = CourseBlock
+        fields = ["title"]
+
+    def clean_title(self):
+        title = self.cleaned_data["title"].strip()
+        if not title:
+            raise forms.ValidationError("Please enter a block title.")
+        return title
+
+
+class BlockSummaryInlineForm(forms.ModelForm):
+    class Meta:
+        model = CourseBlock
+        fields = ["summary"]
+
+    def clean_summary(self):
+        return sanitize_summary(self.cleaned_data["summary"])
+
+
+class LearningObjectiveInlineForm(forms.ModelForm):
+    class Meta:
+        model = LearningObjective
+        fields = ["text"]
+
+    def clean_text(self):
+        text = sanitize_learning_objective(self.cleaned_data["text"])
+        if not text:
+            raise forms.ValidationError("Please enter a learning objective.")
+        return text
 
 
 class ContentAssetForm(forms.ModelForm):
