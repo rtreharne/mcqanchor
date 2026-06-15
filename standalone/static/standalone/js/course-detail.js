@@ -26,11 +26,133 @@ function restoreExpandedBlocks(expandedIds, root = document) {
   });
 }
 
+function expandBlockPathFromHash(root = document, options = {}) {
+  const shouldScroll = options.scroll !== false;
+  const targetId = window.location.hash ? decodeURIComponent(window.location.hash.slice(1)) : "";
+  if (!targetId) {
+    return;
+  }
+
+  let currentTarget = root.getElementById?.(targetId) || document.getElementById(targetId);
+  if (!currentTarget) {
+    return;
+  }
+
+  while (currentTarget) {
+    const toggle = root.querySelector(`[data-block-toggle][data-block-target="${currentTarget.id}"]`);
+    if (!toggle) {
+      break;
+    }
+    setBlockExpanded(toggle, currentTarget, true);
+    const parentContent = toggle.closest(".block-card-content");
+    currentTarget = parentContent && parentContent.id ? parentContent : null;
+  }
+
+  const scrollTarget = root.getElementById?.(targetId) || document.getElementById(targetId);
+  if (shouldScroll) {
+    scrollTarget?.scrollIntoView({ block: "start", behavior: "auto" });
+  }
+}
+
+let pendingAssetRefreshHandle = null;
+let pendingAssetRefreshInFlight = false;
+let courseDetailStatusSyncInFlight = false;
+let courseDetailRefreshRequestSequence = 0;
+let courseDetailLatestRefreshRequest = 0;
+
+function beginCourseDetailRefreshRequest() {
+  courseDetailRefreshRequestSequence += 1;
+  courseDetailLatestRefreshRequest = courseDetailRefreshRequestSequence;
+  return courseDetailRefreshRequestSequence;
+}
+
+function isLatestCourseDetailRefreshRequest(requestId) {
+  return requestId === courseDetailLatestRefreshRequest;
+}
+
+function hasPendingCourseDetailIndicators(root = document) {
+  return Boolean(root.querySelector("[data-processing-asset='true'], [data-regenerating-block='true']"));
+}
+
+function schedulePendingAssetRefresh(root = document) {
+  if (pendingAssetRefreshHandle) {
+    window.clearTimeout(pendingAssetRefreshHandle);
+    pendingAssetRefreshHandle = null;
+  }
+
+  if (!hasPendingCourseDetailIndicators(root)) {
+    return;
+  }
+
+  pendingAssetRefreshHandle = window.setTimeout(async () => {
+    if (pendingAssetRefreshInFlight) {
+      schedulePendingAssetRefresh(document);
+      return;
+    }
+
+    pendingAssetRefreshInFlight = true;
+    const expandedIds = getExpandedBlockIds(document);
+    const requestId = beginCourseDetailRefreshRequest();
+
+    try {
+      const response = await fetch(`${window.location.pathname}${window.location.search}`, {
+        headers: {
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        credentials: "same-origin",
+      });
+      const responseText = await response.text();
+      if (!response.ok) {
+        throw new Error("Unable to refresh processing state.");
+      }
+      if (isLatestCourseDetailRefreshRequest(requestId)) {
+        await refreshCourseDetailFromResponse(responseText, expandedIds);
+      }
+    } catch (_error) {
+      // Retry on the next cycle while work is still pending.
+    } finally {
+      pendingAssetRefreshInFlight = false;
+      schedulePendingAssetRefresh(document);
+    }
+  }, 2500);
+}
+
+async function syncPendingCourseDetailStateNow() {
+  if (courseDetailStatusSyncInFlight || !hasPendingCourseDetailIndicators(document)) {
+    return;
+  }
+
+  courseDetailStatusSyncInFlight = true;
+  const expandedIds = getExpandedBlockIds(document);
+  const requestId = beginCourseDetailRefreshRequest();
+
+  try {
+    const response = await fetch(`${window.location.pathname}${window.location.search}`, {
+      headers: {
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      credentials: "same-origin",
+    });
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error("Unable to refresh current status.");
+    }
+    if (isLatestCourseDetailRefreshRequest(requestId)) {
+      await refreshCourseDetailFromResponse(responseText, expandedIds);
+    }
+  } catch (_error) {
+    // Allow the next poll or visibility/focus event to retry.
+  } finally {
+    courseDetailStatusSyncInFlight = false;
+  }
+}
+
 async function refreshCourseDetailFromResponse(responseText, expandedIds) {
   const parser = new DOMParser();
   const nextDocument = parser.parseFromString(responseText, "text/html");
   const currentShell = document.querySelector(".app-shell");
   const nextShell = nextDocument.querySelector(".app-shell");
+  const currentScrollY = window.scrollY;
 
   if (!currentShell || !nextShell) {
     window.location.reload();
@@ -40,6 +162,8 @@ async function refreshCourseDetailFromResponse(responseText, expandedIds) {
   currentShell.innerHTML = nextShell.innerHTML;
   initializeCourseDetail(currentShell);
   restoreExpandedBlocks(expandedIds, document);
+  expandBlockPathFromHash(document, { scroll: false });
+  window.scrollTo({ top: currentScrollY, behavior: "auto" });
 }
 
 async function submitAsyncRefreshForm(form) {
@@ -56,6 +180,7 @@ async function submitAsyncRefreshForm(form) {
   }
 
   try {
+    const requestId = beginCourseDetailRefreshRequest();
     const response = await fetch(form.action, {
       method: (form.method || "POST").toUpperCase(),
       headers: {
@@ -70,7 +195,9 @@ async function submitAsyncRefreshForm(form) {
     if (!response.ok) {
       throw new Error("Unable to update this section.");
     }
-    await refreshCourseDetailFromResponse(responseText, expandedIds);
+    if (isLatestCourseDetailRefreshRequest(requestId)) {
+      await refreshCourseDetailFromResponse(responseText, expandedIds);
+    }
   } catch (error) {
     if (submitButton) {
       submitButton.disabled = false;
@@ -206,6 +333,34 @@ function createEditor(element) {
 }
 
 function initializeCourseDetail(root = document) {
+  root.querySelectorAll("form[data-upload-form]").forEach((form) => {
+    const fileInput = form.querySelector("[data-upload-input]");
+    const fileName = form.querySelector("[data-upload-file-name]");
+    const submitButton = form.querySelector("button[type='submit']");
+    const submitText = form.querySelector("[data-upload-submit-text]");
+
+    function syncFileName() {
+      if (!fileName || !fileInput) {
+        return;
+      }
+      const selectedFile = fileInput.files && fileInput.files.length ? fileInput.files[0].name : "";
+      fileName.textContent = selectedFile || "No file selected";
+    }
+
+    syncFileName();
+    fileInput?.addEventListener("change", syncFileName);
+
+    form.addEventListener("submit", () => {
+      form.classList.add("is-submitting");
+      if (submitButton) {
+        submitButton.disabled = true;
+      }
+      if (submitText) {
+        submitText.textContent = "Uploading...";
+      }
+    });
+  });
+
   root.querySelectorAll("[data-block-toggle]").forEach((toggle) => {
     const targetId = toggle.dataset.blockTarget;
     const target = targetId ? document.getElementById(targetId) : null;
@@ -278,8 +433,26 @@ function initializeCourseDetail(root = document) {
       void submitAsyncRefreshForm(form);
     });
   });
+
+  schedulePendingAssetRefresh(root);
 }
 
 document.addEventListener("DOMContentLoaded", () => {
   initializeCourseDetail(document);
+  expandBlockPathFromHash(document);
+  if (hasPendingCourseDetailIndicators(document)) {
+    void syncPendingCourseDetailStateNow();
+  }
+});
+
+window.addEventListener("focus", () => {
+  if (hasPendingCourseDetailIndicators(document)) {
+    void syncPendingCourseDetailStateNow();
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && hasPendingCourseDetailIndicators(document)) {
+    void syncPendingCourseDetailStateNow();
+  }
 });

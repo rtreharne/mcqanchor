@@ -131,10 +131,61 @@ class MagicLinkEmailForm(forms.Form):
         return cleaned_data
 
 
+class MultipleFileInput(forms.ClearableFileInput):
+    allow_multiple_selected = True
+
+
+class MultipleFileField(forms.FileField):
+    widget = MultipleFileInput
+
+    def clean(self, data, initial=None):
+        single_clean = super().clean
+        if isinstance(data, (list, tuple)):
+            return [single_clean(item, initial) for item in data]
+        if data is None:
+            return []
+        return [single_clean(data, initial)]
+
+
 class CourseBlockForm(forms.ModelForm):
+    file = MultipleFileField(label="Files", required=False)
+
     class Meta:
         model = CourseBlock
-        fields = ["title", "summary", "order"]
+        fields = ["title"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["file"].widget.attrs.update(
+            {
+                "class": "upload-native-input",
+                "data-upload-input": "true",
+                "multiple": True,
+            }
+        )
+
+    def clean_file(self):
+        uploaded_files = self.cleaned_data["file"]
+        for uploaded_file in uploaded_files:
+            extension = f".{uploaded_file.name.rsplit('.', 1)[-1].lower()}" if "." in uploaded_file.name else ""
+            if extension not in SUPPORTED_EXTENSIONS:
+                raise forms.ValidationError(f"Unsupported file type for standalone content processing: {uploaded_file.name}")
+        return uploaded_files
+
+    def save_assets(self, block, uploaded_by):
+        assets = []
+        for uploaded_file in self.cleaned_data.get("file", []):
+            extension = f".{uploaded_file.name.rsplit('.', 1)[-1].lower()}" if "." in uploaded_file.name else ""
+            asset = ContentAsset.objects.create(
+                block=block,
+                uploaded_by=uploaded_by,
+                file=uploaded_file,
+                include_in_generation=True,
+                original_filename=uploaded_file.name,
+                extension=extension,
+            )
+            assets.append(asset)
+        return assets
 
 
 class BlockTitleInlineForm(forms.ModelForm):
@@ -170,27 +221,43 @@ class LearningObjectiveInlineForm(forms.ModelForm):
         return text
 
 
-class ContentAssetForm(forms.ModelForm):
-    class Meta:
-        model = ContentAsset
-        fields = ["file", "include_in_generation"]
+class ContentAssetForm(forms.Form):
+    file = MultipleFileField(label="Files")
 
-    def save(self, block, uploaded_by, commit=True):
-        asset = super().save(commit=False)
-        asset.block = block
-        asset.uploaded_by = uploaded_by
-        asset.original_filename = self.cleaned_data["file"].name
-        asset.extension = f".{self.cleaned_data['file'].name.rsplit('.', 1)[-1].lower()}" if "." in self.cleaned_data["file"].name else ""
-        if commit:
-            asset.save()
-        return asset
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["file"].widget.attrs.update(
+            {
+                "class": "upload-native-input",
+                "data-upload-input": "true",
+                "multiple": True,
+            }
+        )
+
+    def save_assets(self, block, uploaded_by):
+        assets = []
+        for uploaded_file in self.cleaned_data["file"]:
+            extension = f".{uploaded_file.name.rsplit('.', 1)[-1].lower()}" if "." in uploaded_file.name else ""
+            asset = ContentAsset.objects.create(
+                block=block,
+                uploaded_by=uploaded_by,
+                file=uploaded_file,
+                include_in_generation=True,
+                original_filename=uploaded_file.name,
+                extension=extension,
+            )
+            assets.append(asset)
+        return assets
 
     def clean_file(self):
-        uploaded_file = self.cleaned_data["file"]
-        extension = f".{uploaded_file.name.rsplit('.', 1)[-1].lower()}" if "." in uploaded_file.name else ""
-        if extension not in SUPPORTED_EXTENSIONS:
-            raise forms.ValidationError("Unsupported file type for standalone content processing.")
-        return uploaded_file
+        uploaded_files = self.cleaned_data["file"]
+        if not uploaded_files:
+            raise forms.ValidationError("Please choose at least one file.")
+        for uploaded_file in uploaded_files:
+            extension = f".{uploaded_file.name.rsplit('.', 1)[-1].lower()}" if "." in uploaded_file.name else ""
+            if extension not in SUPPORTED_EXTENSIONS:
+                raise forms.ValidationError(f"Unsupported file type for standalone content processing: {uploaded_file.name}")
+        return uploaded_files
 
 
 class MagicLinkCreateForm(forms.ModelForm):

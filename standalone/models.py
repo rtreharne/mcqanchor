@@ -208,10 +208,24 @@ class StudentInvitation(TimeStampedModel):
 
 
 class CourseBlock(TimeStampedModel):
+    class RegenerationStatus(models.TextChoices):
+        IDLE = "idle", "Idle"
+        QUEUED = "queued", "Queued"
+        RUNNING = "running", "Running"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="blocks")
     title = models.CharField(max_length=255)
     summary = models.TextField(blank=True)
     order = models.PositiveSmallIntegerField(default=1)
+    regeneration_status = models.CharField(
+        max_length=20,
+        choices=RegenerationStatus.choices,
+        default=RegenerationStatus.IDLE,
+    )
+    regeneration_progress = models.PositiveSmallIntegerField(default=0)
+    regeneration_error = models.TextField(blank=True)
 
     class Meta:
         ordering = ["order", "created_at"]

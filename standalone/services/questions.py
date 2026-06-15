@@ -2,11 +2,71 @@ import hashlib
 import json
 import random
 import re
+from collections import defaultdict
 
 from django.conf import settings
 from openai import OpenAI
 
 from standalone.models import ContentChunk, Course, LearningObjective, QuestionBankItem
+
+
+OBJECTIVE_MATCH_STOPWORDS = {
+    "about",
+    "across",
+    "between",
+    "compare",
+    "describe",
+    "discuss",
+    "explain",
+    "identify",
+    "into",
+    "into",
+    "using",
+    "understand",
+    "with",
+    "from",
+    "that",
+    "this",
+    "their",
+    "there",
+    "which",
+}
+
+
+def _keyword_set(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) >= 4 and token not in OBJECTIVE_MATCH_STOPWORDS
+    }
+
+
+def _select_objective_for_chunk(
+    chunk: ContentChunk,
+    objectives: list[LearningObjective],
+    objective_keywords: dict[int, set[str]],
+    chunk_index: int,
+    total_chunks: int,
+) -> LearningObjective | None:
+    if not objectives:
+        return None
+    if len(objectives) == 1:
+        return objectives[0]
+
+    chunk_keywords = _keyword_set(chunk.text)
+    best_objective = None
+    best_score = 0
+    for objective in objectives:
+        overlap = len(chunk_keywords & objective_keywords.get(objective.pk, set()))
+        if overlap > best_score:
+            best_score = overlap
+            best_objective = objective
+
+    if best_objective is not None and best_score > 0:
+        return best_objective
+
+    scaled_index = min(len(objectives) - 1, (chunk_index * len(objectives)) // max(1, total_chunks))
+    return objectives[scaled_index]
 
 
 def _fallback_question_payload(chunk: ContentChunk, objective: LearningObjective | None, distractor_count: int) -> dict:
@@ -71,10 +131,35 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
     config = course.config
     question_count = 0
     existing_hashes = set(course.question_bank_items.values_list("question_hash", flat=True))
+    objectives_by_block: dict[int, list[LearningObjective]] = defaultdict(list)
 
-    for chunk in ContentChunk.objects.filter(course=course, asset__include_in_generation=True).select_related("block"):
-        objective = (
-            LearningObjective.objects.filter(course=course, block=chunk.block).order_by("position", "pk").first()
+    for objective in LearningObjective.objects.filter(course=course).select_related("block").order_by("block__order", "position", "pk"):
+        objectives_by_block[objective.block_id].append(objective)
+
+    objective_keywords = {
+        objective.pk: _keyword_set(objective.text)
+        for objectives in objectives_by_block.values()
+        for objective in objectives
+    }
+
+    chunks = list(
+        ContentChunk.objects.filter(course=course, asset__include_in_generation=True)
+        .select_related("block", "asset")
+        .order_by("block__order", "asset__created_at", "ordinal", "pk")
+    )
+    total_chunks_by_block: dict[int, int] = defaultdict(int)
+    chunk_index_by_block: dict[int, int] = defaultdict(int)
+    for chunk in chunks:
+        total_chunks_by_block[chunk.block_id] += 1
+
+    for chunk in chunks:
+        chunk_index_by_block[chunk.block_id] += 1
+        objective = _select_objective_for_chunk(
+            chunk,
+            objectives_by_block.get(chunk.block_id, []),
+            objective_keywords,
+            chunk_index_by_block[chunk.block_id] - 1,
+            total_chunks_by_block[chunk.block_id],
         )
         payload = _fallback_question_payload(chunk, objective, config.distractor_count)
         if settings.OPENAI_API_KEY:

@@ -1,10 +1,13 @@
 from datetime import timedelta
+from threading import Thread
+from urllib.parse import quote
 
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LogoutView
+from django.db import close_old_connections
 from django.db import transaction
 from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -53,17 +56,18 @@ from standalone.models import (
     ValidationPack,
 )
 from standalone.services.content import (
+    delete_block_and_resequence,
     delete_learning_objective_and_resequence,
-    ingest_content_asset,
     move_learning_objective,
     regenerate_block_descriptions_and_objectives,
     regenerate_course_descriptions_and_objectives,
+    summarize_block_content,
 )
 from standalone.services.metrics import refresh_enrollment_metrics
 from standalone.services.notifications import send_logged_email
 from standalone.services.questions import generate_question_banks
 from standalone.services.validation_pdf import build_validation_pack_pdf
-from standalone.tasks import process_content_asset_task, regenerate_block_content_task, regenerate_course_content_task
+from standalone.tasks import process_content_asset_task, run_block_creation_processing, run_content_asset_processing
 
 
 def _is_teacher(user: User) -> bool:
@@ -76,6 +80,57 @@ def _is_student(user: User) -> bool:
 
 def _celery_is_enabled() -> bool:
     return bool(settings.CELERY_BROKER_URL or settings.CELERY_TASK_ALWAYS_EAGER)
+
+
+def _queue_content_asset_processing(asset_id: int) -> None:
+    if _celery_is_enabled():
+        process_content_asset_task.delay(asset_id)
+        return
+
+    def runner() -> None:
+        close_old_connections()
+        try:
+            run_content_asset_processing(asset_id)
+        finally:
+            close_old_connections()
+
+    Thread(target=runner, daemon=True).start()
+
+
+def _queue_block_regeneration(block_id: int) -> None:
+    if _celery_is_enabled():
+        from standalone.tasks import regenerate_block_content_task
+
+        regenerate_block_content_task.delay(block_id)
+        return
+
+    from standalone.tasks import run_block_regeneration
+
+    def runner() -> None:
+        close_old_connections()
+        try:
+            run_block_regeneration(block_id)
+        finally:
+            close_old_connections()
+
+    Thread(target=runner, daemon=True).start()
+
+
+def _queue_block_creation_processing(block_id: int) -> None:
+    if _celery_is_enabled():
+        from standalone.tasks import process_block_creation_task
+
+        process_block_creation_task.delay(block_id)
+        return
+
+    def runner() -> None:
+        close_old_connections()
+        try:
+            run_block_creation_processing(block_id)
+        finally:
+            close_old_connections()
+
+    Thread(target=runner, daemon=True).start()
 
 
 def _teacher_course_or_404(user: User, course_id: int) -> Course:
@@ -222,15 +277,34 @@ def course_detail(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
-    context = {
+    return render(request, "standalone/course_detail.html", _course_detail_context(course))
+
+def _course_detail_context(course: Course):
+    blocks = list(course.blocks.prefetch_related("assets", "learning_objectives"))
+    for block in blocks:
+        return_to = f"{reverse('standalone:course_detail', args=[course.pk])}#assets-content-{block.pk}"
+        block.upload_url = f"{reverse('standalone:asset_upload', args=[block.pk])}?next={quote(return_to, safe='/:?=&')}"
+
+    return {
         "course": course,
-        "blocks": course.blocks.prefetch_related("assets", "learning_objectives"),
+        "blocks": blocks,
         "draft_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.DRAFT).count(),
         "approved_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.APPROVED).count(),
         "events": course.validation_events.all(),
         "allowed_emails": course.allowed_emails.all(),
     }
-    return render(request, "standalone/course_detail.html", context)
+
+
+def _refresh_course_summary_after_asset_change(course: Course) -> None:
+    course_fragments = [block.summary for block in course.blocks.all() if block.summary.strip()]
+    if not course_fragments:
+        course.summary = ""
+        course.save(update_fields=["summary", "updated_at"])
+        return
+
+    course_summary, _ = summarize_block_content("\n\n".join(course_fragments), max_items=4)
+    course.summary = course_summary
+    course.save(update_fields=["summary", "updated_at"])
 
 
 @login_required
@@ -302,19 +376,16 @@ def regenerate_block_content(request: HttpRequest, block_id: int) -> HttpRespons
         raise Http404
     block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id)
     course = _teacher_course_or_404(request.user, block.course_id)
-    if _celery_is_enabled():
-        regenerate_block_content_task.delay(block.pk)
-        messages.success(request, f"Regeneration for {block.title} has been queued.")
+    if block.regeneration_status in {CourseBlock.RegenerationStatus.QUEUED, CourseBlock.RegenerationStatus.RUNNING}:
+        messages.info(request, f"Regeneration is already running for {block.title}.")
         return redirect("standalone:course_detail", course.pk)
 
-    refreshed = regenerate_block_descriptions_and_objectives(block)
-    if refreshed["blocks"] == 0:
-        messages.info(request, f"No included content was available to regenerate {block.title}.")
-    else:
-        messages.success(
-            request,
-            f"Regenerated {block.title} and refreshed {refreshed['objectives']} learning objective(s).",
-        )
+    block.regeneration_status = CourseBlock.RegenerationStatus.QUEUED
+    block.regeneration_progress = 5
+    block.regeneration_error = ""
+    block.save(update_fields=["regeneration_status", "regeneration_progress", "regeneration_error", "updated_at"])
+    _queue_block_regeneration(block.pk)
+    messages.success(request, f"Started re-generation for {block.title}. Summary and learning objectives will update when it completes.")
     return redirect("standalone:course_detail", course.pk)
 
 
@@ -323,11 +394,6 @@ def regenerate_course_content(request: HttpRequest, course_id: int) -> HttpRespo
     if request.method != "POST" or not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
-    if _celery_is_enabled():
-        regenerate_course_content_task.delay(course.pk)
-        messages.success(request, "Regeneration has been queued. Refresh this page shortly to see updated descriptions and learning objectives.")
-        return redirect("standalone:course_detail", course.pk)
-
     refreshed = regenerate_course_descriptions_and_objectives(course)
     if refreshed["blocks"] == 0:
         messages.info(request, "No included content was available to regenerate descriptions and learning objectives.")
@@ -529,17 +595,58 @@ def block_create(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
-    form = CourseBlockForm(request.POST or None)
+    form = CourseBlockForm(request.POST or None, request.FILES or None)
     if request.method == "POST" and form.is_valid():
         block = form.save(commit=False)
         block.course = course
+        last_block = course.blocks.order_by("-order", "-pk").first()
+        block.order = (last_block.order + 1) if last_block else 1
         block.save()
         from standalone.models import BlockConfig
 
         BlockConfig.objects.get_or_create(block=block)
-        messages.success(request, "Course block added.")
+        assets = form.save_assets(block=block, uploaded_by=request.user)
+        return_to = f"{reverse('standalone:course_detail', args=[course.pk])}#block-content-{block.pk}"
+        if assets:
+            block.regeneration_status = CourseBlock.RegenerationStatus.QUEUED
+            block.regeneration_progress = 5
+            block.regeneration_error = ""
+            block.save(update_fields=["regeneration_status", "regeneration_progress", "regeneration_error", "updated_at"])
+            _queue_block_creation_processing(block.pk)
+            messages.success(
+                request,
+                "Course block added. Uploaded files are processing in the background and the generated summary and learning objectives will appear when the task completes.",
+            )
+        else:
+            messages.success(request, "Course block added.")
+        return redirect(return_to)
+    return render(
+        request,
+        "standalone/form_page.html",
+        {
+            "title": f"Add block to {course.title}",
+            "form": form,
+            "has_upload_picker": True,
+            "submit_label": "Create block",
+            "submit_progress_label": "Creating block...",
+        },
+    )
+
+
+@login_required
+def block_delete(request: HttpRequest, block_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id)
+    course = _teacher_course_or_404(request.user, block.course_id)
+    if block.regeneration_status in {CourseBlock.RegenerationStatus.QUEUED, CourseBlock.RegenerationStatus.RUNNING}:
+        messages.error(request, f"Cannot delete {block.title} while re-generation is in progress.")
         return redirect("standalone:course_detail", course.pk)
-    return render(request, "standalone/form_page.html", {"title": f"Add block to {course.title}", "form": form})
+
+    block_title = block.title
+    delete_block_and_resequence(block)
+    messages.success(request, f"Deleted block {block_title}.")
+    return redirect("standalone:course_detail", course.pk)
 
 
 @login_required
@@ -548,24 +655,27 @@ def asset_upload(request: HttpRequest, block_id: int) -> HttpResponse:
         raise Http404
     block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id)
     course = _teacher_course_or_404(request.user, block.course_id)
+    next_url = request.POST.get("next") or request.GET.get("next") or f"{reverse('standalone:course_detail', args=[course.pk])}#assets-content-{block.pk}"
     form = ContentAssetForm(request.POST or None, request.FILES or None)
     if request.method == "POST" and form.is_valid():
-        asset = form.save(block=block, uploaded_by=request.user)
-        if _celery_is_enabled():
-            process_content_asset_task.delay(asset.pk)
-            messages.success(request, "Content uploaded. Processing has been queued and summaries/objectives will refresh when it completes.")
-            return redirect("standalone:course_detail", course.pk)
-        try:
-            ingest_content_asset(asset)
-            regenerate_course_descriptions_and_objectives(course)
-            messages.success(request, "Content uploaded and processed.")
-        except Exception as exc:  # noqa: BLE001
-            asset.processing_status = ContentAsset.ProcessingStatus.FAILED
-            asset.processing_error = str(exc)
-            asset.save(update_fields=["processing_status", "processing_error", "updated_at"])
-            messages.error(request, "The file was uploaded but processing failed.")
-        return redirect("standalone:course_detail", course.pk)
-    return render(request, "standalone/form_page.html", {"title": f"Upload content to {block.title}", "form": form})
+        assets = form.save_assets(block=block, uploaded_by=request.user)
+        for asset in assets:
+            _queue_content_asset_processing(asset.pk)
+        file_count = len(assets)
+        noun = "file" if file_count == 1 else "files"
+        messages.success(request, f"{file_count} {noun} uploaded. Processing is running in the background.")
+        return redirect(next_url)
+    return render(
+        request,
+        "standalone/form_page.html",
+        {
+            "title": f"Upload content to {block.title}",
+            "form": form,
+            "cancel_url": next_url,
+            "next_url": next_url,
+            "is_upload_form": True,
+        },
+    )
 
 
 @login_required
@@ -578,6 +688,29 @@ def toggle_asset_generation(request: HttpRequest, asset_id: int) -> HttpResponse
     asset.save(update_fields=["include_in_generation", "updated_at"])
     messages.success(request, "Asset generation setting updated.")
     return redirect("standalone:course_detail", course.pk)
+
+
+@login_required
+def delete_asset(request: HttpRequest, asset_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    asset = get_object_or_404(ContentAsset.objects.select_related("block", "block__course"), pk=asset_id)
+    block = asset.block
+    course = _teacher_course_or_404(request.user, block.course_id)
+    next_url = request.POST.get("next") or f"{reverse('standalone:course_detail', args=[course.pk])}#assets-content-{block.pk}"
+
+    asset.file.delete(save=False)
+    asset.delete()
+
+    if block.assets.filter(include_in_generation=True).exists():
+        regenerate_block_descriptions_and_objectives(block)
+    else:
+        block.summary = ""
+        block.save(update_fields=["summary", "updated_at"])
+        _refresh_course_summary_after_asset_change(course)
+
+    messages.success(request, "Uploaded file deleted.")
+    return redirect(next_url)
 
 
 @login_required

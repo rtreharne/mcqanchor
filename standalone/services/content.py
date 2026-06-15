@@ -103,6 +103,63 @@ def extract_text_from_asset(asset: ContentAsset) -> str:
     raise ValueError(f"Unsupported content type: {ext}")
 
 
+def _split_long_segment(text: str, target_size: int) -> list[str]:
+    if len(text) <= target_size:
+        return [text]
+
+    sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", text) if segment.strip()]
+    if len(sentences) > 1:
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        for sentence in sentences:
+            if len(sentence) > target_size:
+                if current:
+                    chunks.append(" ".join(current))
+                    current = []
+                    current_len = 0
+                chunks.extend(_split_long_segment(sentence, target_size))
+                continue
+            projected_len = current_len + len(sentence) + (1 if current else 0)
+            if current and projected_len > target_size:
+                chunks.append(" ".join(current))
+                current = [sentence]
+                current_len = len(sentence)
+            else:
+                current.append(sentence)
+                current_len = projected_len
+        if current:
+            chunks.append(" ".join(current))
+        return chunks
+
+    words = text.split()
+    if not words:
+        return []
+
+    chunks = []
+    current_words: list[str] = []
+    current_len = 0
+    for word in words:
+        if len(word) > target_size:
+            if current_words:
+                chunks.append(" ".join(current_words))
+                current_words = []
+                current_len = 0
+            chunks.extend([word[index : index + target_size] for index in range(0, len(word), target_size)])
+            continue
+        projected_len = current_len + len(word) + (1 if current_words else 0)
+        if current_words and projected_len > target_size:
+            chunks.append(" ".join(current_words))
+            current_words = [word]
+            current_len = len(word)
+        else:
+            current_words.append(word)
+            current_len = projected_len
+    if current_words:
+        chunks.append(" ".join(current_words))
+    return chunks
+
+
 def chunk_text(text: str, target_size: int = 1200) -> list[str]:
     paragraphs = [segment.strip() for segment in text.split("\n\n") if segment.strip()]
     if not paragraphs:
@@ -112,13 +169,16 @@ def chunk_text(text: str, target_size: int = 1200) -> list[str]:
     current = []
     current_len = 0
     for paragraph in paragraphs:
-        if current and current_len + len(paragraph) > target_size:
-            chunks.append("\n\n".join(current))
-            current = [paragraph]
-            current_len = len(paragraph)
-        else:
-            current.append(paragraph)
-            current_len += len(paragraph)
+        paragraph_segments = _split_long_segment(paragraph, target_size)
+        for segment in paragraph_segments:
+            projected_len = current_len + len(segment) + (2 if current else 0)
+            if current and projected_len > target_size:
+                chunks.append("\n\n".join(current))
+                current = [segment]
+                current_len = len(segment)
+            else:
+                current.append(segment)
+                current_len = projected_len if current_len else len(segment)
     if current:
         chunks.append("\n\n".join(current))
     return chunks
@@ -164,6 +224,12 @@ def _dedupe_texts(items: list[str]) -> list[str]:
     return deduped
 
 
+def _objective_budget_for_text(text: str, minimum: int = 6, maximum: int = 12) -> int:
+    sections = max(1, len(chunk_text(text, target_size=1200)))
+    line_candidates = len([line for line in text.splitlines() if sanitize_learning_objective(line)])
+    return max(minimum, min(maximum, max(sections * 2, line_candidates)))
+
+
 def derive_learning_objectives(text: str, max_items: int = 8) -> list[str]:
     candidates = []
     for line in text.splitlines():
@@ -185,11 +251,54 @@ def derive_learning_objectives(text: str, max_items: int = 8) -> list[str]:
     return _dedupe_texts(candidates)[:max_items]
 
 
+def derive_learning_objectives_with_coverage(text: str, max_items: int = 8) -> list[str]:
+    sections = chunk_text(text, target_size=1200)
+    if len(sections) <= 1:
+        return derive_learning_objectives(text, max_items=max_items)
+
+    per_section_limit = max(2, min(4, max_items // max(1, len(sections)) + 1))
+    candidates: list[str] = []
+
+    for section in sections:
+        candidates.extend(derive_learning_objectives(section, max_items=per_section_limit))
+
+    candidates.extend(derive_learning_objectives(text, max_items=max_items))
+    return _dedupe_texts(candidates)[:max_items]
+
+
 def _fallback_summary(text: str, max_sentences: int = 2, max_length: int = 320) -> str:
-    sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", normalize_text(text)) if segment.strip()]
-    summary = " ".join(sentences[:max_sentences]).strip()
+    normalized = normalize_text(text)
+    sections = chunk_text(normalized, target_size=1200)
+    representative_sentences: list[str] = []
+
+    if len(sections) > 1:
+        section_indexes = [0]
+        if max_sentences > 1:
+            section_indexes.append(len(sections) - 1)
+        if max_sentences > 2 and len(sections) > 2:
+            section_indexes.insert(1, len(sections) // 2)
+
+        seen_sentences: set[str] = set()
+        for index in section_indexes:
+            section_sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", sections[index]) if segment.strip()]
+            if not section_sentences:
+                continue
+            sentence = section_sentences[0]
+            sentence_key = sentence.lower()
+            if sentence_key in seen_sentences:
+                continue
+            seen_sentences.add(sentence_key)
+            representative_sentences.append(sentence)
+            if len(representative_sentences) >= max_sentences:
+                break
+
+    if representative_sentences:
+        summary = " ".join(representative_sentences).strip()
+    else:
+        sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", normalized) if segment.strip()]
+        summary = " ".join(sentences[:max_sentences]).strip()
     if not summary:
-        summary = normalize_text(text)[:max_length]
+        summary = normalized[:max_length]
     if len(summary) > max_length:
         summary = summary[: max_length - 1].rsplit(" ", 1)[0].rstrip(",;:-") + "."
     if summary and summary[-1] not in ".!?":
@@ -216,7 +325,7 @@ def _parse_json_object(raw_output: str) -> dict[str, Any]:
     raise ValueError("OpenAI did not return parseable JSON.")
 
 
-def _openai_block_content_payload(block_title: str, text: str, max_items: int) -> dict[str, Any]:
+def _openai_block_content_payload(text: str, max_items: int) -> dict[str, Any]:
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
     prompt = f"""
 Summarise the teaching content below for an educator-facing course authoring workflow.
@@ -232,11 +341,8 @@ Rules:
 - remove odd characters and formatting noise
 - keep the wording specific enough to make sense on its own
 
-Block title:
-{block_title}
-
 Content:
-{text[:12000]}
+{text}
 """.strip()
     response = client.responses.create(
         model=settings.OPENAI_MODEL,
@@ -248,28 +354,87 @@ Content:
     return _parse_json_object((getattr(response, "output_text", "") or "").strip())
 
 
-def summarize_block_content(block_title: str, text: str, max_items: int = 6) -> tuple[str, list[str]]:
+def _sanitize_objective_candidates(items: list[Any], max_items: int) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    return _dedupe_texts(
+        [
+            sanitized
+            for item in items
+            if isinstance(item, str)
+            for sanitized in [sanitize_learning_objective(item)]
+            if sanitized
+        ]
+    )[:max_items]
+
+
+def _openai_reduce_content_payload(section_summaries: list[str], objective_candidates: list[str], max_items: int) -> dict[str, Any]:
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    summary_lines = "\n".join(f"- {summary}" for summary in section_summaries if summary.strip())
+    objective_lines = "\n".join(f"- {objective}" for objective in objective_candidates if objective.strip())
+    prompt = f"""
+Synthesize an educator-facing summary and learning objectives from the uploaded teaching material notes below.
+
+Return strict JSON with exactly these keys:
+- summary: one or two sentences in plain English
+- learning_objectives: an array of 3 to {max_items} concise learning objectives
+
+Rules:
+- use only the supplied uploaded-material notes
+- no numbering or bullets in the output
+- no ambiguous references such as "this", "that", "it", or "etc."
+- each learning objective should start with a clear action verb
+- remove odd characters and formatting noise
+- keep the wording specific enough to make sense on its own
+
+Section summaries:
+{summary_lines or "- None"}
+
+Candidate learning objectives:
+{objective_lines or "- None"}
+""".strip()
+    response = client.responses.create(
+        model=settings.OPENAI_MODEL,
+        input=[
+            {"role": "system", "content": [{"type": "input_text", "text": "Return only valid JSON."}]},
+            {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+        ],
+    )
+    return _parse_json_object((getattr(response, "output_text", "") or "").strip())
+
+
+def summarize_block_content(text: str, max_items: int = 6) -> tuple[str, list[str]]:
     fallback_summary = _fallback_summary(text)
-    fallback_objectives = derive_learning_objectives(text, max_items=max_items)
+    fallback_objectives = derive_learning_objectives_with_coverage(text, max_items=max_items)
 
     summary = fallback_summary
     objectives = fallback_objectives
 
     if settings.OPENAI_API_KEY:
         try:
-            payload = _openai_block_content_payload(block_title, text, max_items)
+            sections = chunk_text(text, target_size=5000)
+            if len(sections) <= 1:
+                payload = _openai_block_content_payload(text, max_items)
+            else:
+                per_section_limit = max(3, min(6, max_items))
+                section_summaries: list[str] = []
+                section_objectives: list[str] = []
+                for section in sections:
+                    section_payload = _openai_block_content_payload(section, per_section_limit)
+                    section_summary = sanitize_summary(str(section_payload.get("summary", "")))
+                    if section_summary:
+                        section_summaries.append(section_summary)
+                    section_objectives.extend(
+                        _sanitize_objective_candidates(section_payload.get("learning_objectives", []), per_section_limit)
+                    )
+                payload = _openai_reduce_content_payload(
+                    section_summaries,
+                    _dedupe_texts(section_objectives),
+                    max_items,
+                )
+
             summary = sanitize_summary(str(payload.get("summary", ""))) or fallback_summary
-            objective_candidates = payload.get("learning_objectives", [])
-            if isinstance(objective_candidates, list):
-                objectives = _dedupe_texts(
-                    [
-                        sanitized
-                        for item in objective_candidates
-                        if isinstance(item, str)
-                        for sanitized in [sanitize_learning_objective(item)]
-                        if sanitized
-                    ]
-                )[:max_items] or fallback_objectives
+            objectives = _sanitize_objective_candidates(payload.get("learning_objectives", []), max_items) or fallback_objectives
         except Exception:  # noqa: BLE001
             summary = fallback_summary
             objectives = fallback_objectives
@@ -289,6 +454,33 @@ def resequence_learning_objectives(block, objectives: list[LearningObjective] | 
     if objectives:
         LearningObjective.objects.bulk_update(objectives, ["position", "code"])
     return objectives
+
+
+@transaction.atomic
+def delete_block_and_resequence(block) -> None:
+    course = block.course
+
+    for asset in block.assets.all():
+        asset.file.delete(save=False)
+
+    block.delete()
+
+    remaining_blocks = list(course.blocks.order_by("order", "created_at", "pk"))
+    for index, remaining_block in enumerate(remaining_blocks, start=1):
+        remaining_block.order = index
+    if remaining_blocks:
+        type(remaining_blocks[0]).objects.bulk_update(remaining_blocks, ["order"])
+
+    for remaining_block in remaining_blocks:
+        resequence_learning_objectives(remaining_block)
+
+    course_fragments = [remaining_block.summary for remaining_block in remaining_blocks if remaining_block.summary.strip()]
+    if course_fragments:
+        course_summary, _ = summarize_block_content("\n\n".join(course_fragments), max_items=4)
+        course.summary = course_summary
+    else:
+        course.summary = ""
+    course.save(update_fields=["summary", "updated_at"])
 
 
 def _replace_block_objectives(block, source_asset: ContentAsset, objective_texts: list[str]) -> int:
@@ -325,35 +517,46 @@ def _replace_block_objectives(block, source_asset: ContentAsset, objective_texts
 
 
 def _refresh_course_summary_from_blocks(course) -> bool:
-    course_fragments = [
-        f"{block.title}: {block.summary}"
-        for block in course.blocks.all()
-        if block.summary.strip()
-    ]
+    course_fragments = [block.summary for block in course.blocks.all() if block.summary.strip()]
     if not course_fragments:
         return False
 
-    course_summary, _ = summarize_block_content(course.title, "\n\n".join(course_fragments), max_items=4)
+    course_summary, _ = summarize_block_content("\n\n".join(course_fragments), max_items=4)
     course.summary = course_summary
     course.save(update_fields=["summary", "updated_at"])
     return True
 
 
-def regenerate_block_descriptions_and_objectives(block) -> dict[str, int]:
+def regenerate_block_descriptions_and_objectives(block, progress_callback=None) -> dict[str, int]:
+    if progress_callback:
+        progress_callback(15)
     assets = [asset for asset in block.assets.all() if asset.include_in_generation]
     if not assets:
+        if progress_callback:
+            progress_callback(100)
         return {"blocks": 0, "objectives": 0}
 
+    if progress_callback:
+        progress_callback(35)
     texts = [text for asset in assets if (text := _asset_text_for_regeneration(asset))]
     combined_text = normalize_text("\n\n".join(texts))
     if not combined_text:
+        if progress_callback:
+            progress_callback(100)
         return {"blocks": 0, "objectives": 0}
 
-    block_summary, objectives = summarize_block_content(block.title, combined_text)
+    objective_budget = _objective_budget_for_text(combined_text)
+    if progress_callback:
+        progress_callback(65)
+    block_summary, objectives = summarize_block_content(combined_text, max_items=objective_budget)
+    if progress_callback:
+        progress_callback(85)
     block.summary = block_summary
     block.save(update_fields=["summary", "updated_at"])
     objective_count = _replace_block_objectives(block, assets[0], objectives)
     _refresh_course_summary_from_blocks(block.course)
+    if progress_callback:
+        progress_callback(100)
     return {"blocks": 1, "objectives": objective_count}
 
 
@@ -432,7 +635,8 @@ def ingest_content_asset(asset: ContentAsset) -> None:
             checksum=hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
         )
 
-    _, objectives = summarize_block_content(asset.block.title, extracted_text)
+    objective_budget = _objective_budget_for_text(extracted_text, minimum=4, maximum=8)
+    _, objectives = summarize_block_content(extracted_text, max_items=objective_budget)
     objectives = [text for text in objectives if text]
     for index, objective in enumerate(objectives, start=1):
         LearningObjective.objects.create(
