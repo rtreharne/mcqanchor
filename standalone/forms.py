@@ -6,6 +6,7 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from standalone.models import (
+    BlockConfig,
     ContentAsset,
     Course,
     CourseAllowedEmail,
@@ -65,10 +66,33 @@ class CourseForm(forms.ModelForm):
         return slug
 
 
+class CourseTitleInlineForm(forms.ModelForm):
+    class Meta:
+        model = Course
+        fields = ["title"]
+
+    def clean_title(self):
+        title = self.cleaned_data["title"].strip()
+        if not title:
+            raise forms.ValidationError("Please enter a course title.")
+        return title
+
+
 class CourseConfigForm(forms.ModelForm):
     class Meta:
         model = CourseConfig
         exclude = ["course"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["maq_ratio_percent"].label = "Multiple-answer question ratio (%)"
+        self.fields["maq_ratio_percent"].help_text = (
+            "Target percentage of newly generated questions that should allow multiple correct answers."
+        )
+        self.fields["waq_ratio_percent"].label = "Written-answer question ratio (%)"
+        self.fields["waq_ratio_percent"].help_text = (
+            "Target percentage of newly generated questions that should use typed written answers."
+        )
 
 
 class CourseAllowedEmailForm(forms.ModelForm):
@@ -152,10 +176,14 @@ class CourseBlockForm(forms.ModelForm):
 
     class Meta:
         model = CourseBlock
-        fields = ["title"]
+        fields = ["title", "available_from"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["available_from"].initial = timezone.localdate()
+        self.fields["available_from"].required = False
+        self.fields["available_from"].help_text = "MCQs for this block will only be generated and shown to students from this date."
+        self.fields["available_from"].widget = forms.DateInput(attrs={"type": "date"})
         self.fields["file"].widget.attrs.update(
             {
                 "class": "upload-native-input",
@@ -171,6 +199,9 @@ class CourseBlockForm(forms.ModelForm):
             if extension not in SUPPORTED_EXTENSIONS:
                 raise forms.ValidationError(f"Unsupported file type for standalone content processing: {uploaded_file.name}")
         return uploaded_files
+
+    def clean_available_from(self):
+        return self.cleaned_data.get("available_from") or timezone.localdate()
 
     def save_assets(self, block, uploaded_by):
         assets = []
@@ -207,6 +238,32 @@ class BlockSummaryInlineForm(forms.ModelForm):
 
     def clean_summary(self):
         return sanitize_summary(self.cleaned_data["summary"])
+
+
+class BlockAvailableFromInlineForm(forms.ModelForm):
+    class Meta:
+        model = CourseBlock
+        fields = ["available_from"]
+
+    def clean_available_from(self):
+        value = self.cleaned_data["available_from"]
+        if value is None:
+            raise forms.ValidationError("Please enter an availability date.")
+        return value
+
+
+class BlockConfigTargetQuestionCountInlineForm(forms.ModelForm):
+    class Meta:
+        model = BlockConfig
+        fields = ["target_question_count"]
+
+    def clean_target_question_count(self):
+        value = self.cleaned_data["target_question_count"]
+        if value is None:
+            raise forms.ValidationError("Please enter a target question count.")
+        if value < 1:
+            raise forms.ValidationError("Target question count must be at least 1.")
+        return value
 
 
 class LearningObjectiveInlineForm(forms.ModelForm):

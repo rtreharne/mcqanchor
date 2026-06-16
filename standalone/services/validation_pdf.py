@@ -39,6 +39,7 @@ def build_validation_pack_pdf(pack: ValidationPack, bookings: list[ValidationBoo
         questions = booking.event.course.question_bank_items.filter(
             bank_type="validation",
             status="approved",
+            block__available_from__lte=timezone.localdate(),
         )[: pack.event.question_count]
         for index, question in enumerate(questions, start=1):
             pdf.drawString(20 * mm, y_position, f"{index}. {question.stem[:85]}")

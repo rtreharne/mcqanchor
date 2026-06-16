@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 from threading import Thread
 from urllib.parse import quote
@@ -15,6 +16,8 @@ from django.urls import reverse
 from django.utils import timezone
 
 from standalone.forms import (
+    BlockAvailableFromInlineForm,
+    BlockConfigTargetQuestionCountInlineForm,
     BlockSummaryInlineForm,
     BlockTitleInlineForm,
     ContentAssetForm,
@@ -22,6 +25,7 @@ from standalone.forms import (
     CourseBlockForm,
     CourseConfigForm,
     CourseForm,
+    CourseTitleInlineForm,
     EmailOrUsernameAuthenticationForm,
     LearningObjectiveInlineForm,
     MagicLinkCreateForm,
@@ -35,6 +39,7 @@ from standalone.forms import (
     ValidationEventForm,
 )
 from standalone.models import (
+    BlockConfig,
     ContentAsset,
     Course,
     CourseAllowedEmail,
@@ -65,6 +70,14 @@ from standalone.services.content import (
 )
 from standalone.services.metrics import refresh_enrollment_metrics
 from standalone.services.notifications import send_logged_email
+from standalone.services.preview import (
+    draft_preview_written_answer,
+    flag_preview_question,
+    request_preview_quiz,
+    send_preview_chat_message,
+    serialize_preview_state,
+    submit_preview_answer,
+)
 from standalone.services.questions import generate_question_banks
 from standalone.services.validation_pdf import build_validation_pack_pdf
 from standalone.tasks import process_content_asset_task, run_block_creation_processing, run_content_asset_processing
@@ -138,6 +151,12 @@ def _teacher_course_or_404(user: User, course_id: int) -> Course:
     return get_object_or_404(queryset.select_related("config", "teacher"), pk=course_id)
 
 
+def _teacher_block_or_404(user: User, block_id: int) -> CourseBlock:
+    block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id)
+    _teacher_course_or_404(user, block.course_id)
+    return block
+
+
 def _student_enrollment_or_404(user: User, course_id: int) -> Enrollment:
     return get_object_or_404(
         Enrollment.objects.select_related("course", "course__config", "student"),
@@ -154,6 +173,8 @@ def home(request: HttpRequest) -> HttpResponse:
 
 
 def login_view(request: HttpRequest) -> HttpResponse:
+    if request.user.is_authenticated:
+        return redirect("standalone:dashboard")
     form = EmailOrUsernameAuthenticationForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
         identifier = form.cleaned_data["username"].strip()
@@ -280,7 +301,7 @@ def course_detail(request: HttpRequest, course_id: int) -> HttpResponse:
     return render(request, "standalone/course_detail.html", _course_detail_context(course))
 
 def _course_detail_context(course: Course):
-    blocks = list(course.blocks.prefetch_related("assets", "learning_objectives"))
+    blocks = list(course.blocks.select_related("config").prefetch_related("assets", "learning_objectives"))
     for block in blocks:
         return_to = f"{reverse('standalone:course_detail', args=[course.pk])}#assets-content-{block.pk}"
         block.upload_url = f"{reverse('standalone:asset_upload', args=[block.pk])}?next={quote(return_to, safe='/:?=&')}"
@@ -307,6 +328,10 @@ def _refresh_course_summary_after_asset_change(course: Course) -> None:
     course.save(update_fields=["summary", "updated_at"])
 
 
+def _format_block_available_from(block: CourseBlock) -> str:
+    return f"{block.available_from.day} {block.available_from:%b %Y}"
+
+
 @login_required
 def update_block_field(request: HttpRequest, block_id: int, field_name: str) -> JsonResponse:
     if request.method != "POST" or not _is_teacher(request.user):
@@ -315,6 +340,7 @@ def update_block_field(request: HttpRequest, block_id: int, field_name: str) -> 
     _teacher_course_or_404(request.user, block.course_id)
 
     form_class = {
+        "available_from": BlockAvailableFromInlineForm,
         "title": BlockTitleInlineForm,
         "summary": BlockSummaryInlineForm,
     }.get(field_name)
@@ -326,8 +352,136 @@ def update_block_field(request: HttpRequest, block_id: int, field_name: str) -> 
         return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
 
     updated_block = form.save()
+    if field_name == "available_from":
+        return JsonResponse(
+            {
+                "ok": True,
+                "value": updated_block.available_from.isoformat(),
+                "raw_value": updated_block.available_from.isoformat(),
+                "display_value": _format_block_available_from(updated_block),
+            }
+        )
+
     display_value = getattr(updated_block, field_name) or ("No summary." if field_name == "summary" else "")
     return JsonResponse({"ok": True, "value": getattr(updated_block, field_name), "display_value": display_value})
+
+
+@login_required
+def update_block_config_field(request: HttpRequest, block_id: int, field_name: str) -> JsonResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    block = _teacher_block_or_404(request.user, block_id)
+    config, _ = BlockConfig.objects.get_or_create(block=block)
+
+    form_class = {
+        "target_question_count": BlockConfigTargetQuestionCountInlineForm,
+    }.get(field_name)
+    if form_class is None:
+        raise Http404
+
+    form = form_class(request.POST, instance=config)
+    if not form.is_valid():
+        return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
+
+    updated_config = form.save()
+    return JsonResponse(
+        {
+            "ok": True,
+            "value": updated_config.target_question_count,
+            "raw_value": updated_config.target_question_count,
+            "display_value": updated_config.target_question_count,
+        }
+    )
+
+
+@login_required
+def update_course_field(request: HttpRequest, course_id: int, field_name: str) -> JsonResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    course = get_object_or_404(Course, pk=course_id)
+    _teacher_course_or_404(request.user, course.pk)
+
+    form_class = {
+        "title": CourseTitleInlineForm,
+    }.get(field_name)
+    if form_class is None:
+        raise Http404
+
+    form = form_class(request.POST, instance=course)
+    if not form.is_valid():
+        return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
+
+    updated_course = form.save()
+    return JsonResponse({"ok": True, "value": getattr(updated_course, field_name), "display_value": getattr(updated_course, field_name)})
+
+
+@login_required
+def student_preview(request: HttpRequest, course_id: int) -> HttpResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    preview_state = serialize_preview_state(request, course)
+    return render(
+        request,
+        "standalone/student_preview.html",
+        {
+            "course": course,
+            "preview_state": preview_state,
+        },
+    )
+
+
+def _preview_payload(request: HttpRequest, course: Course, block: CourseBlock, action: str) -> JsonResponse:
+    if action == "quiz":
+        requested_question_type = None
+        if request.body and "application/json" in (request.content_type or ""):
+            try:
+                data = json.loads(request.body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+            requested_question_type = str(data.get("question_type", "")).strip().lower() or None
+        payload = request_preview_quiz(request, course, block, requested_question_type=requested_question_type)
+        return JsonResponse({"ok": True, "preview": payload})
+
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+
+    if action == "answer":
+        selected_answers = data.get("answers")
+        if not isinstance(selected_answers, list):
+            selected_answer = str(data.get("answer", "")).strip()
+            selected_answers = [selected_answer] if selected_answer else []
+        question_id = int(data.get("question_id") or 0)
+        answer_text = str(data.get("answer_text", "")).strip()
+        payload = submit_preview_answer(request, course, block, question_id, selected_answers, answer_text=answer_text)
+        return JsonResponse({"ok": True, "preview": payload})
+    if action == "draft_answer":
+        question_id = int(data.get("question_id") or 0)
+        answer_text = str(data.get("answer_text", "")).strip()
+        payload = draft_preview_written_answer(request, course, block, question_id, answer_text)
+        return JsonResponse({"ok": True, "alignment": payload})
+    if action == "chat":
+        question = str(data.get("question", "")).strip()
+        if not question:
+            return JsonResponse({"ok": False, "error": "Please enter a course question first."}, status=400)
+        payload = send_preview_chat_message(request, course, block, question)
+        return JsonResponse({"ok": True, "preview": payload})
+    if action == "flag":
+        question_id = int(data.get("question_id") or 0)
+        payload = flag_preview_question(request, course, block, question_id)
+        return JsonResponse({"ok": True, "preview": payload})
+    raise Http404
+
+
+@login_required
+def student_preview_action(request: HttpRequest, course_id: int, block_id: int, action: str) -> JsonResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id, course=course)
+    return _preview_payload(request, course, block, action)
 
 
 @login_required
@@ -615,7 +769,7 @@ def block_create(request: HttpRequest, course_id: int) -> HttpResponse:
             _queue_block_creation_processing(block.pk)
             messages.success(
                 request,
-                "Course block added. Uploaded files are processing in the background and the generated summary and learning objectives will appear when the task completes.",
+                "Course block added. Uploaded files are processing in the background and the summary and learning objectives will appear when the task completes.",
             )
         else:
             messages.success(request, "Course block added.")
@@ -669,7 +823,7 @@ def asset_upload(request: HttpRequest, block_id: int) -> HttpResponse:
         request,
         "standalone/form_page.html",
         {
-            "title": f"Upload content to {block.title}",
+            "title": f"Upload files to {block.title}",
             "form": form,
             "cancel_url": next_url,
             "next_url": next_url,
@@ -718,7 +872,7 @@ def generate_course_bank(request: HttpRequest, course_id: int) -> HttpResponse:
     if request.method != "POST" or not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
-    created = generate_question_banks(course, approve=False)
+    created = generate_question_banks(course, approve=True)
     messages.success(request, f"Generated {created} question-bank items.")
     return redirect("standalone:course_detail", course.pk)
 
@@ -817,6 +971,7 @@ def validation_pack_pdf(request: HttpRequest, event_id: int) -> HttpResponse:
 @login_required
 def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
     enrollment = _student_enrollment_or_404(request.user, course_id)
+    today = timezone.localdate()
     mode = request.GET.get("mode", PracticeAttempt.AttemptType.PRACTICE)
     if mode not in {PracticeAttempt.AttemptType.PRACTICE, PracticeAttempt.AttemptType.VALIDATION_PRACTICE}:
         mode = PracticeAttempt.AttemptType.PRACTICE
@@ -824,17 +979,16 @@ def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
     attempt = None
     if attempt_id:
         attempt = get_object_or_404(PracticeAttempt, pk=attempt_id, enrollment=enrollment)
-    if attempt is None:
-        attempt = PracticeAttempt.objects.create(
-            enrollment=enrollment,
-            attempt_type=mode,
-            time_limit_minutes=20 if mode == PracticeAttempt.AttemptType.VALIDATION_PRACTICE else None,
-            feedback_visible_immediately=mode == PracticeAttempt.AttemptType.PRACTICE,
-        )
-        return redirect(f"{reverse('standalone:practice_quiz', args=[course_id])}?attempt={attempt.pk}&mode={mode}")
 
     if request.method == "POST":
-        question = get_object_or_404(QuestionBankItem, pk=request.POST.get("question_id"), course=enrollment.course)
+        question = get_object_or_404(
+            QuestionBankItem.objects.filter(
+                block__available_from__lte=today,
+                question_type=QuestionBankItem.QuestionType.MCQ,
+            ),
+            pk=request.POST.get("question_id"),
+            course=enrollment.course,
+        )
         selected = request.POST.get("answer", "")
         options = [question.correct_answer, *question.distractors]
         is_correct = selected == question.correct_answer
@@ -855,10 +1009,29 @@ def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
     question_queryset = enrollment.course.question_bank_items.filter(
         bank_type=QuestionBankItem.BankType.PRACTICE,
         status=QuestionBankItem.Status.APPROVED,
+        question_type=QuestionBankItem.QuestionType.MCQ,
+        block__available_from__lte=today,
     ).exclude(pk__in=seen_ids)
+
+    if attempt is None:
+        if not question_queryset.exists():
+            messages.info(request, "No practice questions are available yet for the released blocks in this course.")
+            return redirect("standalone:student_dashboard")
+        attempt = PracticeAttempt.objects.create(
+            enrollment=enrollment,
+            attempt_type=mode,
+            time_limit_minutes=20 if mode == PracticeAttempt.AttemptType.VALIDATION_PRACTICE else None,
+            feedback_visible_immediately=mode == PracticeAttempt.AttemptType.PRACTICE,
+        )
+        return redirect(f"{reverse('standalone:practice_quiz', args=[course_id])}?attempt={attempt.pk}&mode={mode}")
+
     question = question_queryset.select_related("learning_objective", "block").first()
 
     if question is None:
+        if not attempt.attempt_questions.exists():
+            attempt.delete()
+            messages.info(request, "No practice questions are available yet for the released blocks in this course.")
+            return redirect("standalone:student_dashboard")
         total = attempt.attempt_questions.count() or 1
         correct = attempt.attempt_questions.filter(is_correct=True).count()
         attempt.score = round(correct * 100 / total, 2)

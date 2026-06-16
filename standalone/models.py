@@ -106,6 +106,8 @@ class CourseConfig(TimeStampedModel):
     engagement_weight = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
     target_weight = models.PositiveSmallIntegerField(default=10, validators=[MinValueValidator(0), MaxValueValidator(100)])
     distractor_count = models.PositiveSmallIntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(5)])
+    maq_ratio_percent = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
+    waq_ratio_percent = models.PositiveSmallIntegerField(default=10, validators=[MinValueValidator(0), MaxValueValidator(100)])
     revalidation_attempts = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(10)])
     show_validation_feedback_immediately = models.BooleanField(default=False)
 
@@ -219,6 +221,7 @@ class CourseBlock(TimeStampedModel):
     title = models.CharField(max_length=255)
     summary = models.TextField(blank=True)
     order = models.PositiveSmallIntegerField(default=1)
+    available_from = models.DateField(default=timezone.localdate)
     regeneration_status = models.CharField(
         max_length=20,
         choices=RegenerationStatus.choices,
@@ -233,10 +236,22 @@ class CourseBlock(TimeStampedModel):
     def __str__(self) -> str:
         return f"{self.course}: {self.title}"
 
+    def is_available(self, on_date=None) -> bool:
+        comparison_date = on_date or timezone.localdate()
+        return self.available_from <= comparison_date
+
+    @property
+    def preview_target_question_count(self) -> int:
+        try:
+            return self.config.target_question_count
+        except BlockConfig.DoesNotExist:
+            return 20
+
 
 class BlockConfig(TimeStampedModel):
     block = models.OneToOneField(CourseBlock, on_delete=models.CASCADE, related_name="config")
     release_date = models.DateTimeField(null=True, blank=True)
+    target_question_count = models.PositiveSmallIntegerField(default=20)
     target_weight_override = models.PositiveSmallIntegerField(
         null=True,
         blank=True,
@@ -309,6 +324,11 @@ class QuestionBankItem(TimeStampedModel):
         PRACTICE = "practice", "Practice"
         VALIDATION = "validation", "Validation"
 
+    class QuestionType(models.TextChoices):
+        MCQ = "mcq", "Single-answer"
+        MAQ = "maq", "Multiple-answer"
+        WAQ = "waq", "Written-answer"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         APPROVED = "approved", "Approved"
@@ -328,7 +348,10 @@ class QuestionBankItem(TimeStampedModel):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
     linked_question = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True, related_name="linked_from")
     stem = models.TextField()
+    question_type = models.CharField(max_length=20, choices=QuestionType.choices, default=QuestionType.MCQ)
     correct_answer = models.TextField()
+    additional_correct_answers = models.JSONField(default=list, blank=True)
+    written_answer_keywords = models.JSONField(default=list, blank=True)
     distractors = models.JSONField(default=list, blank=True)
     explanation = models.TextField(blank=True)
     difficulty = models.CharField(max_length=50, blank=True)
@@ -340,6 +363,73 @@ class QuestionBankItem(TimeStampedModel):
 
     def __str__(self) -> str:
         return f"{self.bank_type}: {self.stem[:80]}"
+
+    def correct_answers(self) -> list[str]:
+        answers = [self.correct_answer, *self.additional_correct_answers]
+        normalized = []
+        for answer in answers:
+            cleaned = str(answer).strip()
+            if cleaned and cleaned not in normalized:
+                normalized.append(cleaned)
+        return normalized
+
+    def all_answer_options(self) -> list[str]:
+        if self.is_written_answer():
+            return []
+        options = []
+        for option in [*self.correct_answers(), *self.distractors]:
+            cleaned = str(option).strip()
+            if cleaned and cleaned not in options:
+                options.append(cleaned)
+        return options
+
+    def is_multiple_answer(self) -> bool:
+        return self.question_type == self.QuestionType.MAQ and len(self.correct_answers()) > 1
+
+    def is_written_answer(self) -> bool:
+        return self.question_type == self.QuestionType.WAQ
+
+
+class EnrollmentQuestionState(TimeStampedModel):
+    enrollment = models.ForeignKey(Enrollment, on_delete=models.CASCADE, related_name="question_states")
+    question = models.ForeignKey(QuestionBankItem, on_delete=models.CASCADE, related_name="enrollment_states")
+    times_presented = models.PositiveIntegerField(default=0)
+    times_correct = models.PositiveIntegerField(default=0)
+    times_incorrect = models.PositiveIntegerField(default=0)
+    last_presented_sequence = models.PositiveIntegerField(default=0)
+    retired_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["enrollment", "question"]
+        unique_together = ("enrollment", "question")
+
+    def __str__(self) -> str:
+        return f"State for {self.enrollment} / {self.question_id}"
+
+
+class QuestionFlag(TimeStampedModel):
+    question = models.ForeignKey(QuestionBankItem, on_delete=models.CASCADE, related_name="flags")
+    flagged_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="question_flags",
+    )
+    enrollment = models.ForeignKey(
+        Enrollment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="question_flags",
+    )
+    reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"Flag for question {self.question_id}"
 
 
 class PracticeAttempt(TimeStampedModel):

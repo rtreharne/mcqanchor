@@ -9,6 +9,29 @@ function setBlockExpanded(toggle, target, expanded) {
   toggle.closest("[data-block-card]")?.classList.toggle("is-expanded", expanded);
 }
 
+function closeBlockActionMenus(root = document) {
+  root.querySelectorAll("[data-block-menu-trigger]").forEach((trigger) => {
+    trigger.setAttribute("aria-expanded", "false");
+  });
+  root.querySelectorAll("[data-block-menu-panel]").forEach((panel) => {
+    panel.hidden = true;
+  });
+  root.querySelectorAll("[data-block-card].is-menu-open").forEach((card) => {
+    card.classList.remove("is-menu-open");
+  });
+}
+
+function ensureBlockActionMenuDocumentBindings(doc = document) {
+  if (doc.documentElement.dataset.blockActionMenusBound === "true") {
+    return;
+  }
+
+  doc.addEventListener("click", () => {
+    closeBlockActionMenus(doc);
+  });
+  doc.documentElement.dataset.blockActionMenusBound = "true";
+}
+
 function getExpandedBlockIds(root = document) {
   return Array.from(root.querySelectorAll("[data-block-toggle][aria-expanded='true']"))
     .map((toggle) => toggle.dataset.blockTarget)
@@ -212,12 +235,15 @@ function createEditor(element) {
   }
 
   const originalValue = element.textContent.trim();
+  const originalInlineValue = element.dataset.inlineValue || "";
   const placeholder = element.dataset.inlinePlaceholder || "";
   const isMultiline = element.dataset.inlineMultiline === "true";
   const label = element.dataset.inlineLabel || "Value";
+  const inputType = element.dataset.inlineInputType || "text";
 
   element.dataset.editing = "true";
   element.dataset.originalValue = originalValue;
+  element.dataset.originalInlineValue = originalInlineValue;
   element.classList.add("is-editing");
 
   const wrapper = document.createElement("div");
@@ -225,10 +251,10 @@ function createEditor(element) {
 
   const field = isMultiline ? document.createElement("textarea") : document.createElement("input");
   field.className = "inline-editor-field";
-  field.value = originalValue === placeholder ? "" : originalValue;
+  field.value = element.dataset.inlineValue || (originalValue === placeholder ? "" : originalValue);
   field.setAttribute("aria-label", label);
   if (!isMultiline) {
-    field.type = "text";
+    field.type = inputType;
   } else {
     field.rows = Math.max(3, Math.min(8, (field.value.match(/\n/g) || []).length + 2));
   }
@@ -257,10 +283,15 @@ function createEditor(element) {
   element.innerHTML = "";
   element.appendChild(wrapper);
   field.focus();
-  field.select();
+  if (typeof field.select === "function" && inputType !== "date") {
+    field.select();
+  }
 
-  function restore(value) {
-    element.textContent = value || placeholder;
+  function restore(displayValue, rawValue = null) {
+    element.textContent = displayValue || placeholder;
+    if (rawValue !== null) {
+      element.dataset.inlineValue = rawValue;
+    }
     element.dataset.editing = "false";
     element.classList.remove("is-editing");
   }
@@ -288,7 +319,7 @@ function createEditor(element) {
       if (!response.ok || !payload.ok) {
         throw new Error((payload.errors || ["Unable to save this change."]).join(" "));
       }
-      restore(payload.display_value || payload.value || placeholder);
+      restore(payload.display_value || payload.value || placeholder, payload.raw_value || payload.value || "");
     } catch (error) {
       errorMessage.textContent = error.message || "Unable to save this change.";
       errorMessage.hidden = false;
@@ -299,7 +330,7 @@ function createEditor(element) {
   }
 
   function cancel() {
-    restore(element.dataset.originalValue || placeholder);
+    restore(element.dataset.originalValue || placeholder, element.dataset.originalInlineValue || "");
   }
 
   wrapper.addEventListener("click", (event) => {
@@ -333,6 +364,9 @@ function createEditor(element) {
 }
 
 function initializeCourseDetail(root = document) {
+  ensureBlockActionMenuDocumentBindings(document);
+  closeBlockActionMenus(root);
+
   root.querySelectorAll("form[data-upload-form]").forEach((form) => {
     const fileInput = form.querySelector("[data-upload-input]");
     const fileName = form.querySelector("[data-upload-file-name]");
@@ -369,8 +403,22 @@ function initializeCourseDetail(root = document) {
     }
 
     function shouldIgnoreToggle(eventTarget) {
+      if (eventTarget.closest("[data-block-menu]")) {
+        return true;
+      }
+      const inlineEditable = eventTarget.closest("[data-inline-edit]");
+      if (inlineEditable) {
+        const blockCard = inlineEditable.closest("[data-block-card]");
+        const isCollapsedTitle =
+          inlineEditable.classList.contains("inline-editable-title") &&
+          blockCard === toggle.closest("[data-block-card]") &&
+          toggle.getAttribute("aria-expanded") !== "true";
+        if (!isCollapsedTitle) {
+          return true;
+        }
+      }
+
       return Boolean(
-        eventTarget.closest("[data-inline-edit]") ||
         eventTarget.closest("a") ||
         eventTarget.closest("button") ||
         eventTarget.closest("input") ||
@@ -395,6 +443,29 @@ function initializeCourseDetail(root = document) {
       }
       event.preventDefault();
       setBlockExpanded(toggle, target, toggle.getAttribute("aria-expanded") !== "true");
+    });
+  });
+
+  root.querySelectorAll("[data-block-menu]").forEach((menu) => {
+    const trigger = menu.querySelector("[data-block-menu-trigger]");
+    const panel = menu.querySelector("[data-block-menu-panel]");
+    if (!trigger || !panel) {
+      return;
+    }
+
+    trigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const isOpen = trigger.getAttribute("aria-expanded") === "true";
+      const blockCard = menu.closest("[data-block-card]");
+      closeBlockActionMenus(document);
+      trigger.setAttribute("aria-expanded", isOpen ? "false" : "true");
+      panel.hidden = isOpen;
+      blockCard?.classList.toggle("is-menu-open", !isOpen);
+    });
+
+    panel.addEventListener("click", (event) => {
+      event.stopPropagation();
     });
   });
 

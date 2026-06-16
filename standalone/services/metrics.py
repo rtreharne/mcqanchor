@@ -1,9 +1,12 @@
 from decimal import Decimal
 
+from django.utils import timezone
+
 from standalone.models import Enrollment, PracticeAttempt, QuestionBankItem
 
 
 def refresh_enrollment_metrics(enrollment: Enrollment) -> None:
+    today = timezone.localdate()
     official_attempts = enrollment.practice_attempts.filter(attempt_type=PracticeAttempt.AttemptType.PRACTICE)
     previous_scores = {
         "mastery": enrollment.mastery_score,
@@ -24,16 +27,17 @@ def refresh_enrollment_metrics(enrollment: Enrollment) -> None:
 
     mastery = Decimal(correct_questions * 100 / total_questions).quantize(Decimal("0.01"))
 
-    total_objectives = enrollment.course.learning_objectives.count() or 1
+    total_objectives = enrollment.course.learning_objectives.filter(block__available_from__lte=today).count() or 1
     covered_objectives = enrollment.course.learning_objectives.filter(
+        block__available_from__lte=today,
         question_bank_items__attempt_questions__attempt__enrollment=enrollment
     ).distinct().count()
     coverage = Decimal(covered_objectives * 100 / total_objectives).quantize(Decimal("0.01"))
 
     engagement = Decimal(min(100, official_attempts.count() * 10)).quantize(Decimal("0.01"))
 
-    released_blocks = enrollment.course.blocks.count() or 1
-    touched_blocks = enrollment.course.blocks.filter(practice_attempts__enrollment=enrollment).distinct().count()
+    released_blocks = enrollment.course.blocks.filter(available_from__lte=today).count() or 1
+    touched_blocks = enrollment.course.blocks.filter(available_from__lte=today, practice_attempts__enrollment=enrollment).distinct().count()
     target = Decimal(touched_blocks * 100 / released_blocks).quantize(Decimal("0.01"))
 
     enrollment.mastery_score = mastery
@@ -57,4 +61,3 @@ def refresh_enrollment_metrics(enrollment: Enrollment) -> None:
             "updated_at",
         ]
     )
-

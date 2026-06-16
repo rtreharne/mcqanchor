@@ -1,0 +1,118 @@
+{% extends "standalone/base.html" %}
+{% load static %}
+{% block title %}Practice | {{ course.title }}{% endblock %}
+{% block extra_head %}
+  <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}">
+{% endblock %}
+{% block app_shell_class %} preview-app-shell{% endblock %}
+{% block content %}
+<section
+  class="preview-page"
+  data-student-preview
+  data-action-url-template="{% url 'standalone:student_preview_action' course.pk 0 'ACTION' %}"
+>
+  <aside class="preview-sidebar">
+    <div class="preview-sidebar-head">
+      <h1>{{ course.title }}</h1>
+      <p class="lead">{{ course.summary|default:"Chat-based practice for this course." }}</p>
+      <div class="action-row">
+        <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
+      </div>
+    </div>
+    <div class="preview-block-switcher" aria-label="Course blocks"></div>
+  </aside>
+  <button
+    class="preview-sidebar-toggle"
+    type="button"
+    aria-label="Hide preview sidebar"
+    aria-expanded="true"
+    data-preview-sidebar-toggle
+  >
+    <span class="preview-sidebar-toggle-icon" aria-hidden="true"></span>
+  </button>
+  <button
+    class="preview-sidebar-scrim"
+    type="button"
+    hidden
+    aria-label="Hide preview sidebar"
+    data-preview-sidebar-scrim
+  ></button>
+
+  <section class="preview-chat-shell">
+    <div class="preview-chat-header">
+      <div class="preview-chat-header-main">
+        <p class="preview-eyebrow">Practice</p>
+        <h2 class="preview-active-block-title"></h2>
+        <div class="preview-chat-header-actions">
+          <button class="preview-header-action" type="button" data-preview-resource="description">Description</button>
+          <button class="preview-header-action" type="button" data-preview-resource="objectives">Learning objectives</button>
+        </div>
+      </div>
+    </div>
+    <div class="preview-chat-transcript" aria-live="polite" aria-label="Chat transcript"></div>
+    <form class="preview-chat-form">
+      <p class="preview-chat-status" role="status" aria-live="polite"></p>
+      <div class="preview-waq-alignment" hidden data-waq-alignment>
+        <div class="preview-waq-alignment-head">
+          <span>Answer alignment</span>
+          <div class="preview-waq-alignment-meta">
+            <span class="preview-waq-alignment-loader" hidden data-waq-alignment-loader>
+              <span class="preview-waq-alignment-loader-dots" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </span>
+              Checking...
+            </span>
+            <strong data-waq-alignment-label>Start typing</strong>
+          </div>
+        </div>
+        <div class="preview-waq-alignment-track" aria-hidden="true">
+          <span data-waq-alignment-fill></span>
+        </div>
+      </div>
+      <label class="preview-sr-only" for="preview-chat-input">Ask a related question</label>
+      <div class="preview-chat-composer">
+        <textarea id="preview-chat-input" rows="1" maxlength="500" placeholder="Ask a related question."></textarea>
+        <div class="preview-quiz-controls">
+          <button class="button" type="submit">Quiz</button>
+          <div class="preview-quiz-menu" data-quiz-menu>
+            <button
+              class="button secondary preview-quiz-menu-trigger"
+              type="button"
+              aria-label="Choose question type"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              data-quiz-menu-trigger
+            >
+              <span class="preview-quiz-menu-trigger-dots" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </span>
+            </button>
+            <div class="preview-quiz-menu-panel" role="menu" hidden data-quiz-menu-panel>
+              <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="mcq">
+                <span class="preview-quiz-menu-item-title">MCQ</span>
+                <span class="preview-quiz-menu-item-copy">Single answer</span>
+              </button>
+              <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="maq">
+                <span class="preview-quiz-menu-item-title">MAQ</span>
+                <span class="preview-quiz-menu-item-copy">Multiple answers</span>
+              </button>
+              <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="waq">
+                <span class="preview-quiz-menu-item-title">WAQ</span>
+                <span class="preview-quiz-menu-item-copy">Written answer</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </form>
+  </section>
+</section>
+{{ preview_state|json_script:"student-preview-data" }}
+{% endblock %}
+{% block extra_body %}
+  <script src="{% static 'standalone/js/student-preview.js' %}"></script>
+{% endblock %}
