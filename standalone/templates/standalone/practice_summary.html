@@ -1,0 +1,21 @@
+{% extends "standalone/base.html" %}
+{% block content %}
+<section class="panel narrow">
+  <h1>Attempt complete</h1>
+  <p class="lead">Score: {{ attempt.score }}%</p>
+  <article class="card">
+    <h2>Review</h2>
+    <ul class="simple-list">
+      {% for line in attempt.attempt_questions.all %}
+        <li>
+          <strong>{{ line.question.stem }}</strong><br>
+          Your answer: {{ line.selected_answer|default:"No answer" }}<br>
+          {% if line.is_correct %}Correct{% else %}Incorrect{% endif %}
+          {% if line.feedback %}<br>{{ line.feedback }}{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </article>
+  <a class="button" href="{% url 'standalone:student_dashboard' %}">Back to dashboard</a>
+</section>
+{% endblock %}

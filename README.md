@@ -1,6 +1,9 @@
 # MCQ Anchor
 
-MCQ Anchor is a Django-based pilot website for an educational assessment concept that combines continuous online MCQ practice with short controlled validation checks.
+MCQ Anchor is a Django-based product codebase with two surfaces:
+
+- a public marketing/pilot site at `/`
+- a standalone app at `/app/` for invite-based teacher and student workflows
 
 ## Stack
 
@@ -12,6 +15,7 @@ MCQ Anchor is a Django-based pilot website for an educational assessment concept
 - Plain CSS
 - Lightweight vanilla JavaScript
 - OpenAI Python SDK for the product chatbot
+- OpenAI Python SDK for standalone content/question generation
 - Docker
 - WhiteNoise for static file serving
 
@@ -50,12 +54,22 @@ DJANGO_SECRET_KEY=replace-with-a-secret-key
 DJANGO_DEBUG=True
 DJANGO_ALLOWED_HOSTS=127.0.0.1,localhost
 DJANGO_CSRF_TRUSTED_ORIGINS=
-SQLITE_PATH=
+SQLITE_PATH=standalone.sqlite3
 DJANGO_ADMIN_USERNAME=
 DJANGO_ADMIN_PASSWORD=
 OPENAI_API_KEY=your-openai-api-key
 OPENAI_MODEL=gpt-4.1-mini
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+CELERY_BROKER_URL=
+CELERY_RESULT_BACKEND=
+CELERY_TASK_ALWAYS_EAGER=False
 CONTACT_EMAIL=replace-me@example.com
+EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+DEFAULT_FROM_EMAIL=no-reply@mcqanchor.local
+STANDALONE_ENABLE_MAGIC_LINKS=True
+STANDALONE_ENABLE_SELF_ENROL=True
+STANDALONE_INVITE_EXPIRY_HOURS=72
+STANDALONE_MAGIC_LINK_EXPIRY_HOURS=72
 ```
 
 6. Run migrations:
@@ -64,24 +78,41 @@ CONTACT_EMAIL=replace-me@example.com
 python manage.py migrate
 ```
 
+If you are switching from the earlier marketing-site-only branch, use a fresh SQLite file for the standalone branch. The default local database path is `standalone.sqlite3`.
+
 7. Start the local development server:
 
 ```bash
 python manage.py runserver
 ```
 
-8. Run tests:
+8. If you want background processing for content ingestion and learning-objective generation, start a Celery worker and set a broker URL such as Redis in `.env`:
+
+```bash
+celery -A config worker --loglevel=info
+```
+
+If `CELERY_BROKER_URL` is left blank, the app will process uploads inline instead.
+
+9. Run tests:
 
 ```bash
 python manage.py test
 ```
 
-Then open `http://127.0.0.1:8000/`.
+Then open:
+
+- `http://127.0.0.1:8000/` for the public site
+- `http://127.0.0.1:8000/app/login/` for the standalone app
 
 ## Notes
 
 - The chatbot is server-side only. `OPENAI_API_KEY` is never exposed to browser code.
+- Standalone learning objectives and block/course summaries use the OpenAI API when `OPENAI_API_KEY` is set, with heuristic fallback if the API is unavailable.
 - The site stores pilot enquiries in SQLite via the `PilotEnquiry` model.
+- The standalone app uses a custom Django user model plus course, enrolment, content-ingestion, question-bank, practice, and validation tables under the `standalone` app.
+- Supported standalone upload types are `.html`, `.docx`, `.pdf`, `.txt`, `.R`, `.py`, `.ipynb`, `.Rmd`, `.md`, `.pptx`, and `.xlsx`.
+- Standalone validation v1 currently generates printable PDF packs with QR identifiers; live scan/OMR capture is still a later step.
 - `LTI 1.3 enabled. Integrate into your VLE seamlessly or use it as a standalone product.` is the canonical LTI/VLE positioning line for the project.
 - The UI is designed to target WCAG 2.2 AA expectations for color contrast, focus visibility, keyboard access, and responsive readability. A final production release should still be checked with automated and manual accessibility audits.
 

@@ -1,0 +1,76 @@
+{% extends "standalone/base.html" %}
+{% block content %}
+<section class="panel narrow">
+  <h1>{{ title }}</h1>
+  <form method="post" enctype="multipart/form-data" class="stack-form{% if is_upload_form or has_upload_picker %} upload-inline-form{% endif %}"{% if is_upload_form or has_upload_picker %} data-upload-form{% if submit_progress_label %} data-submit-progress-label="{{ submit_progress_label }}"{% endif %}{% endif %}>
+    {% csrf_token %}
+    {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
+    {{ form.non_field_errors }}
+    {% for field in form %}
+      <div class="field">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {% if field.name == "file" %}
+          {% if is_upload_form or has_upload_picker %}
+            <div class="upload-picker-row">
+              {{ field }}
+              <label class="button secondary upload-file-trigger" for="{{ field.id_for_label }}">Choose files</label>
+              <span class="upload-file-name" data-upload-file-name>No file selected</span>
+            </div>
+          {% else %}
+            {{ field }}
+          {% endif %}
+        {% else %}
+          {{ field }}
+        {% endif %}
+        {% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}
+        {% for error in field.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+      </div>
+    {% endfor %}
+    <div class="action-row">
+      <button type="submit" class="button{% if is_upload_form or has_upload_picker %} upload-submit-button{% endif %}">
+        {% if is_upload_form or has_upload_picker %}<span class="upload-submit-spinner" aria-hidden="true"></span><span data-upload-submit-text>{{ submit_label|default:"Upload files" }}</span>{% else %}{{ submit_label|default:"Save" }}{% endif %}
+      </button>
+      {% if cancel_url %}
+        <a class="button secondary" href="{{ cancel_url }}">Cancel</a>
+      {% endif %}
+    </div>
+  </form>
+</section>
+{% if is_upload_form or has_upload_picker %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll("form[data-upload-form]").forEach(function (form) {
+      const fileInput = form.querySelector("[data-upload-input]");
+      const fileName = form.querySelector("[data-upload-file-name]");
+      const submitButton = form.querySelector("button[type='submit']");
+      const submitText = form.querySelector("[data-upload-submit-text]");
+
+      function syncFileName() {
+        if (!fileName || !fileInput) return;
+        const fileCount = fileInput.files ? fileInput.files.length : 0;
+        if (!fileCount) {
+          fileName.textContent = "No file selected";
+          return;
+        }
+        if (fileCount === 1) {
+          fileName.textContent = fileInput.files[0].name;
+          return;
+        }
+        fileName.textContent = `${fileCount} files selected`;
+      }
+
+      syncFileName();
+      if (fileInput) {
+        fileInput.addEventListener("change", syncFileName);
+      }
+
+      form.addEventListener("submit", function () {
+        form.classList.add("is-submitting");
+        if (submitButton) submitButton.disabled = true;
+        if (submitText) submitText.textContent = form.dataset.submitProgressLabel || "Uploading...";
+      });
+    });
+  });
+</script>
+{% endif %}
+{% endblock %}

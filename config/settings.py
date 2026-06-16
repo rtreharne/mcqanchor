@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "standalone",
     "website",
 ]
 
@@ -83,7 +84,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": env_str("SQLITE_PATH", str(BASE_DIR / "db.sqlite3")),
+        "NAME": env_str("SQLITE_PATH", str(BASE_DIR / "standalone.sqlite3")),
     }
 }
 
@@ -120,12 +121,32 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+AUTH_USER_MODEL = "standalone.User"
+
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
+
+LOGIN_URL = "standalone:login"
+LOGIN_REDIRECT_URL = "standalone:dashboard"
+LOGOUT_REDIRECT_URL = "website:home"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+CELERY_BROKER_URL = env_str("CELERY_BROKER_URL", "")
+CELERY_RESULT_BACKEND = env_str("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", False)
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "replace-me@example.com")
 CHAT_RATE_LIMIT = int(os.getenv("CHAT_RATE_LIMIT", "8"))
 CHAT_RATE_WINDOW = int(os.getenv("CHAT_RATE_WINDOW", "60"))
 CHAT_MAX_QUESTION_LENGTH = int(os.getenv("CHAT_MAX_QUESTION_LENGTH", "500"))
 CHAT_MAX_HISTORY_ITEMS = int(os.getenv("CHAT_MAX_HISTORY_ITEMS", "6"))
 CHAT_MAX_HISTORY_MESSAGE_LENGTH = int(os.getenv("CHAT_MAX_HISTORY_MESSAGE_LENGTH", "300"))
+
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@mcqanchor.local")
+
+STANDALONE_ENABLE_MAGIC_LINKS = env_bool("STANDALONE_ENABLE_MAGIC_LINKS", True)
+STANDALONE_ENABLE_SELF_ENROL = env_bool("STANDALONE_ENABLE_SELF_ENROL", True)
+STANDALONE_INVITE_EXPIRY_HOURS = int(os.getenv("STANDALONE_INVITE_EXPIRY_HOURS", "72"))
+STANDALONE_MAGIC_LINK_EXPIRY_HOURS = int(os.getenv("STANDALONE_MAGIC_LINK_EXPIRY_HOURS", "72"))

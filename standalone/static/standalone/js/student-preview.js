@@ -1,0 +1,1273 @@
+function getCsrfToken() {
+  const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+const previewRoot = document.querySelector("[data-student-preview]");
+const previewDataNode = document.getElementById("student-preview-data");
+
+if (previewRoot && previewDataNode) {
+  const actionUrlTemplate = previewRoot.dataset.actionUrlTemplate || "";
+  const blockSwitcher = previewRoot.querySelector(".preview-block-switcher");
+  const transcript = previewRoot.querySelector(".preview-chat-transcript");
+  const form = previewRoot.querySelector(".preview-chat-form");
+  const input = previewRoot.querySelector("#preview-chat-input");
+  const statusText = previewRoot.querySelector(".preview-chat-status");
+  const quizControls = previewRoot.querySelector(".preview-quiz-controls");
+  const sidebarToggle = previewRoot.querySelector("[data-preview-sidebar-toggle]");
+  const sidebarScrim = previewRoot.querySelector("[data-preview-sidebar-scrim]");
+  const submitButton = form?.querySelector("button[type='submit']");
+  const quizMenu = previewRoot.querySelector("[data-quiz-menu]");
+  const quizMenuTrigger = previewRoot.querySelector("[data-quiz-menu-trigger]");
+  const quizMenuPanel = previewRoot.querySelector("[data-quiz-menu-panel]");
+  const waqAlignment = previewRoot.querySelector("[data-waq-alignment]");
+  const waqAlignmentLabel = previewRoot.querySelector("[data-waq-alignment-label]");
+  const waqAlignmentFill = previewRoot.querySelector("[data-waq-alignment-fill]");
+  const waqAlignmentLoader = previewRoot.querySelector("[data-waq-alignment-loader]");
+  const activeBlockTitle = previewRoot.querySelector(".preview-active-block-title");
+  const resourceButtons = Array.from(previewRoot.querySelectorAll("[data-preview-resource]"));
+  const mobileSidebarMedia = window.matchMedia("(max-width: 980px)");
+
+  let previewState = JSON.parse(previewDataNode.textContent || "{}");
+  let activeBlockId = String(previewState.active_block_id || "");
+  let requestInFlight = false;
+  let sidebarOpen = true;
+  let inlineMessageSequence = 0;
+  let sidebarAutoCloseTimer = 0;
+  let highlightedSidebarBlockId = "";
+  let highlightedSidebarBlockUntil = 0;
+  let waqDraftDebounceTimer = 0;
+  let waqDraftRequestId = 0;
+  let waqAlignmentLoadingRequestId = 0;
+  const inlineMessagesByBlock = {};
+  const loadingMessagesByBlock = {};
+  const optimisticUserMessagesByBlock = {};
+  const maqSelectionsByQuestionId = {};
+  const sidebarSelectionPreviewMs = 2000;
+
+  function actionUrl(blockId, action) {
+    return actionUrlTemplate.replace("/0/ACTION/", `/${blockId}/${action}/`);
+  }
+
+  function currentBlock() {
+    return (previewState.blocks || []).find((block) => String(block.id) === String(activeBlockId)) || previewState.blocks?.[0] || null;
+  }
+
+  function pendingQuestion(block = currentBlock()) {
+    if (!block || !Array.isArray(block.transcript)) {
+      return null;
+    }
+    return [...block.transcript].reverse().find(
+      (message) => message.kind === "question" && !message.answered && !message.flagged,
+    ) || null;
+  }
+
+  function pendingWrittenQuestion(block = currentBlock()) {
+    const question = pendingQuestion(block);
+    return question?.question_type === "waq" ? question : null;
+  }
+
+  function updateQuestionMessage(questionId, updater) {
+    if (!questionId || typeof updater !== "function") {
+      return null;
+    }
+    let updatedQuestion = null;
+    (previewState.blocks || []).forEach((block) => {
+      (block.transcript || []).forEach((message) => {
+        if (message.kind === "question" && String(message.question_id) === String(questionId)) {
+          updater(message, block);
+          updatedQuestion = message;
+        }
+      });
+    });
+    return updatedQuestion;
+  }
+
+  function blockInlineMessages(blockId) {
+    const key = String(blockId);
+    if (!Array.isArray(inlineMessagesByBlock[key])) {
+      inlineMessagesByBlock[key] = [];
+    }
+    return inlineMessagesByBlock[key];
+  }
+
+  function setQuizLoading(blockId, isLoading) {
+    const key = String(blockId);
+    if (isLoading) {
+      loadingMessagesByBlock[key] = true;
+      return;
+    }
+    delete loadingMessagesByBlock[key];
+  }
+
+  function setOptimisticUserMessage(blockId, text = "") {
+    const key = String(blockId);
+    if (!text) {
+      delete optimisticUserMessagesByBlock[key];
+      return;
+    }
+    optimisticUserMessagesByBlock[key] = {
+      id: `optimistic-user-${key}`,
+      kind: "text",
+      role: "user",
+      text,
+    };
+  }
+
+  function maqSelection(questionId) {
+    return Array.isArray(maqSelectionsByQuestionId[String(questionId)]) ? maqSelectionsByQuestionId[String(questionId)] : [];
+  }
+
+  function setMaqSelection(questionId, selections) {
+    const key = String(questionId);
+    const normalized = [];
+    (selections || []).forEach((selection) => {
+      const cleaned = String(selection).trim();
+      if (cleaned && !normalized.includes(cleaned)) {
+        normalized.push(cleaned);
+      }
+    });
+    if (!normalized.length) {
+      delete maqSelectionsByQuestionId[key];
+      return;
+    }
+    maqSelectionsByQuestionId[key] = normalized;
+  }
+
+  function toggleMaqSelection(questionId, option) {
+    const selections = maqSelection(questionId);
+    if (selections.includes(option)) {
+      setMaqSelection(
+        questionId,
+        selections.filter((selection) => selection !== option),
+      );
+      return;
+    }
+    setMaqSelection(questionId, [...selections, option]);
+  }
+
+  function clearAnsweredQuestionSelections() {
+    (previewState.blocks || []).forEach((block) => {
+      (block.transcript || []).forEach((message) => {
+        if (message.kind === "question" && message.answered) {
+          delete maqSelectionsByQuestionId[String(message.question_id)];
+        }
+      });
+    });
+  }
+
+  function setStatus(message) {
+    if (statusText) {
+      statusText.textContent = message || "";
+    }
+  }
+
+  function isMobileSidebar() {
+    return mobileSidebarMedia.matches;
+  }
+
+  function clearSidebarSelectionPreview() {
+    highlightedSidebarBlockId = "";
+    highlightedSidebarBlockUntil = 0;
+    blockSwitcher?.querySelectorAll(".preview-block-card.is-selection-preview").forEach((card) => {
+      card.classList.remove("is-selection-preview");
+    });
+  }
+
+  function clearSidebarAutoCloseTimer(clearHighlight = false) {
+    if (sidebarAutoCloseTimer) {
+      window.clearTimeout(sidebarAutoCloseTimer);
+      sidebarAutoCloseTimer = 0;
+    }
+    if (clearHighlight) {
+      clearSidebarSelectionPreview();
+    }
+  }
+
+  function isSidebarSelectionPreview(blockId) {
+    return (
+      highlightedSidebarBlockId === String(blockId)
+      && highlightedSidebarBlockUntil > Date.now()
+    );
+  }
+
+  function scheduleSidebarAutoClose(blockId) {
+    clearSidebarAutoCloseTimer();
+    highlightedSidebarBlockId = String(blockId);
+    highlightedSidebarBlockUntil = Date.now() + sidebarSelectionPreviewMs;
+    sidebarAutoCloseTimer = window.setTimeout(() => {
+      clearSidebarAutoCloseTimer(true);
+      setSidebarOpen(false);
+    }, sidebarSelectionPreviewMs);
+  }
+
+  function applySidebarState() {
+    previewRoot.classList.toggle("is-sidebar-collapsed", !sidebarOpen);
+    if (sidebarToggle) {
+      sidebarToggle.setAttribute("aria-expanded", String(sidebarOpen));
+      sidebarToggle.setAttribute("aria-label", sidebarOpen ? "Hide preview sidebar" : "Show preview sidebar");
+    }
+    if (sidebarScrim) {
+      sidebarScrim.hidden = !isMobileSidebar() || !sidebarOpen;
+    }
+  }
+
+  function setSidebarOpen(nextOpen) {
+    if (!nextOpen) {
+      clearSidebarAutoCloseTimer(true);
+    }
+    sidebarOpen = !!nextOpen;
+    applySidebarState();
+  }
+
+  function toggleSidebar() {
+    setSidebarOpen(!sidebarOpen);
+  }
+
+  function closeQuizMenu() {
+    if (!quizMenu || !quizMenuTrigger || !quizMenuPanel) {
+      return;
+    }
+    quizMenu.dataset.open = "false";
+    quizMenuTrigger.setAttribute("aria-expanded", "false");
+    quizMenuPanel.setAttribute("hidden", "hidden");
+    quizMenuPanel.hidden = true;
+  }
+
+  function openQuizMenu() {
+    if (!quizMenu || !quizMenuTrigger || !quizMenuPanel || requestInFlight) {
+      return;
+    }
+    quizMenu.dataset.open = "true";
+    quizMenuTrigger.setAttribute("aria-expanded", "true");
+    quizMenuPanel.removeAttribute("hidden");
+    quizMenuPanel.hidden = false;
+  }
+
+  function isQuizMenuOpen() {
+    return !!quizMenuPanel && !quizMenuPanel.hidden;
+  }
+
+  function resizeComposerInput() {
+    if (!input) {
+      return;
+    }
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
+  }
+
+  function clearWaqDraftTimer() {
+    if (waqDraftDebounceTimer) {
+      window.clearTimeout(waqDraftDebounceTimer);
+      waqDraftDebounceTimer = 0;
+    }
+  }
+
+  function setWaqAlignmentLoading(requestId) {
+    waqAlignmentLoadingRequestId = requestId || 0;
+    renderWaqAlignment();
+  }
+
+  function clearWaqAlignmentLoading(requestId = 0) {
+    if (requestId && requestId !== waqAlignmentLoadingRequestId) {
+      return;
+    }
+    waqAlignmentLoadingRequestId = 0;
+    renderWaqAlignment();
+  }
+
+  function setWaqAlignmentFlash(isFlashing) {
+    if (!waqAlignment) {
+      return;
+    }
+    waqAlignment.classList.toggle("is-flashing", !!isFlashing);
+  }
+
+  function renderWaqAlignment(question = pendingWrittenQuestion(), { flash = false } = {}) {
+    if (!waqAlignment || !waqAlignmentLabel || !waqAlignmentFill) {
+      return;
+    }
+    if (!question || question.answered || question.flagged) {
+      waqAlignmentLoadingRequestId = 0;
+      waqAlignment.hidden = true;
+      waqAlignment.dataset.state = "drafting";
+      waqAlignment.dataset.loading = "false";
+      waqAlignmentFill.style.width = "0%";
+      waqAlignmentLabel.textContent = "Start typing";
+      if (waqAlignmentLoader) {
+        waqAlignmentLoader.hidden = true;
+      }
+      setWaqAlignmentFlash(false);
+      return;
+    }
+
+    const score = Number(question.alignment_score || 0);
+    const state = question.alignment_state || "drafting";
+    const isLoading = !!waqAlignmentLoadingRequestId && !!String(question.draft_answer || "").trim();
+    waqAlignment.hidden = false;
+    waqAlignment.dataset.state = state;
+    waqAlignment.dataset.loading = isLoading ? "true" : "false";
+    waqAlignmentFill.style.width = `${Math.max(0, Math.min(score, 100))}%`;
+    if (waqAlignmentLoader) {
+      waqAlignmentLoader.hidden = !isLoading;
+    }
+    if (!question.draft_answer && !question.submitted_text) {
+      waqAlignmentLabel.textContent = "Start typing";
+    } else if (state === "aligned") {
+      waqAlignmentLabel.textContent = `Aligned ${score}%`;
+    } else if (state === "close") {
+      waqAlignmentLabel.textContent = `${score}% close`;
+    } else {
+      waqAlignmentLabel.textContent = `${score}% building`;
+    }
+    if (flash) {
+      setWaqAlignmentFlash(false);
+      window.requestAnimationFrame(() => {
+        setWaqAlignmentFlash(true);
+        window.setTimeout(() => setWaqAlignmentFlash(false), 700);
+      });
+      return;
+    }
+    setWaqAlignmentFlash(false);
+  }
+
+  function syncComposerInputFromState() {
+    if (!input) {
+      return;
+    }
+    const question = pendingWrittenQuestion();
+    if (question) {
+      const nextValue = question.draft_answer || "";
+      if (input.value !== nextValue) {
+        input.value = nextValue;
+      }
+      input.dataset.mode = "waq";
+      resizeComposerInput();
+      return;
+    }
+
+    if (input.dataset.mode === "waq") {
+      input.value = "";
+      resizeComposerInput();
+    }
+    input.dataset.mode = "chat";
+  }
+
+  function syncComposerState() {
+    if (!submitButton || !input) {
+      return;
+    }
+    const activeWaq = pendingWrittenQuestion();
+    const hasText = !!input.value.trim();
+    const isWaqMode = !!activeWaq;
+
+    previewRoot.classList.toggle("is-waq-mode", isWaqMode);
+    form?.classList.toggle("is-waq-mode", isWaqMode);
+    quizControls?.classList.toggle("is-answer-mode", isWaqMode);
+    input.placeholder = isWaqMode ? "Write your answer..." : "Ask a related question.";
+    submitButton.textContent = isWaqMode ? "Submit answer" : (hasText ? "Send" : "Quiz");
+    submitButton.disabled = requestInFlight || (isWaqMode && !hasText);
+    if (quizMenu) {
+      quizMenu.hidden = hasText || isWaqMode;
+    }
+    if (quizMenuTrigger) {
+      quizMenuTrigger.disabled = requestInFlight || !!input.value.trim() || isWaqMode;
+    }
+    renderWaqAlignment(activeWaq);
+  }
+
+  function setComposerDisabled(disabled) {
+    requestInFlight = disabled;
+    if (input) {
+      input.disabled = disabled;
+    }
+    if (submitButton) {
+      submitButton.disabled = disabled;
+    }
+    if (quizMenuTrigger) {
+      quizMenuTrigger.disabled = disabled || !!input?.value.trim() || !!pendingWrittenQuestion();
+    }
+    previewRoot.querySelectorAll(".preview-answer-chip").forEach((button) => {
+      button.disabled = disabled;
+    });
+    previewRoot.querySelectorAll(".preview-question-submit").forEach((button) => {
+      button.disabled = disabled || button.dataset.hasSelection !== "true";
+    });
+    previewRoot.querySelectorAll(".preview-flag-button").forEach((button) => {
+      button.disabled = disabled || button.textContent === "Flagged";
+    });
+    resourceButtons.forEach((button) => {
+      button.disabled = disabled;
+    });
+    if (disabled) {
+      closeQuizMenu();
+    }
+  }
+
+  function updateComposerClearance() {
+    if (!form) {
+      return;
+    }
+    previewRoot.style.setProperty("--preview-composer-clearance", `${form.offsetHeight + 20}px`);
+  }
+
+  function scrollTranscriptToBottom() {
+    transcript?.scrollTo({ top: transcript.scrollHeight, behavior: "auto" });
+  }
+
+  function latestPendingQuestionCard() {
+    if (!transcript) {
+      return null;
+    }
+    return Array.from(transcript.querySelectorAll("[data-preview-question='true']")).reverse().find(
+      (element) => element.dataset.answered !== "true" && element.dataset.flagged !== "true",
+    ) || null;
+  }
+
+  function syncQuestionViewport(scrollMode = "bottom", previousScrollTop = 0) {
+    if (!transcript) {
+      return;
+    }
+
+    const questionCards = Array.from(transcript.querySelectorAll("[data-preview-question='true']"));
+    questionCards.forEach((card) => {
+      card.classList.remove("is-overflowing-question");
+      const hint = card.querySelector(".preview-question-overflow-hint");
+      if (hint) {
+        hint.hidden = true;
+      }
+    });
+
+    const activeQuestion = latestPendingQuestionCard();
+    if (activeQuestion) {
+      const hint = activeQuestion.querySelector(".preview-question-overflow-hint");
+      const isOverflowing = activeQuestion.offsetHeight > transcript.clientHeight - 16;
+      if (isOverflowing) {
+        activeQuestion.classList.add("is-overflowing-question");
+        if (hint) {
+          hint.hidden = false;
+        }
+      }
+      if (scrollMode === "question" && isOverflowing) {
+        transcript.scrollTo({ top: Math.max(activeQuestion.offsetTop - 6, 0), behavior: "auto" });
+        return;
+      }
+    }
+
+    if (scrollMode === "preserve") {
+      transcript.scrollTop = Math.min(previousScrollTop, transcript.scrollHeight);
+      return;
+    }
+
+    scrollTranscriptToBottom();
+  }
+
+  function ensureActiveBlockCardVisible() {
+    if (!blockSwitcher) {
+      return;
+    }
+
+    const activeCard = blockSwitcher.querySelector(".preview-block-card.is-active");
+    if (!activeCard) {
+      return;
+    }
+
+    const containerRect = blockSwitcher.getBoundingClientRect();
+    const cardRect = activeCard.getBoundingClientRect();
+    const padding = 12;
+    const visibleHeight = containerRect.height - padding * 2;
+
+    if (cardRect.height > visibleHeight) {
+      blockSwitcher.scrollTop = Math.max(activeCard.offsetTop - padding, 0);
+      return;
+    }
+
+    if (cardRect.top < containerRect.top + padding) {
+      blockSwitcher.scrollTop -= containerRect.top + padding - cardRect.top;
+      return;
+    }
+
+    if (cardRect.bottom > containerRect.bottom - padding) {
+      blockSwitcher.scrollTop += cardRect.bottom - (containerRect.bottom - padding);
+    }
+  }
+
+  function metricMarkup(block) {
+    return `
+      <div class="preview-block-metric"><span>Mastery</span><strong>${block.metrics.mastery}%</strong></div>
+      <div class="preview-block-metric"><span>Coverage</span><strong>${block.metrics.coverage}%</strong></div>
+      <div class="preview-block-metric"><span>Engagement</span><strong>${block.metrics.engagement}%</strong></div>
+      <div class="preview-block-metric"><span>Target</span><strong>${block.metrics.target}%</strong></div>
+    `;
+  }
+
+  function optionLabel(index) {
+    return String.fromCharCode(65 + index);
+  }
+
+  function formatSelectedAnswers(options, selectedAnswers, flagged = false) {
+    const normalizedAnswers = Array.isArray(selectedAnswers) ? selectedAnswers : [];
+    const selectedText = normalizedAnswers.map((answer) => {
+      const optionIndex = Array.isArray(options) ? options.indexOf(answer) : -1;
+      return optionIndex >= 0 ? `${optionLabel(optionIndex)}. ${answer}` : answer;
+    });
+    if (!selectedText.length) {
+      return flagged ? "Selected: flagged" : "";
+    }
+    return `Selected: ${selectedText.join(", ")}${flagged ? " • flagged" : ""}`;
+  }
+
+  function normalizeAnswerList(answers) {
+    return Array.isArray(answers) ? answers.filter(Boolean) : [];
+  }
+
+  function reviewedOptionState(option, selectedAnswers, correctAnswers) {
+    const isSelected = selectedAnswers.includes(option);
+    const isCorrect = correctAnswers.includes(option);
+
+    if (isSelected && isCorrect) {
+      return { modifier: "is-correct", badge: "Correct", indicator: "✓" };
+    }
+    if (isSelected && !isCorrect) {
+      return { modifier: "is-incorrect", badge: "Your choice", indicator: "×" };
+    }
+    if (!isSelected && isCorrect) {
+      return { modifier: "is-missed", badge: "Missed", indicator: "!" };
+    }
+    return { modifier: "", badge: "", indicator: "" };
+  }
+
+  function renderAnsweredOptions(message) {
+    const optionsWrapper = document.createElement("div");
+    optionsWrapper.className = "preview-message-options preview-message-options--review";
+
+    const selectedAnswers = normalizeAnswerList(message.selected_answers?.length ? message.selected_answers : [message.selected_answer]);
+    const correctAnswers = normalizeAnswerList(message.correct_answers);
+
+    message.options.forEach((option, index) => {
+      const state = reviewedOptionState(option, selectedAnswers, correctAnswers);
+      const optionRow = document.createElement("div");
+      optionRow.className = `preview-answer-chip preview-answer-chip--review${state.modifier ? ` ${state.modifier}` : ""}`;
+      optionRow.innerHTML = `
+        <span class="preview-answer-chip-indicator" aria-hidden="true">${state.indicator}</span>
+        <span class="preview-answer-chip-label">${optionLabel(index)}</span>
+        <span class="preview-answer-chip-text">${option}</span>
+        ${state.badge ? `<span class="preview-answer-chip-badge">${state.badge}</span>` : ""}
+      `;
+      optionsWrapper.appendChild(optionRow);
+    });
+
+    if (message.flagged) {
+      const flaggedNote = document.createElement("p");
+      flaggedNote.className = "preview-message-sources";
+      flaggedNote.textContent = "Question flagged.";
+      optionsWrapper.appendChild(flaggedNote);
+    }
+
+    return optionsWrapper;
+  }
+
+  function renderWrittenAnswerReview(message) {
+    const review = document.createElement("div");
+    review.className = "preview-written-answer-review";
+
+    const submitted = document.createElement("div");
+    submitted.className = "preview-written-answer-panel";
+    submitted.innerHTML = `
+      <span class="preview-written-answer-heading">Your answer</span>
+      <p>${message.submitted_text || "No answer submitted."}</p>
+    `;
+    review.appendChild(submitted);
+
+    const meter = document.createElement("div");
+    meter.className = `preview-written-answer-alignment is-${message.alignment_state || "drafting"}`;
+    meter.innerHTML = `
+      <div class="preview-written-answer-alignment-head">
+        <span>Alignment</span>
+        <strong>${Number(message.alignment_score || 0)}%</strong>
+      </div>
+      <div class="preview-written-answer-alignment-track" aria-hidden="true">
+        <span style="width: ${Math.max(0, Math.min(Number(message.alignment_score || 0), 100))}%;"></span>
+      </div>
+    `;
+    review.appendChild(meter);
+
+    if (message.model_answer_revealed && message.model_answer) {
+      const modelAnswer = document.createElement("div");
+      modelAnswer.className = "preview-written-answer-panel is-model-answer";
+      modelAnswer.innerHTML = `
+        <span class="preview-written-answer-heading">Model answer</span>
+        <p>${message.model_answer}</p>
+      `;
+      review.appendChild(modelAnswer);
+    }
+
+    return review;
+  }
+
+  function renderBlockSwitcher() {
+    if (!blockSwitcher) {
+      return;
+    }
+    const previousScrollTop = blockSwitcher.scrollTop;
+    const previousActiveBlockId = blockSwitcher.dataset.activeBlockId || "";
+    const activeChanged = previousActiveBlockId !== String(activeBlockId);
+    blockSwitcher.innerHTML = "";
+    (previewState.blocks || []).forEach((block) => {
+      const isActive = String(block.id) === String(activeBlockId);
+      const isSelectionPreview = isActive && isSidebarSelectionPreview(block.id);
+      const article = document.createElement("article");
+      article.className = `preview-block-card${isActive ? " is-expanded is-active" : ""}${isSelectionPreview ? " is-selection-preview" : ""}`;
+
+      const controlsId = `preview-block-panel-${block.id}`;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "preview-block-card-header";
+      button.setAttribute("aria-expanded", isActive ? "true" : "false");
+      button.setAttribute("aria-controls", controlsId);
+      button.innerHTML = `
+        <div class="preview-block-title-row">
+          <strong>${block.title}</strong>
+          <span class="preview-block-badge${block.is_available ? "" : " is-locked"}">${block.is_available ? "Live" : "Locked"}</span>
+        </div>
+        <span class="preview-block-card-icon" aria-hidden="true"></span>
+      `;
+      button.addEventListener("click", () => {
+        activeBlockId = String(block.id);
+        if (isMobileSidebar()) {
+          scheduleSidebarAutoClose(block.id);
+        } else {
+          clearSidebarAutoCloseTimer(true);
+        }
+        renderPreview();
+      });
+
+      const content = document.createElement("div");
+      content.id = controlsId;
+      content.className = "preview-block-card-content";
+      content.hidden = !isActive;
+      content.innerHTML = `
+        <div class="preview-block-meta">
+          <span>Available ${block.available_from_label}</span>
+          <span>Target ${block.target_question_count}</span>
+          <span>${block.learning_objective_count} objectives</span>
+        </div>
+        <div class="preview-block-metrics">${metricMarkup(block)}</div>
+      `;
+
+      article.append(button, content);
+      blockSwitcher.appendChild(article);
+    });
+    blockSwitcher.dataset.activeBlockId = String(activeBlockId);
+    window.requestAnimationFrame(() => {
+      if (!blockSwitcher) {
+        return;
+      }
+      if (!activeChanged) {
+        blockSwitcher.scrollTop = previousScrollTop;
+      }
+      ensureActiveBlockCardVisible();
+    });
+  }
+
+  function renderMessage(message) {
+    const article = document.createElement("article");
+    const roleClass = message.role === "user" ? "preview-message--user" : "preview-message--assistant";
+    const feedbackClass =
+      message.kind === "feedback" ? (message.correct ? " preview-feedback--correct" : " preview-feedback--incorrect") : "";
+    article.className = `preview-message ${roleClass}${feedbackClass}`;
+
+    if (message.kind === "question") {
+      article.dataset.previewQuestion = "true";
+      article.dataset.questionId = String(message.question_id || "");
+      article.dataset.answered = message.answered ? "true" : "false";
+      article.dataset.flagged = message.flagged ? "true" : "false";
+      if (message.question_type === "maq") {
+        article.innerHTML = `
+          <div class="preview-question-callout">Select all that apply</div>
+          <p>${message.text}</p>
+        `;
+      } else if (message.question_type === "waq") {
+        article.innerHTML = `
+          <div class="preview-question-callout">Written answer</div>
+          <p>${message.text}</p>
+        `;
+      } else {
+        article.innerHTML = `<p>${message.text}</p>`;
+      }
+
+      if (message.question_type === "waq" && !message.answered && !message.flagged) {
+        const helper = document.createElement("p");
+        helper.className = "preview-message-sources";
+        helper.textContent = "Type your answer in the fixed box below.";
+        article.appendChild(helper);
+      } else if (Array.isArray(message.options) && message.options.length && !message.answered && !message.flagged) {
+        const overflowHint = document.createElement("div");
+        overflowHint.className = "preview-question-overflow-hint";
+        overflowHint.hidden = true;
+        overflowHint.textContent = message.question_type === "waq"
+          ? "Scroll to see the rest of this question."
+          : "Scroll to see the rest of this question and all answers.";
+        article.appendChild(overflowHint);
+
+        const optionsWrapper = document.createElement("div");
+        optionsWrapper.className = "preview-message-options";
+        if (message.question_type === "maq") {
+          const selections = maqSelection(message.question_id);
+          message.options.forEach((option, index) => {
+            const optionButton = document.createElement("button");
+            optionButton.type = "button";
+            optionButton.className = `preview-answer-chip preview-answer-chip--maq${selections.includes(option) ? " is-selected" : ""}`;
+            optionButton.innerHTML = `
+              <span class="preview-answer-chip-checkbox" aria-hidden="true">${selections.includes(option) ? "✓" : ""}</span>
+              <span class="preview-answer-chip-label">${optionLabel(index)}</span>
+              <span>${option}</span>
+            `;
+            optionButton.disabled = requestInFlight;
+            optionButton.addEventListener("click", () => {
+              toggleMaqSelection(message.question_id, option);
+              renderTranscript("preserve");
+            });
+            optionsWrapper.appendChild(optionButton);
+          });
+
+          const submitRow = document.createElement("div");
+          submitRow.className = "preview-question-submit-row";
+          const submitSelectionButton = document.createElement("button");
+          submitSelectionButton.type = "button";
+          submitSelectionButton.className = "button secondary preview-question-submit";
+          submitSelectionButton.textContent = "Submit";
+          submitSelectionButton.dataset.hasSelection = selections.length ? "true" : "false";
+          submitSelectionButton.disabled = requestInFlight || !selections.length;
+          submitSelectionButton.addEventListener("click", () => {
+            void postPreviewAction("answer", {
+              question_id: message.question_id,
+              answers: selections,
+            });
+          });
+          submitRow.appendChild(submitSelectionButton);
+          optionsWrapper.appendChild(submitRow);
+        } else {
+          message.options.forEach((option, index) => {
+            const optionButton = document.createElement("button");
+            optionButton.type = "button";
+            optionButton.className = "preview-answer-chip";
+            optionButton.innerHTML = `
+              <span class="preview-answer-chip-label">${optionLabel(index)}</span>
+              <span>${option}</span>
+            `;
+            optionButton.disabled = requestInFlight;
+            optionButton.addEventListener("click", () => {
+              void postPreviewAction("answer", {
+                question_id: message.question_id,
+                answer: option,
+              });
+            });
+            optionsWrapper.appendChild(optionButton);
+          });
+        }
+        article.appendChild(optionsWrapper);
+      } else if (message.question_type === "waq" && (message.submitted_text || message.model_answer_revealed)) {
+        article.appendChild(renderWrittenAnswerReview(message));
+      } else if (
+        (Array.isArray(message.selected_answers) && message.selected_answers.length) ||
+        message.selected_answer
+      ) {
+        if (Array.isArray(message.correct_answers) && message.correct_answers.length) {
+          article.appendChild(renderAnsweredOptions(message));
+        } else {
+          const selected = document.createElement("p");
+          selected.className = "preview-message-sources";
+          selected.textContent = formatSelectedAnswers(
+            message.options,
+            Array.isArray(message.selected_answers) && message.selected_answers.length
+              ? message.selected_answers
+              : [message.selected_answer],
+            message.flagged,
+          );
+          article.appendChild(selected);
+        }
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "preview-message-actions";
+      const flagButton = document.createElement("button");
+      flagButton.type = "button";
+      flagButton.className = "preview-flag-button";
+      flagButton.textContent = message.flagged ? "Flagged" : "Flag question";
+      flagButton.disabled = requestInFlight || message.flagged;
+      flagButton.addEventListener("click", () => {
+        void postPreviewAction("flag", { question_id: message.question_id });
+      });
+      actions.appendChild(flagButton);
+      article.appendChild(actions);
+      return article;
+    }
+
+    if (message.kind === "loading") {
+      article.classList.add("preview-message--loading");
+      article.innerHTML = `
+        <div class="preview-loading-dots" aria-label="Generating next quiz question">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      `;
+      return article;
+    }
+
+    if (message.kind === "resource") {
+      article.innerHTML = `
+        <div class="preview-message-meta">
+          <span class="preview-message-pill">${message.block_label}</span>
+          <span class="preview-message-pill">${message.resource_label}</span>
+        </div>
+      `;
+      if (message.resource_key === "objectives") {
+        const list = document.createElement("ul");
+        list.className = "preview-objective-list";
+        const objectives = Array.isArray(message.objectives) ? message.objectives : [];
+
+        if (!objectives.length) {
+          const emptyItem = document.createElement("li");
+          emptyItem.className = "preview-objective-item";
+          emptyItem.textContent = "No learning objectives yet.";
+          list.appendChild(emptyItem);
+        } else {
+          objectives.forEach((objective) => {
+            const item = document.createElement("li");
+            item.className = `preview-objective-item${objective.covered ? " is-covered" : ""}`;
+
+            const tick = document.createElement("span");
+            tick.className = "preview-objective-status";
+            tick.setAttribute("aria-hidden", "true");
+            tick.textContent = objective.covered ? "✓" : "";
+
+            const code = document.createElement("span");
+            code.className = "preview-objective-code";
+            code.textContent = objective.code;
+
+            const text = document.createElement("span");
+            text.className = "preview-objective-text";
+            text.textContent = objective.text;
+
+            item.append(tick, code, text);
+            list.appendChild(item);
+          });
+        }
+
+        article.appendChild(list);
+        return article;
+      }
+    }
+
+    const paragraph = document.createElement("p");
+    paragraph.textContent = message.text || "";
+    article.appendChild(paragraph);
+
+    return article;
+  }
+
+  function combinedTranscript(block) {
+    const baseMessages = Array.isArray(block?.transcript) ? block.transcript : [];
+    const inlineMessages = block ? blockInlineMessages(block.id) : [];
+    const combined = [];
+
+    inlineMessages
+      .filter((message) => message.insert_after_count === 0)
+      .sort((left, right) => left.sequence - right.sequence)
+      .forEach((message) => combined.push(message));
+
+    baseMessages.forEach((message, index) => {
+      combined.push(message);
+      inlineMessages
+        .filter((inlineMessage) => inlineMessage.insert_after_count === index + 1)
+        .sort((left, right) => left.sequence - right.sequence)
+        .forEach((inlineMessage) => combined.push(inlineMessage));
+    });
+
+    inlineMessages
+      .filter((message) => message.insert_after_count > baseMessages.length)
+      .sort((left, right) => left.sequence - right.sequence)
+      .forEach((message) => combined.push(message));
+
+    if (block && optimisticUserMessagesByBlock[String(block.id)]) {
+      combined.push(optimisticUserMessagesByBlock[String(block.id)]);
+    }
+
+    if (block && loadingMessagesByBlock[String(block.id)]) {
+      combined.push({
+        id: `loading-${block.id}`,
+        kind: "loading",
+        role: "assistant",
+      });
+    }
+
+    return combined;
+  }
+
+  function renderTranscript(scrollMode = "bottom") {
+    if (!transcript) {
+      return;
+    }
+    const block = currentBlock();
+    const previousScrollTop = transcript.scrollTop;
+    transcript.innerHTML = "";
+    if (!block) {
+      return;
+    }
+    combinedTranscript(block).forEach((message) => {
+      transcript.appendChild(renderMessage(message));
+    });
+    syncQuestionViewport(scrollMode, previousScrollTop);
+  }
+
+  function resourceMessagePayload(block, resource) {
+    if (resource === "description") {
+      return {
+        block_label: block.title,
+        kind: "resource",
+        resource_key: "description",
+        resource_label: "Description",
+        role: "assistant",
+        text: block.summary || "No description yet.",
+      };
+    }
+
+    const objectives = Array.isArray(block.learning_objectives) ? block.learning_objectives : [];
+    return {
+      block_label: block.title,
+      kind: "resource",
+      resource_key: "objectives",
+      resource_label: "Learning objectives",
+      role: "assistant",
+      text: "",
+      objectives,
+    };
+  }
+
+  function appendResourceMessage(resource) {
+    const block = currentBlock();
+    if (!block || !resource) {
+      return;
+    }
+
+    const inlineMessages = blockInlineMessages(block.id);
+    const lastMessage = inlineMessages[inlineMessages.length - 1];
+    if (lastMessage?.kind === "resource" && lastMessage.resource_key === resource) {
+      scrollTranscriptToBottom();
+      return;
+    }
+
+    inlineMessageSequence += 1;
+    inlineMessages.push({
+      ...resourceMessagePayload(block, resource),
+      id: `inline-resource-${block.id}-${inlineMessageSequence}`,
+      insert_after_count: Array.isArray(block.transcript) ? block.transcript.length : 0,
+      sequence: inlineMessageSequence,
+    });
+    renderTranscript();
+  }
+
+  function renderPreview(scrollMode = "bottom") {
+    const block = currentBlock();
+    if (!block) {
+      return;
+    }
+    activeBlockId = String(block.id);
+    if (activeBlockTitle) {
+      activeBlockTitle.textContent = block.title;
+    }
+    renderBlockSwitcher();
+    renderTranscript(scrollMode);
+    syncComposerInputFromState();
+    syncComposerState();
+    updateComposerClearance();
+  }
+
+  async function postDraftAnswer(questionId, answerText, requestId) {
+    const block = currentBlock();
+    if (!block) {
+      return;
+    }
+
+    const response = await fetch(actionUrl(block.id, "draft_answer"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": getCsrfToken(),
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: JSON.stringify({
+        question_id: questionId,
+        answer_text: answerText,
+      }),
+      credentials: "same-origin",
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || "Unable to update alignment right now.");
+    }
+    if (requestId !== waqDraftRequestId) {
+      return;
+    }
+    let previousState = "drafting";
+    const updatedQuestion = updateQuestionMessage(data.alignment.question_id, (message) => {
+      previousState = message.alignment_state || "drafting";
+      message.draft_answer = data.alignment.answer_text || "";
+      message.alignment_score = data.alignment.alignment_score || 0;
+      message.alignment_state = data.alignment.alignment_state || "drafting";
+    });
+    clearWaqAlignmentLoading(requestId);
+    const shouldFlash = previousState !== "aligned" && updatedQuestion?.alignment_state === "aligned";
+    if (updatedQuestion && String(updatedQuestion.question_id) === String(pendingWrittenQuestion()?.question_id)) {
+      renderWaqAlignment(updatedQuestion, { flash: shouldFlash });
+    }
+  }
+
+  async function postPreviewAction(action, payload = null, options = {}) {
+    const block = currentBlock();
+    if (!block) {
+      return;
+    }
+    setStatus("");
+    clearWaqDraftTimer();
+    waqDraftRequestId += 1;
+    clearWaqAlignmentLoading();
+    setComposerDisabled(true);
+    try {
+      const responsePromise = fetch(actionUrl(block.id, action), {
+        method: "POST",
+        headers: {
+          "Content-Type": payload ? "application/json" : "text/plain;charset=UTF-8",
+          "X-CSRFToken": getCsrfToken(),
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        body: payload ? JSON.stringify(payload) : "",
+        credentials: "same-origin",
+      });
+      const minimumDelayPromise = options.minDurationMs
+        ? new Promise((resolve) => window.setTimeout(resolve, options.minDurationMs))
+        : Promise.resolve();
+      const [response] = await Promise.all([responsePromise, minimumDelayPromise]);
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "Unable to update right now.");
+      }
+      previewState = data.preview;
+      activeBlockId = String(data.preview.active_block_id || block.id);
+      clearAnsweredQuestionSelections();
+      renderPreview(options.scrollMode || "bottom");
+    } catch (error) {
+      setStatus(error.message || "Unable to update right now.");
+    } finally {
+      setComposerDisabled(false);
+      if (options.focusComposer) {
+        input?.focus();
+      }
+      syncComposerState();
+    }
+  }
+
+  form?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!input || requestInFlight) {
+      return;
+    }
+    const trimmed = input.value.trim();
+    const activeWaq = pendingWrittenQuestion();
+    if (activeWaq) {
+      if (!trimmed) {
+        syncComposerState();
+        return;
+      }
+      clearWaqDraftTimer();
+      input.value = "";
+      resizeComposerInput();
+      syncComposerState();
+      updateComposerClearance();
+      const block = currentBlock();
+      updateQuestionMessage(activeWaq.question_id, (message) => {
+        message.draft_answer = "";
+      });
+      if (block) {
+        setOptimisticUserMessage(block.id, trimmed);
+        setQuizLoading(block.id, true);
+        renderTranscript();
+      }
+      try {
+        await postPreviewAction(
+          "answer",
+          { question_id: activeWaq.question_id, answer_text: trimmed },
+          { focusComposer: true, minDurationMs: 900, scrollMode: "bottom" },
+        );
+      } finally {
+        if (block) {
+          setOptimisticUserMessage(block.id, "");
+          setQuizLoading(block.id, false);
+          renderTranscript();
+        }
+      }
+      return;
+    }
+
+    if (trimmed) {
+      input.value = "";
+      resizeComposerInput();
+      syncComposerState();
+      updateComposerClearance();
+      const block = currentBlock();
+      if (block) {
+        setOptimisticUserMessage(block.id, trimmed);
+        setQuizLoading(block.id, true);
+        renderTranscript();
+      }
+      try {
+        await postPreviewAction("chat", { question: trimmed }, { focusComposer: true, minDurationMs: 900 });
+      } finally {
+        if (block) {
+          setOptimisticUserMessage(block.id, "");
+          setQuizLoading(block.id, false);
+          renderTranscript();
+        }
+      }
+      return;
+    }
+    input.blur();
+    const block = currentBlock();
+    if (block) {
+      setQuizLoading(block.id, true);
+      renderTranscript();
+    }
+    try {
+        await postPreviewAction("quiz", null, { minDurationMs: 2000, scrollMode: "question" });
+    } finally {
+      if (block) {
+        setQuizLoading(block.id, false);
+        renderTranscript("preserve");
+      }
+    }
+  });
+
+  quizMenuTrigger?.addEventListener("click", () => {
+    if (requestInFlight || input?.value.trim()) {
+      return;
+    }
+    if (isQuizMenuOpen()) {
+      closeQuizMenu();
+      return;
+    }
+    openQuizMenu();
+  });
+
+  quizMenuPanel?.querySelectorAll("[data-quiz-type]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (requestInFlight) {
+        return;
+      }
+      const block = currentBlock();
+      const questionType = button.dataset.quizType || "";
+      closeQuizMenu();
+      renderPreview("preserve");
+      input?.blur();
+      if (block) {
+        setQuizLoading(block.id, true);
+        renderTranscript();
+      }
+      try {
+        await postPreviewAction("quiz", { question_type: questionType }, { minDurationMs: 2000, scrollMode: "question" });
+      } finally {
+        if (block) {
+          setQuizLoading(block.id, false);
+          renderTranscript("preserve");
+        }
+      }
+    });
+  });
+
+  input?.addEventListener("keydown", async (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      form?.requestSubmit();
+    }
+  });
+
+  input?.addEventListener("input", () => {
+    resizeComposerInput();
+    syncComposerState();
+    updateComposerClearance();
+    const activeWaq = pendingWrittenQuestion();
+    if (!activeWaq) {
+      return;
+    }
+    updateQuestionMessage(activeWaq.question_id, (message) => {
+      message.draft_answer = input.value;
+      if (!input.value.trim()) {
+        message.alignment_score = 0;
+        message.alignment_state = "drafting";
+      }
+    });
+    renderWaqAlignment(activeWaq);
+    clearWaqDraftTimer();
+    if (!input.value.trim()) {
+      waqDraftRequestId += 1;
+      clearWaqAlignmentLoading();
+      return;
+    }
+    const requestId = waqDraftRequestId + 1;
+    waqDraftRequestId = requestId;
+    setWaqAlignmentLoading(requestId);
+    waqDraftDebounceTimer = window.setTimeout(() => {
+      void postDraftAnswer(activeWaq.question_id, input.value, requestId).catch(() => {
+        if (requestId === waqDraftRequestId) {
+          clearWaqAlignmentLoading(requestId);
+          setStatus("Unable to update alignment right now.");
+        }
+      });
+    }, 120);
+  });
+
+  resourceButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      appendResourceMessage(button.dataset.previewResource || "");
+    });
+  });
+
+  sidebarToggle?.addEventListener("click", () => {
+    toggleSidebar();
+  });
+
+  sidebarScrim?.addEventListener("click", () => {
+    setSidebarOpen(false);
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!quizMenu || !isQuizMenuOpen()) {
+      return;
+    }
+    if (!quizMenu.contains(event.target)) {
+      closeQuizMenu();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeQuizMenu();
+      if (sidebarOpen) {
+        setSidebarOpen(false);
+      }
+    }
+  });
+
+  window.addEventListener("resize", () => {
+    updateComposerClearance();
+    if (!isMobileSidebar()) {
+      clearSidebarAutoCloseTimer(true);
+    }
+    applySidebarState();
+  });
+  applySidebarState();
+  renderPreview();
+}

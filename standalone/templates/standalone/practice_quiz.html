@@ -1,0 +1,23 @@
+{% extends "standalone/base.html" %}
+{% block content %}
+<section class="panel narrow">
+  <h1>{% if mode == "validation_practice" %}Validation practice{% else %}Practice quiz{% endif %}</h1>
+  <p class="lead">Question {{ question_number }}</p>
+  <article class="card">
+    <h2>{{ question.stem }}</h2>
+    {% if question.learning_objective %}<p><strong>Learning objective:</strong> {{ question.learning_objective.text }}</p>{% endif %}
+    <form method="post" class="stack-form">
+      {% csrf_token %}
+      <input type="hidden" name="question_id" value="{{ question.pk }}">
+      {% for option in options %}
+        <label class="option-row">
+          <input type="radio" name="answer" value="{{ option }}" required>
+          <span>{{ option }}</span>
+        </label>
+      {% endfor %}
+      <button type="submit" class="button">Submit answer</button>
+    </form>
+  </article>
+</section>
+{% endblock %}
+

@@ -1,0 +1,29 @@
+{% extends "standalone/base.html" %}
+{% block content %}
+<section class="panel">
+  <div class="section-head">
+    <div>
+      <h1>Teacher dashboard</h1>
+      <p class="lead">Build courses, upload source notes, manage enrolment, and prepare validation sessions.</p>
+    </div>
+    <div class="action-row">
+      <a class="button" href="{% url 'standalone:course_create' %}">Create course</a>
+      {% if user.is_superuser or user.role == "internal" %}
+        <a class="button secondary" href="{% url 'standalone:teacher_invite' %}">Invite teacher</a>
+      {% endif %}
+    </div>
+  </div>
+  <div class="card-grid">
+    {% for course in courses %}
+      <a class="card course-card" href="{% url 'standalone:course_detail' course.pk %}">
+        <h2>{{ course.title }}</h2>
+        <p>{{ course.summary|default:"No summary yet." }}</p>
+        <p><strong>Questions:</strong> {{ course.question_bank_items.count }}</p>
+        <p><strong>Students:</strong> {{ course.enrollments.count }}</p>
+      </a>
+    {% empty %}
+      <p>No courses yet.</p>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}
