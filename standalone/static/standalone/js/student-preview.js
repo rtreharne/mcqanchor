@@ -16,6 +16,12 @@ if (previewRoot && previewDataNode) {
   const quizControls = previewRoot.querySelector(".preview-quiz-controls");
   const sidebarToggle = previewRoot.querySelector("[data-preview-sidebar-toggle]");
   const sidebarScrim = previewRoot.querySelector("[data-preview-sidebar-scrim]");
+  const previewSidebar = previewRoot.querySelector(".preview-sidebar");
+  const courseMetricsPanel = previewRoot.querySelector("[data-preview-course-metrics]");
+  const sidebarSummary = previewRoot.querySelector("[data-preview-sidebar-summary]");
+  const sidebarSummaryText = previewRoot.querySelector("[data-preview-sidebar-summary-text]");
+  const sidebarSummaryCopy = previewRoot.querySelector("[data-preview-sidebar-summary-copy]");
+  const sidebarSummaryToggle = previewRoot.querySelector("[data-preview-sidebar-summary-toggle]");
   const submitButton = form?.querySelector("button[type='submit']");
   const quizMenu = previewRoot.querySelector("[data-quiz-menu]");
   const quizMenuTrigger = previewRoot.querySelector("[data-quiz-menu-trigger]");
@@ -27,6 +33,7 @@ if (previewRoot && previewDataNode) {
   const activeBlockTitle = previewRoot.querySelector(".preview-active-block-title");
   const resourceButtons = Array.from(previewRoot.querySelectorAll("[data-preview-resource]"));
   const mobileSidebarMedia = window.matchMedia("(max-width: 980px)");
+  const mobileChatMedia = window.matchMedia("(max-width: 640px)");
 
   let previewState = JSON.parse(previewDataNode.textContent || "{}");
   let activeBlockId = String(previewState.active_block_id || "");
@@ -39,18 +46,56 @@ if (previewRoot && previewDataNode) {
   let waqDraftDebounceTimer = 0;
   let waqDraftRequestId = 0;
   let waqAlignmentLoadingRequestId = 0;
+  let sidebarSummaryExpanded = false;
+  let sidebarSummaryFullText = "";
   const inlineMessagesByBlock = {};
   const loadingMessagesByBlock = {};
   const optimisticUserMessagesByBlock = {};
   const maqSelectionsByQuestionId = {};
   const sidebarSelectionPreviewMs = 2000;
+  const previewDateFormatter = new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
 
   function actionUrl(blockId, action) {
     return actionUrlTemplate.replace("/0/ACTION/", `/${blockId}/${action}/`);
   }
 
+  function truncateSidebarSummary(text, limit = 100) {
+    const normalized = String(text || "").trim();
+    if (normalized.length <= limit) {
+      return normalized;
+    }
+    const truncated = normalized.slice(0, limit);
+    const lastSpace = truncated.lastIndexOf(" ");
+    return (lastSpace > 72 ? truncated.slice(0, lastSpace) : truncated).trimEnd();
+  }
+
+  function renderSidebarSummary() {
+    if (!sidebarSummaryText || !sidebarSummaryCopy || !sidebarSummaryToggle) {
+      return;
+    }
+    const excerpt = truncateSidebarSummary(sidebarSummaryFullText);
+    const isTruncated = excerpt.length < sidebarSummaryFullText.length;
+    sidebarSummaryCopy.textContent = sidebarSummaryExpanded || !isTruncated
+      ? sidebarSummaryFullText
+      : excerpt;
+    sidebarSummaryToggle.hidden = !isTruncated;
+    sidebarSummaryToggle.textContent = sidebarSummaryExpanded ? "... less" : "... more";
+    sidebarSummaryToggle.setAttribute("aria-expanded", sidebarSummaryExpanded ? "true" : "false");
+    const isExpanded = sidebarSummaryExpanded && isTruncated;
+    sidebarSummary?.classList.toggle("is-expanded", isExpanded);
+    previewSidebar?.classList.toggle("has-expanded-summary", isExpanded);
+  }
+
   function currentBlock() {
     return (previewState.blocks || []).find((block) => String(block.id) === String(activeBlockId)) || previewState.blocks?.[0] || null;
+  }
+
+  function findBlock(blockId) {
+    return (previewState.blocks || []).find((block) => String(block.id) === String(blockId)) || null;
   }
 
   function pendingQuestion(block = currentBlock()) {
@@ -220,6 +265,16 @@ if (previewRoot && previewDataNode) {
     applySidebarState();
   }
 
+  if (sidebarSummaryCopy) {
+    sidebarSummaryFullText = sidebarSummaryCopy.textContent.trim();
+    renderSidebarSummary();
+  }
+
+  sidebarSummaryToggle?.addEventListener("click", () => {
+    sidebarSummaryExpanded = !sidebarSummaryExpanded;
+    renderSidebarSummary();
+  });
+
   function toggleSidebar() {
     setSidebarOpen(!sidebarOpen);
   }
@@ -314,11 +369,11 @@ if (previewRoot && previewDataNode) {
     if (!question.draft_answer && !question.submitted_text) {
       waqAlignmentLabel.textContent = "Start typing";
     } else if (state === "aligned") {
-      waqAlignmentLabel.textContent = `Aligned ${score}%`;
+      waqAlignmentLabel.textContent = `Aligned ${formatPercentage(score)}`;
     } else if (state === "close") {
-      waqAlignmentLabel.textContent = `${score}% close`;
+      waqAlignmentLabel.textContent = `${formatPercentage(score)} close`;
     } else {
-      waqAlignmentLabel.textContent = `${score}% building`;
+      waqAlignmentLabel.textContent = `${formatPercentage(score)} building`;
     }
     if (flash) {
       setWaqAlignmentFlash(false);
@@ -399,6 +454,9 @@ if (previewRoot && previewDataNode) {
     resourceButtons.forEach((button) => {
       button.disabled = disabled;
     });
+    previewRoot.querySelectorAll("[data-preview-metric-button='true']").forEach((button) => {
+      button.disabled = disabled;
+    });
     if (disabled) {
       closeQuizMenu();
     }
@@ -409,6 +467,63 @@ if (previewRoot && previewDataNode) {
       return;
     }
     previewRoot.style.setProperty("--preview-composer-clearance", `${form.offsetHeight + 20}px`);
+  }
+
+  function formatPercentage(value) {
+    return `${Number(value || 0).toFixed(1)}%`;
+  }
+
+  function formatMetricNumber(value) {
+    return Number(value || 0).toFixed(1);
+  }
+
+  function formatCount(value, singular, plural = `${singular}s`) {
+    const count = Number(value || 0);
+    return `${count} ${count === 1 ? singular : plural}`;
+  }
+
+  function formatEngagementWindow(days) {
+    const weeks = Number(days || 0) / 7;
+    if (!weeks) {
+      return "0 weeks";
+    }
+    if (Number.isInteger(weeks)) {
+      return `${weeks} week${weeks === 1 ? "" : "s"}`;
+    }
+    return `${weeks.toFixed(1)} weeks`;
+  }
+
+  function formatPreviewDate(isoDate) {
+    if (!isoDate) {
+      return "";
+    }
+    const parsed = new Date(`${isoDate}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) {
+      return isoDate;
+    }
+    return previewDateFormatter.format(parsed);
+  }
+
+  function addDaysToIsoDate(isoDate, days) {
+    if (!isoDate) {
+      return "";
+    }
+    const parsed = new Date(`${isoDate}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) {
+      return "";
+    }
+    parsed.setDate(parsed.getDate() + Number(days || 0));
+    return parsed.toISOString().slice(0, 10);
+  }
+
+  function metricLabel(metricKey) {
+    return {
+      overall: "Overall practice",
+      mastery: "Mastery",
+      coverage: "Coverage",
+      engagement: "Engagement",
+      target: "Target",
+    }[metricKey] || "Metric";
   }
 
   function scrollTranscriptToBottom() {
@@ -441,15 +556,25 @@ if (previewRoot && previewDataNode) {
     const activeQuestion = latestPendingQuestionCard();
     if (activeQuestion) {
       const hint = activeQuestion.querySelector(".preview-question-overflow-hint");
-      const isOverflowing = activeQuestion.offsetHeight > transcript.clientHeight - 16;
-      if (isOverflowing) {
+      const isTallerThanViewport = activeQuestion.offsetHeight > transcript.clientHeight - 16;
+      if (scrollMode === "question" && (mobileChatMedia.matches || isTallerThanViewport)) {
+        transcript.scrollTo({ top: Math.max(activeQuestion.offsetTop, 0), behavior: "auto" });
+      }
+
+      const transcriptRect = transcript.getBoundingClientRect();
+      const questionRect = activeQuestion.getBoundingClientRect();
+      const isFullyVisible = (
+        questionRect.top >= transcriptRect.top + 1
+        && questionRect.bottom <= transcriptRect.bottom - 1
+      );
+      if (!isFullyVisible) {
         activeQuestion.classList.add("is-overflowing-question");
         if (hint) {
           hint.hidden = false;
         }
       }
-      if (scrollMode === "question" && isOverflowing) {
-        transcript.scrollTo({ top: Math.max(activeQuestion.offsetTop - 6, 0), behavior: "auto" });
+
+      if (scrollMode === "question") {
         return;
       }
     }
@@ -492,12 +617,48 @@ if (previewRoot && previewDataNode) {
     }
   }
 
-  function metricMarkup(block) {
+  function metricButtonMarkup(metricKey, value, { scope = "block", blockId = "" } = {}) {
+    const blockAttribute = blockId ? ` data-block-id="${blockId}"` : "";
     return `
-      <div class="preview-block-metric"><span>Mastery</span><strong>${block.metrics.mastery}%</strong></div>
-      <div class="preview-block-metric"><span>Coverage</span><strong>${block.metrics.coverage}%</strong></div>
-      <div class="preview-block-metric"><span>Engagement</span><strong>${block.metrics.engagement}%</strong></div>
-      <div class="preview-block-metric"><span>Target</span><strong>${block.metrics.target}%</strong></div>
+      <button
+        type="button"
+        class="preview-block-metric${metricKey === "overall" ? " preview-block-metric--overall" : ""}"
+        data-preview-metric-button="true"
+        data-metric-key="${metricKey}"
+        data-metric-scope="${scope}"${blockAttribute}
+      >
+        <span>${metricLabel(metricKey)}</span>
+        <strong>${formatPercentage(value)}</strong>
+      </button>
+    `;
+  }
+
+  function metricMarkup(metrics, { scope = "block", blockId = "" } = {}) {
+    return `
+      ${typeof metrics.overall === "number"
+        ? metricButtonMarkup("overall", metrics.overall, { scope, blockId })
+        : ""}
+      ${metricButtonMarkup("mastery", metrics.mastery, { scope, blockId })}
+      ${metricButtonMarkup("coverage", metrics.coverage, { scope, blockId })}
+      ${metricButtonMarkup("engagement", metrics.engagement, { scope, blockId })}
+      ${metricButtonMarkup("target", metrics.target, { scope, blockId })}
+    `;
+  }
+
+  function renderCourseMetrics() {
+    if (!courseMetricsPanel) {
+      return;
+    }
+    const metrics = previewState.course?.metrics;
+    if (!metrics) {
+      courseMetricsPanel.hidden = true;
+      courseMetricsPanel.innerHTML = "";
+      return;
+    }
+    courseMetricsPanel.hidden = false;
+    courseMetricsPanel.innerHTML = `
+      <p class="preview-sidebar-section-label">PRACTICE AVERAGES</p>
+      <div class="preview-block-metrics">${metricMarkup(metrics, { scope: "course" })}</div>
     `;
   }
 
@@ -584,7 +745,7 @@ if (previewRoot && previewDataNode) {
     meter.innerHTML = `
       <div class="preview-written-answer-alignment-head">
         <span>Alignment</span>
-        <strong>${Number(message.alignment_score || 0)}%</strong>
+        <strong>${formatPercentage(message.alignment_score)}</strong>
       </div>
       <div class="preview-written-answer-alignment-track" aria-hidden="true">
         <span style="width: ${Math.max(0, Math.min(Number(message.alignment_score || 0), 100))}%;"></span>
@@ -647,12 +808,7 @@ if (previewRoot && previewDataNode) {
       content.className = "preview-block-card-content";
       content.hidden = !isActive;
       content.innerHTML = `
-        <div class="preview-block-meta">
-          <span>Available ${block.available_from_label}</span>
-          <span>Target ${block.target_question_count}</span>
-          <span>${block.learning_objective_count} objectives</span>
-        </div>
-        <div class="preview-block-metrics">${metricMarkup(block)}</div>
+        <div class="preview-block-metrics">${metricMarkup(block.metrics, { scope: "block", blockId: block.id })}</div>
       `;
 
       article.append(button, content);
@@ -707,7 +863,7 @@ if (previewRoot && previewDataNode) {
         overflowHint.hidden = true;
         overflowHint.textContent = message.question_type === "waq"
           ? "Scroll to see the rest of this question."
-          : "Scroll to see the rest of this question and all answers.";
+          : "Scroll to see all answers.";
         article.appendChild(overflowHint);
 
         const optionsWrapper = document.createElement("div");
@@ -823,6 +979,34 @@ if (previewRoot && previewDataNode) {
           <span class="preview-message-pill">${message.resource_label}</span>
         </div>
       `;
+      if (message.resource_key === "metric") {
+        if (message.text) {
+          const summary = document.createElement("p");
+          summary.textContent = message.text;
+          article.appendChild(summary);
+        }
+
+        const metricRows = Array.isArray(message.metric_rows) ? message.metric_rows : [];
+        if (metricRows.length) {
+          const list = document.createElement("ul");
+          list.className = "preview-metric-detail-list";
+          metricRows.forEach((row) => {
+            const item = document.createElement("li");
+            item.textContent = row;
+            list.appendChild(item);
+          });
+          article.appendChild(list);
+        }
+
+        if (message.metric_formula) {
+          const formula = document.createElement("p");
+          formula.className = "preview-metric-formula";
+          formula.textContent = message.metric_formula;
+          article.appendChild(formula);
+        }
+
+        return article;
+      }
       if (message.resource_key === "objectives") {
         const list = document.createElement("ul");
         list.className = "preview-objective-list";
@@ -946,27 +1130,172 @@ if (previewRoot && previewDataNode) {
     };
   }
 
-  function appendResourceMessage(resource) {
-    const block = currentBlock();
-    if (!block || !resource) {
+  function metricMessagePayload(metricKey, { scope = "course", block = currentBlock() } = {}) {
+    const courseMetrics = previewState.course?.metrics;
+    const metrics = scope === "course" ? courseMetrics : block?.metrics;
+    if (!metrics) {
+      return null;
+    }
+
+    if (scope === "block" && metricKey === "coverage" && block) {
+      return resourceMessagePayload(block, "objectives");
+    }
+
+    const liveBlockCount = Number(courseMetrics?.block_count || 0);
+    const liveBlockLabel = formatCount(liveBlockCount, "live block");
+    const metricTitle = metricLabel(metricKey);
+    const payload = {
+      block_label: scope === "course" ? "Practice averages" : (block?.title || "Practice"),
+      kind: "resource",
+      resource_key: "metric",
+      resource_label: metricTitle,
+      role: "assistant",
+      text: "",
+      metric_rows: [],
+      metric_formula: "",
+    };
+
+    if (scope === "course" && metricKey === "overall") {
+      const weights = courseMetrics?.weights || {};
+      payload.text = `Overall practice is the weighted practice score built from the average mastery, coverage, engagement, and target values across ${liveBlockLabel}.`;
+      payload.metric_rows = [
+        `Average mastery: ${formatPercentage(metrics.mastery)} x ${weights.mastery || 0}`,
+        `Average coverage: ${formatPercentage(metrics.coverage)} x ${weights.coverage || 0}`,
+        `Average engagement: ${formatPercentage(metrics.engagement)} x ${weights.engagement || 0}`,
+        `Average target: ${formatPercentage(metrics.target)} x ${weights.target || 0}`,
+      ];
+      payload.metric_formula = weights.total
+        ? `(${formatMetricNumber(metrics.mastery)} x ${weights.mastery || 0} + ${formatMetricNumber(metrics.coverage)} x ${weights.coverage || 0} + ${formatMetricNumber(metrics.engagement)} x ${weights.engagement || 0} + ${formatMetricNumber(metrics.target)} x ${weights.target || 0}) / ${weights.total} = ${formatPercentage(metrics.overall)}`
+        : "No practice-score weightings have been set yet.";
+      return payload;
+    }
+
+    if (metricKey === "mastery") {
+      payload.text = scope === "course"
+        ? `Average mastery is the mean mastery score across ${liveBlockLabel}.`
+        : "Mastery for this block is correct answers divided by completed answers.";
+      payload.metric_rows = [
+        `Displayed score: ${formatPercentage(metrics.mastery)}`,
+        `Correct answers: ${metrics.correct_count || 0}`,
+        `Incorrect answers: ${metrics.incorrect_count || 0}`,
+        `Completed questions: ${metrics.completed_count || 0}`,
+      ];
+      return payload;
+    }
+
+    if (metricKey === "coverage") {
+      payload.text = `Average coverage is the mean block coverage across ${liveBlockLabel}.`;
+      payload.metric_rows = [
+        `Displayed score: ${formatPercentage(metrics.coverage)}`,
+        `Learning objectives covered at least once: ${metrics.covered_objective_count || 0} of ${metrics.total_objective_count || 0} across the whole course`,
+      ];
+      return payload;
+    }
+
+    if (metricKey === "engagement") {
+      const windowLabel = formatEngagementWindow(metrics.engagement_window_days || 0);
+      if (scope === "course") {
+        payload.text = `Average engagement is the mean engagement score across ${liveBlockLabel}. Each block asks what percentage of its target questions were completed within ${windowLabel} of release.`;
+        payload.metric_rows = [
+          `Displayed score: ${formatPercentage(metrics.engagement)}`,
+          `On-time questions: ${metrics.on_time_count || 0}`,
+          `Combined live-block target: ${metrics.combined_target_question_count || 0}`,
+          `Time window: within ${windowLabel} of each block becoming available`,
+        ];
+        return payload;
+      }
+
+      const availableFromLabel = block?.available_from_label || formatPreviewDate(block?.available_from || "");
+      const deadlineLabel = formatPreviewDate(addDaysToIsoDate(block?.available_from || "", metrics.engagement_window_days || 0));
+      payload.text = `Engagement for this block is the percentage of target questions completed within ${windowLabel} of release.`;
+      payload.metric_rows = [
+        `Displayed score: ${formatPercentage(metrics.engagement)}`,
+        `On-time questions: ${metrics.on_time_count || 0} of ${metrics.target_question_count || 0}`,
+        `On-time window: ${availableFromLabel}${deadlineLabel ? ` to ${deadlineLabel}` : ""}`,
+      ];
+      return payload;
+    }
+
+    if (metricKey === "target") {
+      payload.text = scope === "course"
+        ? `Average target is the mean target-completion score across ${liveBlockLabel}.`
+        : "Target shows how much of this block's practice target has been completed.";
+      payload.metric_rows = scope === "course"
+        ? [
+          `Displayed score: ${formatPercentage(metrics.target)}`,
+          `Completed questions: ${metrics.completed_count || 0}`,
+          `Combined live-block target: ${metrics.combined_target_question_count || 0}`,
+        ]
+        : [
+          `Displayed score: ${formatPercentage(metrics.target)}`,
+          `Completed questions: ${metrics.completed_count || 0} of ${metrics.target_question_count || 0}`,
+        ];
+      return payload;
+    }
+
+    return null;
+  }
+
+  function appendInlineMessage(messagePayload, { block = currentBlock(), dedupeKey = "", closeSidebarOnMobile = false } = {}) {
+    if (!block || !messagePayload) {
       return;
     }
 
     const inlineMessages = blockInlineMessages(block.id);
     const lastMessage = inlineMessages[inlineMessages.length - 1];
-    if (lastMessage?.kind === "resource" && lastMessage.resource_key === resource) {
+    if (dedupeKey && lastMessage?._dedupe_key === dedupeKey) {
       scrollTranscriptToBottom();
+      if (closeSidebarOnMobile && isMobileSidebar()) {
+        setSidebarOpen(false);
+      }
       return;
     }
 
     inlineMessageSequence += 1;
     inlineMessages.push({
-      ...resourceMessagePayload(block, resource),
+      ...messagePayload,
+      _dedupe_key: dedupeKey,
       id: `inline-resource-${block.id}-${inlineMessageSequence}`,
       insert_after_count: Array.isArray(block.transcript) ? block.transcript.length : 0,
       sequence: inlineMessageSequence,
     });
     renderTranscript();
+    if (closeSidebarOnMobile && isMobileSidebar()) {
+      setSidebarOpen(false);
+    }
+  }
+
+  function appendResourceMessage(resource) {
+    const block = currentBlock();
+    if (!block || !resource) {
+      return;
+    }
+    appendInlineMessage(resourceMessagePayload(block, resource), {
+      block,
+      dedupeKey: `resource:${block.id}:${resource}`,
+    });
+  }
+
+  function appendMetricMessage(metricKey, scope, blockId = "") {
+    const block = scope === "block" ? findBlock(blockId) : currentBlock();
+    if (!block || !metricKey) {
+      return;
+    }
+
+    const payload = metricMessagePayload(metricKey, { scope, block });
+    if (!payload) {
+      return;
+    }
+
+    const dedupeKey = payload.resource_key === "objectives"
+      ? `resource:${block.id}:objectives`
+      : `metric:${scope}:${metricKey}:${block.id}`;
+
+    appendInlineMessage(payload, {
+      block,
+      dedupeKey,
+      closeSidebarOnMobile: true,
+    });
   }
 
   function renderPreview(scrollMode = "bottom") {
@@ -978,6 +1307,7 @@ if (previewRoot && previewDataNode) {
     if (activeBlockTitle) {
       activeBlockTitle.textContent = block.title;
     }
+    renderCourseMetrics();
     renderBlockSwitcher();
     renderTranscript(scrollMode);
     syncComposerInputFromState();
@@ -1233,6 +1563,19 @@ if (previewRoot && previewDataNode) {
     button.addEventListener("click", () => {
       appendResourceMessage(button.dataset.previewResource || "");
     });
+  });
+
+  previewRoot.addEventListener("click", (event) => {
+    const metricButton = event.target.closest("[data-preview-metric-button='true']");
+    if (!metricButton || !previewRoot.contains(metricButton) || metricButton.disabled) {
+      return;
+    }
+    event.preventDefault();
+    appendMetricMessage(
+      metricButton.dataset.metricKey || "",
+      metricButton.dataset.metricScope || "block",
+      metricButton.dataset.blockId || "",
+    );
   });
 
   sidebarToggle?.addEventListener("click", () => {

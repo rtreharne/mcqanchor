@@ -30,6 +30,7 @@ from standalone.models import (
 )
 from standalone.tasks import run_block_creation_processing, run_block_regeneration
 from standalone.services.content import chunk_text, summarize_block_content
+from standalone.services.preview import PREVIEW_SESSION_KEY
 from standalone.services.questions import generate_question_pair_for_block
 
 
@@ -1425,8 +1426,95 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, "preview-block-switcher", html=False)
         self.assertContains(response, "student-preview-data", html=False)
         self.assertContains(response, "data-waq-alignment-loader", html=False)
+        self.assertContains(response, "data-preview-sidebar-summary-toggle", html=False)
+        self.assertContains(response, "data-preview-course-metrics", html=False)
         self.assertContains(response, block.title)
         self.assertContains(response, "Quiz")
+
+    def test_student_preview_course_metrics_average_available_block_metrics(self):
+        course = self.create_course()
+        first_block, _, first_objective, _ = self.create_preview_content_block(course, title="Week 1", order=1)
+        second_block, _, second_objective, _ = self.create_preview_content_block(course, title="Week 2", order=2)
+        future_block, _, _, _ = self.create_preview_content_block(course, title="Week 3", order=3)
+        future_block.available_from = timezone.localdate() + timedelta(days=14)
+        future_block.save(update_fields=["available_from"])
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=first_block,
+            learning_objective=first_objective,
+            source_chunk=first_block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="First preview question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="First explanation.",
+            question_hash="course-metrics-preview-1",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=second_block,
+            learning_objective=second_objective,
+            source_chunk=second_block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Second preview question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Second explanation.",
+            question_hash="course-metrics-preview-2",
+        )
+        self.client.force_login(self.teacher)
+
+        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, first_block.pk, "quiz"]))
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, first_block.pk, "answer"]),
+            data=json.dumps({"question_id": first_question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, second_block.pk, "quiz"]))
+        answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, second_block.pk, "answer"]),
+            data=json.dumps({"question_id": second_question.pk, "answer": "B"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(answer_response.status_code, 200)
+        preview = answer_response.json()["preview"]
+        course_metrics = preview["course"]["metrics"]
+        self.assertEqual(course_metrics["mastery"], 50.0)
+        self.assertEqual(course_metrics["coverage"], 50.0)
+        self.assertEqual(course_metrics["engagement"], 5.0)
+        self.assertEqual(course_metrics["target"], 5.0)
+        self.assertEqual(course_metrics["overall"], 36.5)
+        self.assertEqual(course_metrics["correct_count"], 1)
+        self.assertEqual(course_metrics["incorrect_count"], 1)
+        self.assertEqual(course_metrics["completed_count"], 2)
+        self.assertEqual(course_metrics["covered_objective_count"], 1)
+        self.assertEqual(course_metrics["total_objective_count"], 3)
+        self.assertEqual(course_metrics["on_time_count"], 2)
+        self.assertEqual(course_metrics["combined_target_question_count"], 40)
+        self.assertEqual(course_metrics["engagement_window_days"], 7)
+        self.assertEqual(
+            course_metrics["weights"],
+            {
+                "mastery": 40,
+                "coverage": 30,
+                "engagement": 20,
+                "target": 10,
+                "total": 100,
+            },
+        )
+
+        first_block_metrics = next(block["metrics"] for block in preview["blocks"] if block["id"] == first_block.pk)
+        self.assertEqual(first_block_metrics["correct_count"], 1)
+        self.assertEqual(first_block_metrics["incorrect_count"], 0)
+        self.assertEqual(first_block_metrics["completed_count"], 1)
+        self.assertEqual(first_block_metrics["covered_objective_count"], 1)
+        self.assertEqual(first_block_metrics["total_objective_count"], 1)
+        self.assertEqual(first_block_metrics["on_time_count"], 1)
+        self.assertEqual(first_block_metrics["engagement_window_days"], 7)
 
     def test_student_preview_quiz_uses_existing_bank_before_generating_new_pair(self):
         course = self.create_course()
@@ -1788,6 +1876,100 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(question_messages[-1]["correct_answers"], ["A"])
         self.assertEqual(PracticeAttempt.objects.count(), 0)
         self.assertEqual(EnrollmentQuestionState.objects.count(), 0)
+
+    def test_student_preview_feedback_includes_varying_keep_going_note(self):
+        course = self.create_course()
+        block, _, objective, _ = self.create_preview_content_block(course)
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview question one?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="First explanation.",
+            question_hash="preview-feedback-keep-going-1",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview question two?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Second explanation.",
+            question_hash="preview-feedback-keep-going-2",
+        )
+        self.client.force_login(self.teacher)
+
+        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        session = self.client.session
+        transcript = session[PREVIEW_SESSION_KEY][str(course.pk)]["transcripts"][str(block.pk)]
+        transcript[-1]["created_at"] = (timezone.now() - timedelta(minutes=6)).isoformat()
+        session.modified = True
+        session.save()
+        first_answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": first_question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+        first_block_payload = next(item for item in first_answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        first_feedback_messages = [message for message in first_block_payload["transcript"] if message["kind"] == "feedback"]
+
+        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        session = self.client.session
+        transcript = session[PREVIEW_SESSION_KEY][str(course.pk)]["transcripts"][str(block.pk)]
+        transcript[-1]["created_at"] = (timezone.now() - timedelta(minutes=6)).isoformat()
+        session.modified = True
+        session.save()
+        second_answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": second_question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+        second_block_payload = next(item for item in second_answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        second_feedback_messages = [message for message in second_block_payload["transcript"] if message["kind"] == "feedback"]
+
+        self.assertIn("Quiz", first_feedback_messages[-1]["text"])
+        self.assertIn("Quiz", second_feedback_messages[-1]["text"])
+        self.assertNotEqual(first_feedback_messages[-1]["text"], second_feedback_messages[-1]["text"])
+
+    def test_student_preview_feedback_omits_keep_going_note_when_answer_is_immediate(self):
+        course = self.create_course()
+        block, _, objective, _ = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Quick explanation.",
+            question_hash="preview-feedback-no-delay",
+        )
+        self.client.force_login(self.teacher)
+
+        quiz_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        question_id = [message for message in quiz_response.json()["preview"]["blocks"][0]["transcript"] if message["kind"] == "question"][-1]["question_id"]
+        answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        block_payload = next(item for item in answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        feedback_messages = [message for message in block_payload["transcript"] if message["kind"] == "feedback"]
+        self.assertNotIn("Hit Quiz", feedback_messages[-1]["text"])
+        self.assertNotIn("Tap Quiz", feedback_messages[-1]["text"])
 
     def test_student_preview_waq_draft_answer_updates_alignment(self):
         course = self.create_course()

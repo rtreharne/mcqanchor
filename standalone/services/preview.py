@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.db.models import Count
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from openai import OpenAI
 
@@ -20,6 +21,14 @@ PREVIEW_ENGAGEMENT_WINDOW_DAYS = 7
 PREVIEW_CHAT_RETRIEVAL_LIMIT = 6
 PREVIEW_CHAT_HISTORY_LIMIT = 6
 PREVIEW_INAPPROPRIATE_MESSAGE_WARNING = "Please keep messages respectful and appropriate. All conversations are logged and auditable by teachers."
+PREVIEW_KEEP_GOING_LINES = (
+    "Hit Quiz to keep going!",
+    "Ready for another one? Hit Quiz.",
+    "Keep the streak going. Hit Quiz.",
+    "Want the next question? Tap Quiz.",
+    "On to the next one. Hit Quiz.",
+)
+PREVIEW_KEEP_GOING_DELAY = timedelta(minutes=5)
 WAQ_ALIGNMENT_THRESHOLD = 0.75
 PREVIEW_WAQ_CLOSE_THRESHOLD = 0.55
 PREVIEW_WAQ_MIN_SUBSTANTIVE_WORDS = 3
@@ -74,6 +83,7 @@ def _ensure_block_transcript(course_state: dict, block: CourseBlock) -> list[dic
         transcript.append(
             {
                 "id": _next_message_id(course_state),
+                "created_at": timezone.now().isoformat(),
                 "role": "assistant",
                 "kind": "text",
                 "text": f"Welcome to {block.title}. Tap Quiz to get a question for this block, or ask about anything in the course.",
@@ -85,7 +95,13 @@ def _ensure_block_transcript(course_state: dict, block: CourseBlock) -> list[dic
 
 def _append_message(course_state: dict, block: CourseBlock, role: str, kind: str, **data) -> dict:
     transcript = _ensure_block_transcript(course_state, block)
-    message = {"id": _next_message_id(course_state), "role": role, "kind": kind, **data}
+    message = {
+        "id": _next_message_id(course_state),
+        "created_at": timezone.now().isoformat(),
+        "role": role,
+        "kind": kind,
+        **data,
+    }
     transcript.append(message)
     return message
 
@@ -683,6 +699,24 @@ def _feedback_text(question: QuestionBankItem, selected_answers, is_correct: boo
     return f"Not quite. The correct answer is {question.correct_answer}."
 
 
+def _feedback_with_keep_going_line(course_state: dict, feedback_text: str) -> str:
+    completion_count = len(course_state.get("completed_events", []))
+    keep_going_line = PREVIEW_KEEP_GOING_LINES[completion_count % len(PREVIEW_KEEP_GOING_LINES)]
+    return f"{feedback_text}\n\n{keep_going_line}"
+
+
+def _should_add_keep_going_line(transcript: list[dict]) -> bool:
+    now = timezone.now()
+    for message in reversed(transcript):
+        timestamp = parse_datetime(str(message.get("created_at", "")))
+        if timestamp is None:
+            continue
+        if timezone.is_naive(timestamp):
+            timestamp = timezone.make_aware(timestamp, timezone.get_current_timezone())
+        return now - timestamp > PREVIEW_KEEP_GOING_DELAY
+    return False
+
+
 def submit_preview_answer(request, course: Course, block: CourseBlock, question_id: int, selected_answers=None, *, answer_text: str = "") -> dict:
     course_state = _course_state(request, course)
     pending_question_id = course_state.setdefault("pending_questions", {}).get(str(block.pk))
@@ -707,6 +741,7 @@ def submit_preview_answer(request, course: Course, block: CourseBlock, question_
         is_correct, missing_answers, extra_answers = _grade_question_response(question, normalized_answers)
         feedback_text = _feedback_text(question, normalized_answers, is_correct, missing_answers, extra_answers)
         answer_display_text = ", ".join(normalized_answers)
+    include_keep_going_line = _should_add_keep_going_line(transcript)
 
     for message in reversed(transcript):
         if message.get("kind") == "question" and message.get("question_id") == question_id and not message.get("answered"):
@@ -730,7 +765,7 @@ def submit_preview_answer(request, course: Course, block: CourseBlock, question_
         block,
         "assistant",
         "feedback",
-        text=feedback_text,
+        text=_feedback_with_keep_going_line(course_state, feedback_text) if include_keep_going_line else feedback_text,
         correct=is_correct,
         source_blocks=[block.title],
     )
@@ -1064,12 +1099,14 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
     completed_events = [event for event in course_state.get("completed_events", []) if int(event["block_id"]) == block.pk]
     completed_count = len(completed_events)
     correct_count = sum(1 for event in completed_events if event["correct"])
+    incorrect_count = max(0, completed_count - correct_count)
     objective_ids = {
         int(event["learning_objective_id"])
         for event in completed_events
         if event["correct"] and event.get("learning_objective_id") is not None
     }
     total_objectives = block.learning_objectives.count()
+    covered_objective_count = len(objective_ids)
     today = timezone.localdate()
     engagement_deadline = block.available_from + timedelta(days=PREVIEW_ENGAGEMENT_WINDOW_DAYS)
     on_time_count = sum(
@@ -1080,7 +1117,7 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
     target_question_count = max(1, block.preview_target_question_count)
 
     mastery = round((correct_count * 100 / completed_count), 2) if completed_count else 0.0
-    coverage = round((len(objective_ids) * 100 / total_objectives), 2) if total_objectives else 0.0
+    coverage = round((covered_objective_count * 100 / total_objectives), 2) if total_objectives else 0.0
     engagement = round(min(100, on_time_count * 100 / target_question_count), 2) if today >= block.available_from else 0.0
     target = round(min(100, completed_count * 100 / target_question_count), 2)
     return {
@@ -1089,7 +1126,87 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
         "engagement": engagement,
         "target": target,
         "completed_count": completed_count,
+        "correct_count": correct_count,
+        "incorrect_count": incorrect_count,
+        "covered_objective_count": covered_objective_count,
+        "total_objective_count": total_objectives,
+        "on_time_count": on_time_count,
+        "engagement_window_days": PREVIEW_ENGAGEMENT_WINDOW_DAYS,
         "target_question_count": target_question_count,
+    }
+
+
+def _practice_score_weights(course: Course) -> dict:
+    total_weight = (
+        course.config.mastery_weight
+        + course.config.coverage_weight
+        + course.config.engagement_weight
+        + course.config.target_weight
+    )
+    return {
+        "mastery": course.config.mastery_weight,
+        "coverage": course.config.coverage_weight,
+        "engagement": course.config.engagement_weight,
+        "target": course.config.target_weight,
+        "total": total_weight,
+    }
+
+
+def _weighted_practice_score(course: Course, metrics: dict) -> float:
+    total_weight = _practice_score_weights(course)["total"]
+    if total_weight <= 0:
+        return 0.0
+    weighted_total = (
+        metrics["mastery"] * course.config.mastery_weight
+        + metrics["coverage"] * course.config.coverage_weight
+        + metrics["engagement"] * course.config.engagement_weight
+        + metrics["target"] * course.config.target_weight
+    )
+    return round(weighted_total / total_weight, 2)
+
+
+def _course_metrics(course: Course, serialized_blocks: list[dict]) -> dict:
+    metric_blocks = [block for block in serialized_blocks if block.get("is_available")] or serialized_blocks
+    weights = _practice_score_weights(course)
+    if not metric_blocks:
+        return {
+            "mastery": 0.0,
+            "coverage": 0.0,
+            "engagement": 0.0,
+            "target": 0.0,
+            "overall": 0.0,
+            "block_count": 0,
+            "completed_count": 0,
+            "correct_count": 0,
+            "incorrect_count": 0,
+            "covered_objective_count": 0,
+            "total_objective_count": sum(block.get("learning_objective_count", 0) for block in serialized_blocks),
+            "on_time_count": 0,
+            "combined_target_question_count": 0,
+            "engagement_window_days": PREVIEW_ENGAGEMENT_WINDOW_DAYS,
+            "weights": weights,
+        }
+
+    block_count = len(metric_blocks)
+    metrics = {
+        "mastery": round(sum(block["metrics"]["mastery"] for block in metric_blocks) / block_count, 2),
+        "coverage": round(sum(block["metrics"]["coverage"] for block in metric_blocks) / block_count, 2),
+        "engagement": round(sum(block["metrics"]["engagement"] for block in metric_blocks) / block_count, 2),
+        "target": round(sum(block["metrics"]["target"] for block in metric_blocks) / block_count, 2),
+    }
+    return {
+        **metrics,
+        "overall": _weighted_practice_score(course, metrics),
+        "block_count": block_count,
+        "completed_count": sum(block["metrics"]["completed_count"] for block in metric_blocks),
+        "correct_count": sum(block["metrics"]["correct_count"] for block in metric_blocks),
+        "incorrect_count": sum(block["metrics"]["incorrect_count"] for block in metric_blocks),
+        "covered_objective_count": sum(block["metrics"]["covered_objective_count"] for block in serialized_blocks),
+        "total_objective_count": sum(block.get("learning_objective_count", 0) for block in serialized_blocks),
+        "on_time_count": sum(block["metrics"]["on_time_count"] for block in metric_blocks),
+        "combined_target_question_count": sum(block["metrics"]["target_question_count"] for block in metric_blocks),
+        "engagement_window_days": PREVIEW_ENGAGEMENT_WINDOW_DAYS,
+        "weights": weights,
     }
 
 
@@ -1154,7 +1271,12 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None) ->
         )
     request.session.modified = True
     return {
-        "course": {"id": course.pk, "title": course.title, "summary": course.summary},
+        "course": {
+            "id": course.pk,
+            "title": course.title,
+            "summary": course.summary,
+            "metrics": _course_metrics(course, serialized_blocks),
+        },
         "active_block_id": active_block_id,
         "blocks": serialized_blocks,
     }

@@ -16,6 +16,7 @@
       </a>
       {% if user.is_authenticated %}
         <div class="app-nav-links app-nav-links--desktop">
+          {% block app_nav_links %}{% endblock %}
           <span class="app-user-status">Logged in as: {{ user.email|default:user.username }}</span>
           <form method="post" action="{% url 'standalone:logout' %}" class="inline-form">
             {% csrf_token %}
@@ -29,6 +30,7 @@
             <span></span>
           </summary>
           <div class="app-nav-menu-panel">
+            {% block app_nav_menu_actions %}{% endblock %}
             <p class="app-nav-menu-label">Logged in as</p>
             <p class="app-nav-menu-value">{{ user.email|default:user.username }}</p>
             <form method="post" action="{% url 'standalone:logout' %}" class="inline-form">

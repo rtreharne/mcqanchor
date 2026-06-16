@@ -4,6 +4,12 @@
 {% block extra_head %}
   <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}">
 {% endblock %}
+{% block app_nav_links %}
+  <a href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
+{% endblock %}
+{% block app_nav_menu_actions %}
+  <a class="button secondary app-nav-menu-action" href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
+{% endblock %}
 {% block app_shell_class %} preview-app-shell{% endblock %}
 {% block content %}
 <section
@@ -14,10 +20,13 @@
   <aside class="preview-sidebar">
     <div class="preview-sidebar-head">
       <h1>{{ course.title }}</h1>
-      <p class="lead">{{ course.summary|default:"Chat-based practice for this course." }}</p>
-      <div class="action-row">
-        <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
+      <div class="preview-sidebar-summary" data-preview-sidebar-summary>
+        <p class="lead preview-sidebar-summary-text" data-preview-sidebar-summary-text>
+          <span class="preview-sidebar-summary-copy" data-preview-sidebar-summary-copy>{{ course.summary|default:"Chat-based practice for this course." }}</span>
+          <button type="button" class="preview-sidebar-summary-toggle" hidden data-preview-sidebar-summary-toggle>... more</button>
+        </p>
       </div>
+      <section class="preview-course-metrics-panel" data-preview-course-metrics></section>
     </div>
     <div class="preview-block-switcher" aria-label="Course blocks"></div>
   </aside>
