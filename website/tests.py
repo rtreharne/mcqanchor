@@ -20,6 +20,22 @@ class HomePageTests(TestCase):
         self.assertContains(response, 'alt="MCQ Anchor logo"', html=False)
         self.assertContains(response, "Download the handout")
         self.assertContains(response, "Start a conversation.")
+        self.assertContains(response, f'href="{reverse("standalone:login")}"', html=False)
+        self.assertContains(response, "Log in")
+
+    def test_authenticated_user_visiting_home_redirects_to_dashboard(self):
+        user = get_user_model().objects.create_user(
+            username="teacher",
+            email="teacher@example.com",
+            password="password123",
+            role="teacher",
+        )
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("website:home"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("standalone:dashboard"))
 
 
 class ContactFormTests(TestCase):

@@ -1095,6 +1095,64 @@ body.chat-open {
   color: inherit;
 }
 
+.chat-message-paragraph {
+  margin: 0;
+  color: inherit;
+  white-space: pre-wrap;
+}
+
+.chat-message-inline-code {
+  padding: 0.1rem 0.38rem;
+  border-radius: 0.45rem;
+  background: rgba(12, 37, 68, 0.1);
+  color: #0f3e78;
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.84em;
+  font-weight: 700;
+}
+
+.chat-message-code-block {
+  margin: 0.7rem 0 0;
+  padding: 0.8rem 0.9rem;
+  overflow-x: auto;
+  border-radius: 14px;
+  background: rgba(10, 28, 52, 0.95);
+  border: 1px solid rgba(146, 190, 255, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.chat-message-code {
+  display: block;
+  color: #dff6ff;
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.chat-message-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.chat-message-list-item {
+  color: inherit;
+}
+
+.chat-message-paragraph + .chat-message-paragraph,
+.chat-message-paragraph + .chat-message-code-block,
+.chat-message-paragraph + .chat-message-list,
+.chat-message-code-block + .chat-message-paragraph,
+.chat-message-code-block + .chat-message-code-block,
+.chat-message-code-block + .chat-message-list,
+.chat-message-list + .chat-message-paragraph,
+.chat-message-list + .chat-message-code-block,
+.chat-message-list + .chat-message-list {
+  margin-top: 0.7rem;
+}
+
 .chat-message-user {
   justify-self: end;
   color: #041018;

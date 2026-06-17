@@ -352,6 +352,7 @@ class QuestionBankItem(TimeStampedModel):
     correct_answer = models.TextField()
     additional_correct_answers = models.JSONField(default=list, blank=True)
     written_answer_keywords = models.JSONField(default=list, blank=True)
+    further_study_questions = models.JSONField(default=list, blank=True)
     distractors = models.JSONField(default=list, blank=True)
     explanation = models.TextField(blank=True)
     difficulty = models.CharField(max_length=50, blank=True)

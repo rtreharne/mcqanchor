@@ -31,7 +31,11 @@ from standalone.models import (
 from standalone.tasks import run_block_creation_processing, run_block_regeneration
 from standalone.services.content import chunk_text, summarize_block_content
 from standalone.services.preview import PREVIEW_SESSION_KEY
-from standalone.services.questions import generate_question_pair_for_block
+from standalone.services.questions import (
+    fallback_further_study_questions,
+    further_study_questions_for_question,
+    generate_question_pair_for_block,
+)
 
 
 User = get_user_model()
@@ -1280,6 +1284,61 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(validation.question_type, QuestionBankItem.QuestionType.WAQ)
         self.assertEqual(validation.written_answer_keywords, practice.written_answer_keywords)
 
+    def test_generate_question_pair_includes_further_study_questions(self):
+        course = self.create_course()
+        block, _, _, _ = self.create_preview_content_block(course)
+
+        practice, validation = generate_question_pair_for_block(block)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(len(practice.further_study_questions), 3)
+        self.assertTrue(all(question.endswith("?") for question in practice.further_study_questions))
+        self.assertEqual(validation.further_study_questions, practice.further_study_questions)
+
+    def test_fallback_further_study_questions_strip_objective_command_language(self):
+        questions = fallback_further_study_questions(
+            objective_text="Interpret the interconnectedness of earth sciences and life sciences in understanding biological history",
+            correct_answer="It allows scientists to infer that studying other organisms, like yeast or mice, can clarify human biology.",
+        )
+
+        self.assertEqual(len(questions), 3)
+        self.assertTrue(all(question.endswith("?") for question in questions))
+        self.assertTrue(all(" interpret " not in f" {question.lower()} " for question in questions))
+        self.assertTrue(all("with it allows" not in question.lower() for question in questions))
+
+    def test_further_study_questions_for_question_falls_back_when_stored_prompts_are_weird(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        objective.text = "Interpret the interconnectedness of earth sciences and life sciences in understanding biological history"
+        objective.save(update_fields=["text"])
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why does comparative biology matter?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It allows scientists to infer that studying other organisms, like yeast or mice, can clarify human biology.",
+            distractors=["It removes the need for experiments", "It only applies to plants", "It prevents evolution"],
+            explanation="This follows directly from this block.",
+            question_hash="weird-further-study-prompts",
+            further_study_questions=[
+                "Can you show a simple example of interpret the interconnectedness of earth sciences and life sciences in understanding biological history?",
+                "How would you explain interpret the interconnectedness of earth sciences and life sciences in understanding biological history in your own?",
+                "What common mistake or misconception should I avoid with it allows scientists to infer that studying other organisms, like yeast or mice, c?",
+            ],
+        )
+
+        cleaned_questions = further_study_questions_for_question(question)
+
+        self.assertEqual(len(cleaned_questions), 3)
+        self.assertTrue(all(question.endswith("?") for question in cleaned_questions))
+        self.assertTrue(all(" interpret " not in f" {question.lower()} " for question in cleaned_questions))
+        self.assertTrue(all("with it allows" not in question.lower() for question in cleaned_questions))
+
     def test_generate_question_pair_spreads_waq_generation_across_objectives_before_repeating(self):
         course = self.create_course()
         block, asset, objective_a, chunk = self.create_preview_content_block(course)
@@ -1617,6 +1676,34 @@ class StandaloneFlowTests(TestCase):
         question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
         self.assertEqual(question_messages[-1]["question_id"], forced_maq.pk)
         self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MAQ)
+
+    def test_student_preview_question_payload_includes_further_study_questions(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Which statement best explains membrane transport?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="Membranes control what enters and leaves the cell",
+            distractors=["Mitochondria store DNA", "Gravity drives transport", "Ribosomes digest proteins"],
+            explanation="This follows directly from this block.",
+            question_hash="preview-further-study-fallback",
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        block_payload = next(item for item in preview["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(len(question_messages[-1]["further_study_questions"]), 3)
+        self.assertTrue(all(question.endswith("?") for question in question_messages[-1]["further_study_questions"]))
 
     def test_student_preview_forced_question_type_generates_requested_type(self):
         course = self.create_course()
@@ -2108,6 +2195,8 @@ class StandaloneFlowTests(TestCase):
             assistant_messages[-1]["text"],
             "A eukaryotic cell has DNA enclosed in a nucleus and contains specialised structures such as mitochondria.",
         )
+        self.assertEqual(len(assistant_messages[-1]["further_study_questions"]), 3)
+        self.assertTrue(all(question.endswith("?") for question in assistant_messages[-1]["further_study_questions"]))
 
     def test_student_preview_chat_warns_on_inappropriate_message(self):
         course = self.create_course()

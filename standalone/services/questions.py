@@ -46,6 +46,30 @@ WAQ_FALLBACK_STEM_TEMPLATES = (
     "What does {topic} help to explain?",
 )
 
+FURTHER_STUDY_QUESTION_COUNT = 3
+STUDY_FOCUS_ACTION_VERBS = (
+    "explain",
+    "describe",
+    "identify",
+    "discuss",
+    "outline",
+    "summarise",
+    "summarize",
+    "compare",
+    "show",
+    "state",
+    "interpret",
+    "analyse",
+    "analyze",
+    "evaluate",
+    "explore",
+    "define",
+    "apply",
+    "relate",
+    "connect",
+    "infer",
+)
+
 
 def _keyword_set(text: str) -> set[str]:
     return {
@@ -126,6 +150,164 @@ def _fallback_written_answer_keywords(*texts: str, limit: int = 6) -> list[str]:
     return keywords or ["core idea"]
 
 
+def _normalize_study_question(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" -")
+    if not cleaned:
+        return ""
+    cleaned = cleaned.rstrip(".!")
+    if not cleaned.endswith("?"):
+        cleaned = f"{cleaned}?"
+    if cleaned:
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned
+
+
+def _normalize_further_study_questions(items, *, limit: int = FURTHER_STUDY_QUESTION_COUNT) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(items, list):
+        return normalized
+    for item in items:
+        cleaned = _normalize_study_question(item)
+        if len(cleaned) > 140:
+            cleaned = f"{cleaned[:139].rstrip(' ?.!')}?"
+        lowered = cleaned.lower()
+        if cleaned and lowered not in seen:
+            normalized.append(cleaned)
+            seen.add(lowered)
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+def _is_weird_study_question(text: str) -> bool:
+    lowered = str(text or "").lower()
+    action_verbs = "|".join(STUDY_FOCUS_ACTION_VERBS)
+    weird_patterns = (
+        rf"\b(?:{action_verbs})\s+(?:{action_verbs})\b",
+        rf"\b(?:example of|thinking about|with)\s+(?:{action_verbs})\b",
+        r"\bwith\s+it\s+(?:allows|shows|means|helps?)\b",
+        r"\bin your own\?$",
+        r"\b[a-z]\?$",
+    )
+    return any(re.search(pattern, lowered) for pattern in weird_patterns)
+
+
+def _usable_further_study_questions(items, *, limit: int = FURTHER_STUDY_QUESTION_COUNT) -> list[str]:
+    normalized = _normalize_further_study_questions(items, limit=limit)
+    if len(normalized) < min(limit, FURTHER_STUDY_QUESTION_COUNT):
+        return []
+    if any(_is_weird_study_question(question) for question in normalized):
+        return []
+    return normalized
+
+
+def _focus_phrase_from_text(text: str) -> str:
+    cleaned = str(text or "").replace("**", "").replace("__", "").replace("`", "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ?.!:-")
+    if not cleaned:
+        return ""
+    wrapper_patterns = (
+        r"^(?:please\s+)?(?:can|could|would)\s+you\s+(?:show|give|provide|share|offer|outline|explain|describe|walk)\s+(?:me\s+)?",
+        r"^(?:please\s+)?(?:tell|show|give|provide|share)\s+(?:me\s+)?",
+        r"^(?:please\s+)?help\s+me\s+(?:understand|explain)\s+",
+        r"^(?:please\s+)?how\s+would\s+you\s+explain\s+",
+        r"^(?:please\s+)?what\s+common\s+mistake(?:s)?(?:\s+or\s+misconception(?:s)?)?\s+should\s+i\s+avoid\s+(?:with|when\s+thinking\s+about)\s+",
+    )
+    for pattern in wrapper_patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^(?:a\s+simple\s+|an?\s+)?example\s+of\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        rf"^(?:{'|'.join(STUDY_FOCUS_ACTION_VERBS)})\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^(?:what|why|how|which|when|where)\s+(?:is|are|does|do|did|can|could|would|should|might|statements?\s+best\s+explain|statement\s+best\s+explains|best\s+explains?)?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s+(?:in\s+your\s+own\s+words|connect\s+to\s+another\s+idea\s+in\s+this\s+block|connect\s+to\s+the\s+bigger\s+picture|matter(?:\s+here)?)\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = cleaned.strip(" ?.!:-")
+    if not cleaned:
+        return ""
+    if len(cleaned) > 110:
+        truncated = re.split(r"[,;:]\s+", cleaned, maxsplit=1)[0].strip(" ?.!:-")
+        if len(truncated) >= 24:
+            cleaned = truncated
+    return cleaned[0].lower() + cleaned[1:]
+
+
+def fallback_further_study_questions(
+    *,
+    stem: str = "",
+    objective_text: str = "",
+    chunk_text: str = "",
+    correct_answer: str = "",
+    limit: int = FURTHER_STUDY_QUESTION_COUNT,
+) -> list[str]:
+    focus = (
+        _focus_phrase_from_text(objective_text)
+        or _focus_phrase_from_text(stem)
+        or _focus_phrase_from_text(correct_answer)
+        or _focus_phrase_from_text(chunk_text.split(".")[0] if chunk_text else "")
+        or "this idea"
+    )
+    questions = [
+        f"Can you show a simple example of {focus}?",
+        f"How would you explain {focus} in your own words?",
+        f"What common mistake should I avoid when thinking about {focus}?",
+        f"Why does {focus} matter?",
+    ]
+    return _usable_further_study_questions(questions, limit=limit) or _normalize_further_study_questions(questions, limit=limit)
+
+
+def further_study_questions_for_question(question: QuestionBankItem) -> list[str]:
+    return _usable_further_study_questions(question.further_study_questions) or fallback_further_study_questions(
+        stem=question.stem,
+        objective_text=(question.learning_objective.text if question.learning_objective else ""),
+        chunk_text=(question.source_chunk.text if question.source_chunk else ""),
+        correct_answer=question.correct_answer,
+    )
+
+
+def further_study_questions_for_chat(
+    *,
+    question: str = "",
+    answer: str = "",
+    block_title: str = "",
+    objective_texts: list[str] | tuple[str, ...] | None = None,
+    limit: int = FURTHER_STUDY_QUESTION_COUNT,
+) -> list[str]:
+    objective_focus = " ".join(str(text or "").strip() for text in (objective_texts or []) if str(text or "").strip())
+    focus = (
+        _focus_phrase_from_text(question)
+        or _focus_phrase_from_text(objective_focus)
+        or _focus_phrase_from_text(block_title)
+        or _focus_phrase_from_text(answer)
+        or "this idea"
+    )
+    questions = [
+        f"Can you show a simple example of {focus}?",
+        f"How would you explain {focus} in your own words?",
+        f"What common mistake should I avoid when thinking about {focus}?",
+        f"How does {focus} connect to the bigger picture?",
+    ]
+    return _usable_further_study_questions(questions, limit=limit) or _normalize_further_study_questions(questions, limit=limit)
+
+
 def _select_objective_for_chunk(
     chunk: ContentChunk,
     objectives: list[LearningObjective],
@@ -184,6 +366,12 @@ def _fallback_question_payload(
                 summary,
                 chunk.text,
             ),
+            "further_study_questions": fallback_further_study_questions(
+                stem=waq_stem,
+                objective_text=(objective.text if objective else ""),
+                chunk_text=chunk.text,
+                correct_answer=canonical_answer or correct_answer,
+            ),
             "distractors": [],
             "explanation": "This follows directly from this block.",
             "difficulty": "core",
@@ -210,6 +398,16 @@ def _fallback_question_payload(
         "correct_answers": correct_answers,
         "distractors": distractors,
         "written_answer_keywords": [],
+        "further_study_questions": fallback_further_study_questions(
+            stem=(
+                f"Which statements best explain {summary.lower()}?"
+                if question_type == QuestionBankItem.QuestionType.MAQ
+                else f"Which statement best explains {summary.lower()}?"
+            ),
+            objective_text=(objective.text if objective else ""),
+            chunk_text=chunk.text,
+            correct_answer=correct_answers[0] if correct_answers else correct_answer,
+        ),
         "explanation": "This follows directly from this block.",
         "difficulty": "core",
     }
@@ -268,11 +466,14 @@ Rules:
 - when the best stem is a why-question, start it directly with "Why ..."
 - set question_type to "{question_type}"
 - correct_answers must be an array of strings
-- {"return strict JSON with keys: question_type, stem, correct_answers, written_answer_keywords, explanation, difficulty" if is_waq else "return strict JSON with keys: question_type, stem, correct_answers, distractors, explanation, difficulty"}
+- {"return strict JSON with keys: question_type, stem, correct_answers, written_answer_keywords, further_study_questions, explanation, difficulty" if is_waq else "return strict JSON with keys: question_type, stem, correct_answers, distractors, further_study_questions, explanation, difficulty"}
 - {"correct_answers must contain exactly 1 item" if is_waq or not is_maq else "correct_answers must contain at least 2 items"}
 - {"the question must require the student to type an answer in their own words" if is_waq else ("the question must require selecting more than one correct answer" if is_maq else "the question must have only one correct answer")}
 - {"written_answer_keywords must be an array of 3 to 6 short concept phrases or key terms needed for a strong answer" if is_waq else f"use exactly {distractor_count} distractors"}
 - {"do not return distractors for a written-answer question" if is_waq else "distractors must be plausible and distinct from the correct answer(s)"}
+- further_study_questions must be an array of exactly 3 concise student-facing follow-up questions
+- further_study_questions should invite deeper understanding, examples, comparison, application, or common mistakes when helpful
+- each further_study_questions item must be phrased as a question a student could click to ask next
 - prioritise a genuinely different question angle from recent questions when possible{avoidance_prompt}
 
 Learning objective:
@@ -470,6 +671,7 @@ def _normalize_generated_payload(payload: dict, question_type: str, distractor_c
     if not correct_answers and payload.get("correct_answer"):
         correct_answers = [str(payload["correct_answer"]).strip()]
     written_answer_keywords = _normalize_answer_list(payload.get("written_answer_keywords"))
+    further_study_questions = _usable_further_study_questions(payload.get("further_study_questions"))
 
     distractors = [
         distractor
@@ -494,12 +696,19 @@ def _normalize_generated_payload(payload: dict, question_type: str, distractor_c
             raise ValueError("MAQ payload must contain at least two correct answers.")
         written_answer_keywords = []
 
+    further_study_questions = further_study_questions or fallback_further_study_questions(
+        stem=stem,
+        objective_text="",
+        correct_answer=correct_answers[0] if correct_answers else "",
+    )
+
     return {
         "question_type": normalized_type,
         "stem": stem,
         "correct_answers": correct_answers,
         "distractors": distractors,
         "written_answer_keywords": written_answer_keywords,
+        "further_study_questions": further_study_questions,
         "explanation": explanation,
         "difficulty": difficulty,
     }
@@ -544,6 +753,7 @@ def _create_question_pair(
         correct_answer=normalized_payload["correct_answers"][0],
         additional_correct_answers=normalized_payload["correct_answers"][1:],
         written_answer_keywords=normalized_payload["written_answer_keywords"],
+        further_study_questions=normalized_payload["further_study_questions"],
         distractors=normalized_payload["distractors"],
         explanation=normalize_explanation_text(normalized_payload["explanation"]),
         difficulty=normalized_payload["difficulty"],
@@ -561,6 +771,7 @@ def _create_question_pair(
         correct_answer=practice.correct_answer,
         additional_correct_answers=practice.additional_correct_answers,
         written_answer_keywords=practice.written_answer_keywords,
+        further_study_questions=practice.further_study_questions,
         distractors=practice.distractors,
         explanation=practice.explanation,
         difficulty=practice.difficulty,

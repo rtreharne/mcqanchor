@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 def home(request: HttpRequest) -> HttpResponse:
+    if request.user.is_authenticated:
+        return redirect("standalone:dashboard")
     if request.method == "POST":
         form = PilotEnquiryForm(request.POST)
         if form.is_valid():

@@ -451,6 +451,9 @@ if (previewRoot && previewDataNode) {
     previewRoot.querySelectorAll(".preview-flag-button").forEach((button) => {
       button.disabled = disabled || button.textContent === "Flagged";
     });
+    previewRoot.querySelectorAll(".preview-further-study-button, .preview-further-study-question").forEach((button) => {
+      button.disabled = disabled;
+    });
     resourceButtons.forEach((button) => {
       button.disabled = disabled;
     });
@@ -766,6 +769,193 @@ if (previewRoot && previewDataNode) {
     return review;
   }
 
+  function appendFormattedMessageContent(container, text) {
+    if (!container) {
+      return;
+    }
+
+    const source = String(text || "");
+    const fencePattern = /```([\w+-]+)?\n?([\s\S]*?)```/g;
+    const unorderedListPattern = /^\s*[-*]\s+/;
+    const orderedListPattern = /^\s*\d+\.\s+/;
+    let lastIndex = 0;
+    let hasContent = false;
+
+    function appendInlineMarkdown(target, inlineText) {
+      const sourceText = String(inlineText || "");
+      const tokenPattern = /`[^`\n]+`|\*\*[^*][\s\S]*?\*\*|__[^_][\s\S]*?__|\*[^*\n][\s\S]*?\*|_[^_\n][\s\S]*?_/g;
+      let inlineLastIndex = 0;
+
+      function appendToken(targetNode, tokenText) {
+        if (!tokenText) {
+          return;
+        }
+        if (tokenText.startsWith("`") && tokenText.endsWith("`")) {
+          const code = document.createElement("code");
+          code.className = "preview-message-inline-code";
+          code.textContent = tokenText.slice(1, -1);
+          targetNode.appendChild(code);
+          return;
+        }
+        if (
+          (tokenText.startsWith("**") && tokenText.endsWith("**"))
+          || (tokenText.startsWith("__") && tokenText.endsWith("__"))
+        ) {
+          const strong = document.createElement("strong");
+          appendInlineMarkdown(strong, tokenText.slice(2, -2));
+          targetNode.appendChild(strong);
+          return;
+        }
+        if (
+          (tokenText.startsWith("*") && tokenText.endsWith("*"))
+          || (tokenText.startsWith("_") && tokenText.endsWith("_"))
+        ) {
+          const emphasis = document.createElement("em");
+          appendInlineMarkdown(emphasis, tokenText.slice(1, -1));
+          targetNode.appendChild(emphasis);
+          return;
+        }
+        targetNode.appendChild(document.createTextNode(tokenText));
+      }
+
+      sourceText.replace(tokenPattern, (match, offset) => {
+        const plainText = sourceText.slice(inlineLastIndex, offset);
+        if (plainText) {
+          target.appendChild(document.createTextNode(plainText));
+        }
+        appendToken(target, match);
+        inlineLastIndex = offset + match.length;
+        return match;
+      });
+
+      const trailingText = sourceText.slice(inlineLastIndex);
+      if (trailingText) {
+        target.appendChild(document.createTextNode(trailingText));
+      }
+    }
+
+    function parseListItems(lines, markerPattern) {
+      const items = [];
+      let currentItem = "";
+      for (const line of lines) {
+        if (!line.trim()) {
+          if (currentItem) {
+            currentItem += "\n";
+          }
+          continue;
+        }
+        if (markerPattern.test(line)) {
+          if (currentItem.trim()) {
+            items.push(currentItem.trim());
+          }
+          currentItem = line.replace(markerPattern, "").trim();
+          continue;
+        }
+        if (/^\s+/.test(line) && currentItem) {
+          currentItem = `${currentItem}\n${line.trim()}`;
+          continue;
+        }
+        return [];
+      }
+      if (currentItem.trim()) {
+        items.push(currentItem.trim());
+      }
+      return items;
+    }
+
+    function appendTextBlock(blockText) {
+      const lines = blockText.split("\n");
+      const nonEmptyLines = lines.filter((line) => line.trim());
+      if (!nonEmptyLines.length) {
+        return;
+      }
+
+      const firstLine = nonEmptyLines[0];
+      const isUnorderedList = unorderedListPattern.test(firstLine);
+      const isOrderedList = !isUnorderedList && orderedListPattern.test(firstLine);
+      const listItems = isUnorderedList
+        ? parseListItems(lines, unorderedListPattern)
+        : (isOrderedList ? parseListItems(lines, orderedListPattern) : []);
+
+      if (listItems.length) {
+        const list = document.createElement(isOrderedList ? "ol" : "ul");
+        list.className = "preview-message-list";
+        listItems.forEach((itemText) => {
+          const item = document.createElement("li");
+          item.className = "preview-message-list-item";
+          appendInlineMarkdown(item, itemText);
+          list.appendChild(item);
+        });
+        container.appendChild(list);
+        hasContent = true;
+        return;
+      }
+
+      const paragraph = document.createElement("p");
+      paragraph.className = "preview-message-paragraph";
+      appendInlineMarkdown(paragraph, blockText);
+      container.appendChild(paragraph);
+      hasContent = true;
+    }
+
+    function appendTextSegment(segment) {
+      const normalized = String(segment || "").replace(/^\n+|\n+$/g, "");
+      if (!normalized) {
+        return;
+      }
+      normalized.split(/\n{2,}/).forEach((blockText) => {
+        appendTextBlock(blockText);
+      });
+    }
+
+    source.replace(fencePattern, (match, language, code, offset) => {
+      appendTextSegment(source.slice(lastIndex, offset));
+
+      const pre = document.createElement("pre");
+      pre.className = "preview-message-code-block";
+      if (language) {
+        pre.dataset.language = String(language).trim().toLowerCase();
+      }
+      const codeElement = document.createElement("code");
+      codeElement.className = "preview-message-code";
+      codeElement.textContent = String(code || "").replace(/^\n+|\n+$/g, "");
+      pre.appendChild(codeElement);
+      container.appendChild(pre);
+      hasContent = true;
+      lastIndex = offset + match.length;
+      return match;
+    });
+
+    appendTextSegment(source.slice(lastIndex));
+
+    if (!hasContent) {
+      const paragraph = document.createElement("p");
+      paragraph.className = "preview-message-paragraph";
+      appendInlineMarkdown(paragraph, source);
+      container.appendChild(paragraph);
+    }
+  }
+
+  function appendFurtherStudyAction(actions, message) {
+    if (
+      !actions
+      || !message
+      || !Array.isArray(message.further_study_questions)
+      || !message.further_study_questions.length
+    ) {
+      return;
+    }
+    const furtherStudyButton = document.createElement("button");
+    furtherStudyButton.type = "button";
+    furtherStudyButton.className = "preview-further-study-button";
+    furtherStudyButton.textContent = "Further study";
+    furtherStudyButton.disabled = requestInFlight;
+    furtherStudyButton.addEventListener("click", () => {
+      appendFurtherStudyMessage(message);
+    });
+    actions.appendChild(furtherStudyButton);
+  }
+
   function renderBlockSwitcher() {
     if (!blockSwitcher) {
       return;
@@ -947,6 +1137,14 @@ if (previewRoot && previewDataNode) {
 
       const actions = document.createElement("div");
       actions.className = "preview-message-actions";
+      if (
+        message.answered
+        && !message.flagged
+        && Array.isArray(message.further_study_questions)
+        && message.further_study_questions.length
+      ) {
+        appendFurtherStudyAction(actions, message);
+      }
       const flagButton = document.createElement("button");
       flagButton.type = "button";
       flagButton.className = "preview-flag-button";
@@ -1007,6 +1205,33 @@ if (previewRoot && previewDataNode) {
 
         return article;
       }
+      if (message.resource_key === "further_study") {
+        if (message.text) {
+          const summary = document.createElement("p");
+          summary.textContent = message.text;
+          article.appendChild(summary);
+        }
+
+        const questions = Array.isArray(message.questions) ? message.questions : [];
+        if (questions.length) {
+          const list = document.createElement("div");
+          list.className = "preview-further-study-list";
+          questions.forEach((questionText) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "preview-further-study-question";
+            button.textContent = questionText;
+            button.disabled = requestInFlight;
+            button.addEventListener("click", () => {
+              void sendCourseChatQuestion(questionText, { focusComposer: true, closeSidebarOnMobile: true });
+            });
+            list.appendChild(button);
+          });
+          article.appendChild(list);
+        }
+
+        return article;
+      }
       if (message.resource_key === "objectives") {
         const list = document.createElement("ul");
         list.className = "preview-objective-list";
@@ -1045,9 +1270,16 @@ if (previewRoot && previewDataNode) {
       }
     }
 
-    const paragraph = document.createElement("p");
-    paragraph.textContent = message.text || "";
-    article.appendChild(paragraph);
+    appendFormattedMessageContent(article, message.text || "");
+
+    if (message.role === "assistant" && message.kind === "text") {
+      const actions = document.createElement("div");
+      actions.className = "preview-message-actions";
+      appendFurtherStudyAction(actions, message);
+      if (actions.childElementCount) {
+        article.appendChild(actions);
+      }
+    }
 
     return article;
   }
@@ -1127,6 +1359,26 @@ if (previewRoot && previewDataNode) {
       role: "assistant",
       text: "",
       objectives,
+    };
+  }
+
+  function furtherStudyMessagePayload(block, sourceMessage) {
+    const questions = Array.isArray(sourceMessage?.further_study_questions)
+      ? sourceMessage.further_study_questions.filter(Boolean)
+      : [];
+    if (!block || !sourceMessage || !questions.length) {
+      return null;
+    }
+    return {
+      block_label: block.title,
+      kind: "resource",
+      resource_key: "further_study",
+      resource_label: "Further study",
+      role: "assistant",
+      text: sourceMessage.kind === "question"
+        ? "Try one of these follow-up questions."
+        : "Take this a step further.",
+      questions,
     };
   }
 
@@ -1276,6 +1528,20 @@ if (previewRoot && previewDataNode) {
     });
   }
 
+  function appendFurtherStudyMessage(sourceMessage) {
+    const block = currentBlock();
+    const payload = furtherStudyMessagePayload(block, sourceMessage);
+    if (!block || !payload) {
+      return;
+    }
+    const sourceKey = sourceMessage.question_id || sourceMessage.id || payload.questions.join("|");
+    appendInlineMessage(payload, {
+      block,
+      dedupeKey: `further-study:${block.id}:${sourceKey}`,
+      closeSidebarOnMobile: true,
+    });
+  }
+
   function appendMetricMessage(metricKey, scope, blockId = "") {
     const block = scope === "block" ? findBlock(blockId) : currentBlock();
     if (!block || !metricKey) {
@@ -1399,6 +1665,40 @@ if (previewRoot && previewDataNode) {
     }
   }
 
+  async function sendCourseChatQuestion(questionText, { clearComposer = false, focusComposer = true, closeSidebarOnMobile = false } = {}) {
+    const trimmed = String(questionText || "").trim();
+    if (!trimmed || requestInFlight) {
+      return;
+    }
+
+    const block = currentBlock();
+    if (!block) {
+      return;
+    }
+
+    if (clearComposer && input) {
+      input.value = "";
+      resizeComposerInput();
+      syncComposerState();
+      updateComposerClearance();
+    }
+
+    if (closeSidebarOnMobile && isMobileSidebar()) {
+      setSidebarOpen(false);
+    }
+
+    setOptimisticUserMessage(block.id, trimmed);
+    setQuizLoading(block.id, true);
+    renderTranscript();
+    try {
+      await postPreviewAction("chat", { question: trimmed }, { focusComposer, minDurationMs: 900 });
+    } finally {
+      setOptimisticUserMessage(block.id, "");
+      setQuizLoading(block.id, false);
+      renderTranscript();
+    }
+  }
+
   form?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!input || requestInFlight) {
@@ -1442,25 +1742,7 @@ if (previewRoot && previewDataNode) {
     }
 
     if (trimmed) {
-      input.value = "";
-      resizeComposerInput();
-      syncComposerState();
-      updateComposerClearance();
-      const block = currentBlock();
-      if (block) {
-        setOptimisticUserMessage(block.id, trimmed);
-        setQuizLoading(block.id, true);
-        renderTranscript();
-      }
-      try {
-        await postPreviewAction("chat", { question: trimmed }, { focusComposer: true, minDurationMs: 900 });
-      } finally {
-        if (block) {
-          setOptimisticUserMessage(block.id, "");
-          setQuizLoading(block.id, false);
-          renderTranscript();
-        }
-      }
+      await sendCourseChatQuestion(trimmed, { clearComposer: true, focusComposer: true });
       return;
     }
     input.blur();

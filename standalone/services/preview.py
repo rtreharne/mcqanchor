@@ -11,7 +11,12 @@ from django.utils import timezone
 from openai import OpenAI
 
 from standalone.models import Course, CourseBlock, LearningObjective, QuestionBankItem
-from standalone.services.questions import generate_question_pair_for_block, normalize_explanation_text
+from standalone.services.questions import (
+    further_study_questions_for_chat,
+    further_study_questions_for_question,
+    generate_question_pair_for_block,
+    normalize_explanation_text,
+)
 
 
 PREVIEW_SESSION_KEY = "standalone_student_preview"
@@ -158,6 +163,7 @@ def _question_prompt_message(course_state: dict, block: CourseBlock, question: Q
         options=options,
         block_label=block.title,
         learning_objective=(question.learning_objective.text if question.learning_objective else "General course understanding"),
+        further_study_questions=further_study_questions_for_question(question),
         answered=False,
         flagged=False,
     )
@@ -983,6 +989,10 @@ Rules:
 - if the answer is not supported well enough by the notes, say so plainly and be brief
 - do not mention source block names in the body unless they help the explanation
 - keep the answer concise and useful for a student
+- use clean markdown when it helps readability, especially simple bullet lists or numbered steps
+- when naming key ideas in a list, prefer markdown like **Idea:** short explanation
+- wrap short code snippets, commands, literals, filenames, or syntax examples in single backticks
+- use fenced code blocks for multi-line code examples
 
 Current block:
 {block.title}
@@ -1090,7 +1100,20 @@ def send_preview_chat_message(request, course: Course, block: CourseBlock, quest
             answer, source_blocks = _openai_chat_reply(course_state, course, block, question)
         except Exception:
             answer, source_blocks = _fallback_chat_reply(course, block, question)
-    _append_message(course_state, block, "assistant", "text", text=answer, source_blocks=source_blocks)
+    _append_message(
+        course_state,
+        block,
+        "assistant",
+        "text",
+        text=answer,
+        source_blocks=source_blocks,
+        further_study_questions=further_study_questions_for_chat(
+            question=question,
+            answer=answer,
+            block_title=block.title,
+            objective_texts=list(block.learning_objectives.values_list("text", flat=True)[:3]),
+        ),
+    )
     request.session.modified = True
     return serialize_preview_state(request, course, active_block_id=block.pk)
 
@@ -1219,9 +1242,22 @@ def _covered_objective_ids(course_state: dict, block: CourseBlock) -> set[int]:
 
 
 def _serialized_transcript(course_state: dict, transcript: list[dict]) -> list[dict]:
+    question_ids = {
+        int(message["question_id"])
+        for message in transcript
+        if message.get("kind") == "question" and message.get("question_id")
+    }
+    questions_by_id = {
+        question.pk: question
+        for question in QuestionBankItem.objects.filter(pk__in=question_ids).select_related("learning_objective")
+    }
     serialized_messages = []
     for message in transcript:
         message_payload = dict(message)
+        if message_payload.get("kind") == "question":
+            question = questions_by_id.get(int(message_payload.get("question_id") or 0))
+            if question is not None:
+                message_payload.setdefault("further_study_questions", further_study_questions_for_question(question))
         if message_payload.get("kind") == "question" and message_payload.get("question_type") == QuestionBankItem.QuestionType.WAQ:
             if not message_payload.get("answered"):
                 draft = _written_answer_draft(course_state, int(message_payload["question_id"]))
