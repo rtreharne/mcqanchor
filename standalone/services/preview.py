@@ -39,6 +39,7 @@ PREVIEW_WAQ_CLOSE_THRESHOLD = 0.55
 PREVIEW_WAQ_MIN_SUBSTANTIVE_WORDS = 3
 PREVIEW_WAQ_OPENAI_DRAFT_MIN_CHARS = 24
 PREVIEW_WAQ_OPENAI_CHECK_INTERVAL = 12
+ADVANCED_QUESTION_TYPES = {QuestionBankItem.QuestionType.MAQ, QuestionBankItem.QuestionType.WAQ}
 
 
 def _empty_course_state() -> dict:
@@ -188,6 +189,37 @@ def _normalize_requested_question_type(question_type: str | None) -> str | None:
     return None
 
 
+def _block_completed_count(course_state: dict, block: CourseBlock) -> int:
+    return len([event for event in course_state.get("completed_events", []) if int(event["block_id"]) == block.pk])
+
+
+def _advanced_question_start_percent(course: Course) -> int:
+    return max(0, min(100, int(course.config.advanced_question_start_percent or 0)))
+
+
+def _advanced_question_types_unlocked(course: Course, block: CourseBlock, course_state: dict) -> bool:
+    threshold_percent = _advanced_question_start_percent(course)
+    if threshold_percent <= 0:
+        return True
+    target_question_count = max(1, block.preview_target_question_count)
+    completed_count = _block_completed_count(course_state, block)
+    return completed_count * 100 >= threshold_percent * target_question_count
+
+
+def _effective_preview_question_type(
+    course: Course,
+    block: CourseBlock,
+    course_state: dict,
+    requested_question_type: str | None,
+) -> str | None:
+    normalized_type = _normalize_requested_question_type(requested_question_type)
+    if _advanced_question_types_unlocked(course, block, course_state):
+        return normalized_type
+    if normalized_type in ADVANCED_QUESTION_TYPES or normalized_type is None:
+        return QuestionBankItem.QuestionType.MCQ
+    return normalized_type
+
+
 def _course_question_queryset(course: Course, block: CourseBlock, course_state: dict, question_type: str | None = None):
     queryset = course.question_bank_items.filter(
         bank_type=QuestionBankItem.BankType.PRACTICE,
@@ -321,7 +353,7 @@ def _pending_question(course: Course, block: CourseBlock, course_state: dict):
 
 
 def _ensure_question_for_block(course: Course, block: CourseBlock, course_state: dict, requested_question_type: str | None = None):
-    normalized_type = _normalize_requested_question_type(requested_question_type)
+    effective_type = _effective_preview_question_type(course, block, course_state, requested_question_type)
     pending_question_id = course_state.setdefault("pending_questions", {}).get(str(block.pk))
     if pending_question_id:
         question = course.question_bank_items.filter(
@@ -332,14 +364,14 @@ def _ensure_question_for_block(course: Course, block: CourseBlock, course_state:
         if question is not None and question.pk not in _flagged_question_ids(course_state):
             return question, False
 
-    question = _pick_unseen_question(course, block, course_state, normalized_type)
+    question = _pick_unseen_question(course, block, course_state, effective_type)
     if question is None:
-        question = _pick_retry_question(course, block, course_state, normalized_type)
+        question = _pick_retry_question(course, block, course_state, effective_type)
     if question is None:
         question, _ = generate_question_pair_for_block(
             block,
             preferred_objective_ids=_ordered_unmet_objective_ids(course_state, block),
-            question_type=normalized_type,
+            question_type=effective_type,
         )
     return question, True
 
@@ -792,6 +824,9 @@ def submit_preview_answer(request, course: Course, block: CourseBlock, question_
             "learning_objective_id": question.learning_objective_id,
             "source_chunk_id": question.source_chunk_id,
             "question_type": question.question_type,
+            "selected_answers": normalized_answers,
+            "answer_text": answer_display_text,
+            "feedback": feedback_text,
         }
     )
     course_state.setdefault("pending_questions", {})[str(block.pk)] = None
@@ -849,7 +884,7 @@ def _keyword_set(text: str) -> set[str]:
 
 
 def _is_inappropriate_chat_message(text: str) -> bool:
-    normalized = f" {re.sub(r'\s+', ' ', text.lower()).strip()} "
+    normalized = " " + re.sub(r"\s+", " ", text.lower()).strip() + " "
     flagged_phrases = {
         " fuck ",
         " fucking ",
@@ -1120,7 +1155,7 @@ def send_preview_chat_message(request, course: Course, block: CourseBlock, quest
 
 def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
     completed_events = [event for event in course_state.get("completed_events", []) if int(event["block_id"]) == block.pk]
-    completed_count = len(completed_events)
+    completed_count = _block_completed_count(course_state, block)
     correct_count = sum(1 for event in completed_events if event["correct"])
     incorrect_count = max(0, completed_count - correct_count)
     objective_ids = {
@@ -1143,6 +1178,8 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
     coverage = round((covered_objective_count * 100 / total_objectives), 2) if total_objectives else 0.0
     engagement = round(min(100, on_time_count * 100 / target_question_count), 2) if today >= block.available_from else 0.0
     target = round(min(100, completed_count * 100 / target_question_count), 2)
+    advanced_question_start_percent = _advanced_question_start_percent(block.course)
+    advanced_question_types_unlocked = _advanced_question_types_unlocked(block.course, block, course_state)
     return {
         "mastery": mastery,
         "coverage": coverage,
@@ -1156,6 +1193,8 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
         "on_time_count": on_time_count,
         "engagement_window_days": PREVIEW_ENGAGEMENT_WINDOW_DAYS,
         "target_question_count": target_question_count,
+        "advanced_question_start_percent": advanced_question_start_percent,
+        "advanced_question_types_unlocked": advanced_question_types_unlocked,
     }
 
 

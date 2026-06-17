@@ -47,5 +47,10 @@ urlpatterns = [
     path("courses/magic/<uuid:token>/", views.magic_enrol, name="magic_enrol"),
     path("student/validation-events/<int:event_id>/book/", views.validation_book, name="validation_book"),
     path("student/bookings/<int:booking_id>/cancel/", views.validation_cancel, name="validation_cancel"),
+    path(
+        "student/courses/<int:course_id>/practice/blocks/<int:block_id>/<str:action>/",
+        views.student_practice_action,
+        name="student_practice_action",
+    ),
     path("student/courses/<int:course_id>/practice/", views.practice_quiz, name="practice_quiz"),
 ]

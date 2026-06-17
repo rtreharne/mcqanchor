@@ -1,9 +1,15 @@
 {% extends "standalone/base.html" %}
 {% load static %}
+{% block app_nav_links %}
+  <a href="{% url 'standalone:teacher_dashboard' %}">Dashboard</a>
+{% endblock %}
+{% block app_nav_menu_actions %}
+  <a class="button secondary app-nav-menu-action" href="{% url 'standalone:teacher_dashboard' %}">Dashboard</a>
+{% endblock %}
 {% block content %}
-<section class="panel">
-  <div class="section-head">
-    <div>
+<section class="course-workspace workspace-page">
+  <div class="workspace-hero course-hero">
+    <div class="workspace-hero-copy">
       <h1>
         <span
           class="inline-editable inline-editable-title"
@@ -17,30 +23,40 @@
         >{{ course.title }}</span>
       </h1>
       <p class="lead">{{ course.summary|default:"No summary yet." }}</p>
-    </div>
-  </div>
-
-  <div class="action-row">
-    <a class="button secondary" href="{% url 'standalone:teacher_dashboard' %}">Dashboard</a>
-    <a class="button" href="{% url 'standalone:student_preview' course.pk %}">Student preview</a>
-    <a class="button secondary" href="{% url 'standalone:course_config' course.pk %}">Settings</a>
-    <a class="button secondary" href="{% url 'standalone:student_invite' course.pk %}">Invite student</a>
-    <a class="button secondary" href="{% url 'standalone:allowed_email_add' course.pk %}">Add self-enrol email</a>
-    <a class="button secondary" href="{% url 'standalone:magic_link_create' course.pk %}">Create magic link</a>
-  </div>
-
-  <section class="panel nested">
-    <div class="section-head compact">
-      <h2>Course blocks</h2>
-      <div class="section-actions">
-        <a class="button" href="{% url 'standalone:block_create' course.pk %}">Add block</a>
+      <div class="course-hero-meta" aria-label="Course summary">
+        <span>{{ blocks|length }} blocks</span>
+        <span>{{ approved_questions }} approved questions</span>
+        <span>{{ course_student_count }} students</span>
+      </div>
+      <div class="practice-average-panel course-practice-average-panel" aria-label="Course practice averages">
+        <div class="practice-average-grid">
+          <span class="practice-average-metric practice-average-metric--overall"><span>Overall practice</span><strong>{{ course.practice_overall_average|floatformat:1 }}%</strong></span>
+          <span class="practice-average-metric"><span>Mastery</span><strong>{{ course.practice_mastery_average|floatformat:1 }}%</strong></span>
+          <span class="practice-average-metric"><span>Coverage</span><strong>{{ course.practice_coverage_average|floatformat:1 }}%</strong></span>
+          <span class="practice-average-metric"><span>Engagement</span><strong>{{ course.practice_engagement_average|floatformat:1 }}%</strong></span>
+          <span class="practice-average-metric"><span>Target</span><strong>{{ course.practice_target_average|floatformat:1 }}%</strong></span>
+        </div>
       </div>
     </div>
-    <div class="block-list">
+    <div class="workspace-actions course-primary-actions">
+      <a class="button" href="{% url 'standalone:student_preview' course.pk %}">Student preview</a>
+      <a class="button secondary" href="{% url 'standalone:block_create' course.pk %}">Add block</a>
+      <a class="button secondary" href="{% url 'standalone:course_config' course.pk %}">Settings</a>
+    </div>
+  </div>
+
+  <section class="course-blocks-section" aria-labelledby="course-blocks-heading">
+    <div class="section-head compact course-section-head course-blocks-head">
+      <div>
+        <h2 id="course-blocks-heading">Course blocks</h2>
+      </div>
+    </div>
+
+    <div class="block-list course-block-list">
       {% for block in blocks %}
-        <article class="card block-card" data-block-card>
+        <article class="block-card course-block-card" data-block-card>
           <div
-            class="block-card-header"
+            class="block-card-header course-block-card-header"
             data-block-toggle
             data-block-target="block-content-{{ block.pk }}"
             aria-expanded="false"
@@ -48,19 +64,33 @@
             tabindex="0"
             role="button"
           >
-            <h3 class="block-card-title">
-              <span class="block-order">{{ block.order }}.</span>
-              <span
-                class="inline-editable inline-editable-title"
-                data-inline-edit
-                data-inline-url="{% url 'standalone:update_block_field' block.pk 'title' %}"
-                data-inline-field="title"
-                data-inline-label="Block title"
-                data-inline-placeholder="Enter a block title"
-                tabindex="0"
-                role="button"
-              >{{ block.title }}</span>
-            </h3>
+            <div class="course-block-title-group">
+              <span class="block-order-pill">{{ block.order }}</span>
+              <div class="course-block-title-copy">
+                <h3 class="block-card-title course-block-title">
+                  <span
+                    class="inline-editable inline-editable-title"
+                    data-inline-edit
+                    data-inline-url="{% url 'standalone:update_block_field' block.pk 'title' %}"
+                    data-inline-field="title"
+                    data-inline-label="Block title"
+                    data-inline-placeholder="Enter a block title"
+                    tabindex="0"
+                    role="button"
+                  >{{ block.title }}</span>
+                </h3>
+                <div class="block-chip-row" aria-label="Block summary">
+                  <span class="block-chip">Available {{ block.available_from|date:"j M Y" }}</span>
+                  <span class="block-chip">Target {{ block.preview_target_question_count }}</span>
+                  <span class="block-chip">{{ block.objective_count }} objectives</span>
+                  <span class="block-chip">{{ block.asset_count }} uploads</span>
+                  {% if block.regeneration_status != 'idle' %}
+                    <span class="block-chip status-chip is-{{ block.regeneration_status }}">{{ block.get_regeneration_status_display }}</span>
+                  {% endif %}
+                </div>
+              </div>
+            </div>
+
             <div class="block-card-header-actions">
               <div class="block-action-menu" data-block-menu>
                 <button
@@ -91,7 +121,7 @@
             </div>
           </div>
 
-          <div id="block-content-{{ block.pk }}" class="block-card-content" hidden>
+          <div id="block-content-{{ block.pk }}" class="block-card-content course-block-content" hidden>
             {% if block.regeneration_status != 'idle' %}
               <div class="regeneration-status-panel{% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %} is-running{% elif block.regeneration_status == 'completed' %} is-complete{% elif block.regeneration_status == 'failed' %} is-failed{% endif %}"{% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %} data-regenerating-block="true"{% endif %}>
                 <div class="regeneration-status-head">
@@ -124,38 +154,40 @@
               </div>
             {% endif %}
 
-            <div class="block-meta-row">
-              <span class="block-meta-label">Available from</span>
-              <span
-                class="inline-editable inline-editable-date"
-                data-inline-edit
-                data-inline-url="{% url 'standalone:update_block_field' block.pk 'available_from' %}"
-                data-inline-field="available_from"
-                data-inline-input-type="date"
-                data-inline-value="{{ block.available_from|date:'Y-m-d' }}"
-                data-inline-label="Available from"
-                tabindex="0"
-                role="button"
-              >{{ block.available_from|date:"j M Y" }}</span>
-            </div>
-            <div class="block-meta-row">
-              <span class="block-meta-label">Target MCQs</span>
-              <span
-                class="inline-editable inline-editable-date"
-                data-inline-edit
-                data-inline-url="{% url 'standalone:update_block_config_field' block.pk 'target_question_count' %}"
-                data-inline-field="target_question_count"
-                data-inline-input-type="number"
-                data-inline-value="{{ block.preview_target_question_count }}"
-                data-inline-label="Target MCQs"
-                tabindex="0"
-                role="button"
-              >{{ block.preview_target_question_count }}</span>
+            <div class="block-meta-grid" aria-label="Block settings">
+              <div class="block-meta-tile">
+                <span class="block-meta-label">Available from</span>
+                <strong
+                  class="inline-editable inline-editable-date"
+                  data-inline-edit
+                  data-inline-url="{% url 'standalone:update_block_field' block.pk 'available_from' %}"
+                  data-inline-field="available_from"
+                  data-inline-input-type="date"
+                  data-inline-value="{{ block.available_from|date:'Y-m-d' }}"
+                  data-inline-label="Available from"
+                  tabindex="0"
+                  role="button"
+                >{{ block.available_from|date:"j M Y" }}</strong>
+              </div>
+              <div class="block-meta-tile">
+                <span class="block-meta-label">Target MCQs</span>
+                <strong
+                  class="inline-editable inline-editable-date"
+                  data-inline-edit
+                  data-inline-url="{% url 'standalone:update_block_config_field' block.pk 'target_question_count' %}"
+                  data-inline-field="target_question_count"
+                  data-inline-input-type="number"
+                  data-inline-value="{{ block.preview_target_question_count }}"
+                  data-inline-label="Target MCQs"
+                  tabindex="0"
+                  role="button"
+                >{{ block.preview_target_question_count }}</strong>
+              </div>
             </div>
 
-            <div class="section-head compact">
+            <section class="block-detail-section">
               <p
-                class="inline-editable inline-editable-summary"
+                class="inline-editable inline-editable-summary block-description"
                 data-inline-edit
                 data-inline-url="{% url 'standalone:update_block_field' block.pk 'summary' %}"
                 data-inline-field="summary"
@@ -165,12 +197,12 @@
                 tabindex="0"
                 role="button"
               >{{ block.summary|default:"No summary." }}</p>
-            </div>
+            </section>
 
-            <div class="child-block-list">
-              <article class="card block-card child-block-card" data-block-card>
+            <div class="child-block-list course-block-subsections">
+              <section class="block-detail-section course-block-subsection" data-block-card>
                 <div
-                  class="block-card-header child-block-card-header"
+                  class="course-block-subsection-header"
                   data-block-toggle
                   data-block-target="objectives-content-{{ block.pk }}"
                   aria-expanded="false"
@@ -178,11 +210,16 @@
                   tabindex="0"
                   role="button"
                 >
-                  <h4 class="block-card-title child-block-card-title">Learning objectives</h4>
-                  <span class="block-card-icon" aria-hidden="true"></span>
+                  <div>
+                    <h4>Learning objectives</h4>
+                  </div>
+                  <div class="subsection-count">
+                    <span>{{ block.objective_count }}</span>
+                    <span class="block-card-icon" aria-hidden="true"></span>
+                  </div>
                 </div>
 
-                <div id="objectives-content-{{ block.pk }}" class="block-card-content child-block-card-content" hidden>
+                <div id="objectives-content-{{ block.pk }}" class="block-card-content course-block-section-content" hidden>
                   <ul class="objective-list">
                     {% for objective in block.learning_objectives.all %}
                       <li>
@@ -226,11 +263,11 @@
                     {% endfor %}
                   </ul>
                 </div>
-              </article>
+              </section>
 
-              <article class="card block-card child-block-card" data-block-card>
+              <section class="block-detail-section course-block-subsection" data-block-card>
                 <div
-                  class="block-card-header child-block-card-header"
+                  class="course-block-subsection-header"
                   data-block-toggle
                   data-block-target="assets-content-{{ block.pk }}"
                   aria-expanded="false"
@@ -238,11 +275,16 @@
                   tabindex="0"
                   role="button"
                 >
-                  <h4 class="block-card-title child-block-card-title">Uploads</h4>
-                  <span class="block-card-icon" aria-hidden="true"></span>
+                  <div>
+                    <h4>Uploads</h4>
+                  </div>
+                  <div class="subsection-count">
+                    <span>{{ block.asset_count }}</span>
+                    <span class="block-card-icon" aria-hidden="true"></span>
+                  </div>
                 </div>
 
-                <div id="assets-content-{{ block.pk }}" class="block-card-content child-block-card-content" hidden>
+                <div id="assets-content-{{ block.pk }}" class="block-card-content course-block-section-content" hidden>
                   <div class="upload-list">
                     {% if block.assets.all %}
                       <div class="upload-table-head" aria-hidden="true">
@@ -278,17 +320,66 @@
                       <p>No uploads yet.</p>
                     {% endfor %}
                   </div>
-                  <div class="upload-toolbar">
-                    <a class="button" href="{{ block.upload_url }}">Upload files</a>
-                  </div>
                 </div>
-              </article>
+              </section>
             </div>
+
+            <section class="block-detail-section block-actions-section">
+              <div>
+                <h4>Update this block</h4>
+              </div>
+              <div class="block-inline-actions">
+                <a class="button" href="{{ block.upload_url }}">Upload files</a>
+                <span class="block-actions-note">Use the block menu for re-generation or deletion.</span>
+              </div>
+            </section>
           </div>
         </article>
       {% empty %}
-        <p>No blocks yet.</p>
+        <div class="empty-state">
+          <h2>Add your first block</h2>
+          <p>Blocks hold the source files, descriptions, and learning objectives used to generate practice.</p>
+          <a class="button" href="{% url 'standalone:block_create' course.pk %}">Add block</a>
+        </div>
       {% endfor %}
+    </div>
+  </section>
+
+  <section class="student-access-panel" aria-labelledby="student-access-heading">
+    <div class="section-head compact course-section-head">
+      <div>
+        <h2 id="student-access-heading">Enrolment routes</h2>
+      </div>
+      <div class="section-actions">
+        <a class="button secondary" href="{% url 'standalone:student_invite' course.pk %}">Invite student</a>
+      </div>
+    </div>
+    <div class="student-access-grid">
+      <article class="student-access-card">
+        <h3>Self-enrol allowlist</h3>
+        <p>Students can join from the self-enrol URL only when their exact email address is on this course's allowlist{% if course.config.self_enrol_domain %} and matches {{ course.config.self_enrol_domain }}{% endif %}.</p>
+        <div class="block-chip-row">
+          <span class="block-chip">{% if self_enrol_enabled %}Enabled{% else %}Disabled{% endif %}</span>
+          <span class="block-chip">{{ allowed_emails|length }} allowed email{{ allowed_emails|length|pluralize }}</span>
+        </div>
+        <div class="block-inline-actions">
+          <a class="button secondary" href="{% url 'standalone:allowed_email_add' course.pk %}">Add email</a>
+          {% if self_enrol_enabled %}
+            <a class="button secondary" href="{{ self_enrol_url }}">Open self-enrol URL</a>
+          {% endif %}
+        </div>
+      </article>
+      <article class="student-access-card">
+        <h3>Magic links</h3>
+        <p>Magic links do not require an exact allowlist email. They still obey the optional domain restriction, expiry time, and maximum new-enrolment count.</p>
+        <div class="block-chip-row">
+          <span class="block-chip">{{ active_magic_link_count }} active link{{ active_magic_link_count|pluralize }}</span>
+          {% if course.config.self_enrol_domain %}<span class="block-chip">Domain {{ course.config.self_enrol_domain }}</span>{% endif %}
+        </div>
+        <div class="block-inline-actions">
+          <a class="button secondary" href="{% url 'standalone:magic_link_create' course.pk %}">Create magic link</a>
+        </div>
+      </article>
     </div>
   </section>
 </section>

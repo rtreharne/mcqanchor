@@ -18,10 +18,13 @@ from standalone.models import (
     CourseAllowedEmail,
     CourseBlock,
     CourseConfig,
+    CourseMagicLink,
     Enrollment,
     EnrollmentQuestionState,
     LearningObjective,
     PracticeAttempt,
+    PracticeAttemptQuestion,
+    PracticeMessage,
     QuestionBankItem,
     QuestionFlag,
     StudentInvitation,
@@ -204,6 +207,7 @@ class StandaloneFlowTests(TestCase):
                 "distractor_count": 3,
                 "maq_ratio_percent": 35,
                 "waq_ratio_percent": 15,
+                "advanced_question_start_percent": 40,
                 "revalidation_attempts": 0,
                 "show_validation_feedback_immediately": "",
             },
@@ -213,6 +217,7 @@ class StandaloneFlowTests(TestCase):
         course.config.refresh_from_db()
         self.assertEqual(course.config.maq_ratio_percent, 35)
         self.assertEqual(course.config.waq_ratio_percent, 15)
+        self.assertEqual(course.config.advanced_question_start_percent, 40)
 
     def test_authenticated_user_visiting_login_redirects_to_dashboard(self):
         self.client.force_login(self.teacher)
@@ -284,9 +289,18 @@ class StandaloneFlowTests(TestCase):
         objective = block.learning_objectives.first()
         self.client.force_login(self.teacher)
         response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
+        self.assertNotContains(response, 'class="eyebrow"', html=False)
+        self.assertNotContains(response, 'class="course-management-links"', html=False)
+        self.assertContains(response, 'class="block-chip-row"', html=False)
+        self.assertContains(response, 'class="section-head compact course-section-head course-blocks-head"', html=False)
         self.assertContains(response, 'href="%s"' % reverse("standalone:teacher_dashboard"), html=False)
         self.assertContains(response, 'href="%s"' % reverse("standalone:student_preview", args=[course.pk]), html=False)
+        self.assertContains(response, 'href="%s"' % reverse("standalone:block_create", args=[course.pk]), html=False)
+        self.assertContains(response, 'href="%s"' % reverse("standalone:course_config", args=[course.pk]), html=False)
+        self.assertContains(response, 'href="%s"' % reverse("standalone:student_invite", args=[course.pk]), html=False)
         self.assertContains(response, ">Dashboard<", html=False)
+        self.assertContains(response, ">Settings<", html=False)
+        self.assertContains(response, ">Invite student<", html=False)
         self.assertContains(response, reverse("standalone:asset_upload", args=[block.pk]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:block_delete", args=[block.pk]), html=False)
         self.assertContains(response, 'data-block-menu-trigger', html=False)
@@ -298,6 +312,15 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, 'data-inline-url="%s"' % reverse("standalone:update_block_config_field", args=[block.pk, "target_question_count"]), html=False)
         self.assertContains(response, "Available from")
         self.assertContains(response, "Target MCQs")
+        self.assertContains(response, "Enrolment routes")
+        self.assertContains(response, "Course blocks")
+        self.assertContains(response, "Self-enrol allowlist")
+        self.assertContains(response, "Magic links")
+        page_html = response.content.decode("utf-8")
+        self.assertEqual(page_html.count("course-section-head"), 2)
+        self.assertLess(page_html.find("Course blocks"), page_html.find("Enrolment routes"))
+        self.assertContains(response, "Students can join from the self-enrol URL only when their exact email address is on this course", html=False)
+        self.assertContains(response, "Magic links do not require an exact allowlist email.")
         self.assertContains(response, "This will replace the current description and learning objectives using every file in this block.")
         self.assertContains(response, "Delete this content block? This will remove its uploads, learning objectives, and generated questions. Remaining blocks will be re-numbered.")
         self.assertContains(response, "Upload files")
@@ -315,7 +338,7 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, 'id="block-content-%s"' % block.pk, html=False)
         self.assertContains(response, 'id="objectives-content-%s"' % block.pk, html=False)
         self.assertContains(response, 'id="assets-content-%s"' % block.pk, html=False)
-        self.assertContains(response, 'class="child-block-list"', html=False)
+        self.assertContains(response, 'class="child-block-list course-block-subsections"', html=False)
         self.assertContains(response, 'data-inline-url="%s"' % reverse("standalone:update_block_field", args=[block.pk, "title"]), html=False)
         self.assertContains(response, 'data-inline-url="%s"' % reverse("standalone:update_learning_objective", args=[objective.pk]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:move_learning_objective", args=[objective.pk, "up"]), html=False)
@@ -324,13 +347,109 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, "Delete this learning objective? This will re-number the remaining objectives.")
         self.assertLess(response.content.decode("utf-8").find("Learning objectives"), response.content.decode("utf-8").find("Uploads"))
 
-    def test_teacher_dashboard_course_card_is_clickable_without_open_course_link(self):
+    def test_teacher_dashboard_course_card_is_clickable_with_mobile_summary(self):
         course = self.create_course()
+        block, _, _, _ = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Quick explanation.",
+            question_hash="dashboard-summary-question",
+        )
+        Enrollment.objects.create(
+            course=course,
+            student=self.student,
+            mastery_score=50,
+            coverage_score=80,
+            engagement_score=20,
+            target_score=100,
+        )
+        second_student = User.objects.create_user(
+            username="student-two",
+            email="student-two@example.com",
+            password="password123",
+            role=User.Role.STUDENT,
+        )
+        Enrollment.objects.create(course=course, student=second_student)
         self.client.force_login(self.teacher)
+
         response = self.client.get(reverse("standalone:teacher_dashboard"))
-        self.assertContains(response, 'class="card course-card"', html=False)
+
+        self.assertContains(response, "Teacher dashboard")
+        self.assertContains(response, "Course workspace")
+        self.assertNotContains(response, 'class="dashboard-stat-grid"', html=False)
+        self.assertContains(response, 'class="course-card dashboard-course-card"', html=False)
         self.assertContains(response, 'href="%s"' % reverse("standalone:course_detail", args=[course.pk]), html=False)
-        self.assertNotContains(response, "Open course")
+        self.assertContains(response, "Open course")
+        self.assertContains(response, "2 students")
+        self.assertContains(response, "1 questions")
+        self.assertContains(response, "Practice averages")
+        self.assertContains(response, "Overall practice")
+        self.assertContains(response, "<strong>29.0%</strong>", html=False)
+        self.assertContains(response, "Mastery")
+        self.assertContains(response, "<strong>25.0%</strong>", html=False)
+        self.assertContains(response, "Coverage")
+        self.assertContains(response, "<strong>40.0%</strong>", html=False)
+        self.assertContains(response, "Engagement")
+        self.assertContains(response, "<strong>10.0%</strong>", html=False)
+        self.assertContains(response, "Target")
+        self.assertContains(response, "<strong>50.0%</strong>", html=False)
+        self.assertContains(response, "Continuous practice. Anchored assessment.")
+
+    def test_course_detail_shows_course_practice_averages_across_students(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        Enrollment.objects.create(
+            course=course,
+            student=self.student,
+            mastery_score=80,
+            coverage_score=60,
+            engagement_score=40,
+            target_score=20,
+        )
+        second_student = User.objects.create_user(
+            username="student-three",
+            email="student-three@example.com",
+            password="password123",
+            role=User.Role.STUDENT,
+        )
+        Enrollment.objects.create(
+            course=course,
+            student=second_student,
+            mastery_score=20,
+            coverage_score=40,
+            engagement_score=60,
+            target_score=80,
+        )
+
+        self.client.force_login(self.teacher)
+        response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
+
+        self.assertContains(response, 'class="practice-average-panel course-practice-average-panel"', html=False)
+        self.assertNotContains(response, 'class="practice-average-label"', html=False)
+        self.assertContains(response, "Overall practice")
+        self.assertContains(response, "Mastery")
+        self.assertContains(response, "Coverage")
+        self.assertContains(response, "Engagement")
+        self.assertContains(response, "Target")
+        self.assertContains(response, "<strong>50.0%</strong>", html=False, count=5)
+
+    def test_standalone_footer_is_omitted_from_student_preview(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        self.client.force_login(self.teacher)
+
+        dashboard_response = self.client.get(reverse("standalone:teacher_dashboard"))
+        preview_response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+
+        self.assertContains(dashboard_response, 'data-app-footer', html=False)
+        self.assertNotContains(preview_response, 'data-app-footer', html=False)
+        self.assertNotContains(preview_response, "Continuous practice. Anchored assessment.")
 
     def test_block_create_form_includes_upload_picker(self):
         course = self.create_course()
@@ -800,6 +919,134 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(good_response.status_code, 302)
         enrolled_user = User.objects.get(email="allowed@example.com")
         self.assertTrue(Enrollment.objects.filter(course=course, student=enrolled_user, source="self_enrol").exists())
+
+    def test_self_enrol_rejects_staff_accounts_and_requires_existing_student_password(self):
+        course = self.create_course()
+        CourseAllowedEmail.objects.create(course=course, email=self.teacher.email)
+        CourseAllowedEmail.objects.create(course=course, email=self.student.email)
+
+        staff_response = self.client.post(
+            reverse("standalone:self_enrol", args=[course.slug]),
+            {
+                "full_name": "Teacher User",
+                "email": self.teacher.email,
+                "password1": "password123",
+                "password2": "password123",
+                "institution": "",
+            },
+        )
+        bad_password_response = self.client.post(
+            reverse("standalone:self_enrol", args=[course.slug]),
+            {
+                "full_name": "Student User",
+                "email": self.student.email,
+                "password1": "wrong-password",
+                "password2": "wrong-password",
+                "institution": "",
+            },
+        )
+        self.assertFalse(Enrollment.objects.filter(course=course, student=self.student).exists())
+        good_response = self.client.post(
+            reverse("standalone:self_enrol", args=[course.slug]),
+            {
+                "full_name": "Student User",
+                "email": self.student.email,
+                "password1": "password123",
+                "password2": "password123",
+                "institution": "",
+            },
+        )
+
+        self.assertEqual(staff_response.status_code, 200)
+        self.assertContains(staff_response, "Use a student email address")
+        self.assertFalse(Enrollment.objects.filter(course=course, student=self.teacher).exists())
+        self.assertEqual(bad_password_response.status_code, 200)
+        self.assertContains(bad_password_response, "Enter the password for this existing student account.")
+        self.assertEqual(good_response.status_code, 302)
+        self.assertTrue(Enrollment.objects.filter(course=course, student=self.student, source="self_enrol").exists())
+
+    def test_add_allowed_email_normalises_and_deduplicates(self):
+        course = self.create_course()
+        self.client.force_login(self.teacher)
+
+        first_response = self.client.post(
+            reverse("standalone:allowed_email_add", args=[course.pk]),
+            {"email": " Allowed@Example.COM "},
+        )
+        second_response = self.client.post(
+            reverse("standalone:allowed_email_add", args=[course.pk]),
+            {"email": "allowed@example.com"},
+        )
+
+        self.assertEqual(first_response.status_code, 302)
+        self.assertEqual(second_response.status_code, 302)
+        self.assertEqual(list(course.allowed_emails.values_list("email", flat=True)), ["allowed@example.com"])
+
+    def test_magic_link_enrols_without_allowlist_but_checks_existing_accounts_and_uses(self):
+        course = self.create_course()
+        link = CourseMagicLink.objects.create(
+            course=course,
+            created_by=self.teacher,
+            expires_at=timezone.now() + timedelta(hours=2),
+            max_uses=2,
+        )
+        existing_link = CourseMagicLink.objects.create(
+            course=course,
+            created_by=self.teacher,
+            expires_at=timezone.now() + timedelta(hours=2),
+            max_uses=1,
+        )
+        Enrollment.objects.create(course=course, student=self.student, source="invite")
+
+        new_student_response = self.client.post(
+            reverse("standalone:magic_enrol", args=[link.token]),
+            {
+                "full_name": "Magic Student",
+                "email": "magic@example.com",
+                "password1": "safe-pass-123",
+                "password2": "safe-pass-123",
+                "institution": "",
+            },
+        )
+        link.refresh_from_db()
+
+        self.assertEqual(new_student_response.status_code, 302)
+        magic_student = User.objects.get(email="magic@example.com")
+        self.assertTrue(Enrollment.objects.filter(course=course, student=magic_student, source="magic_link").exists())
+        self.assertEqual(link.use_count, 1)
+        self.assertTrue(link.is_active)
+
+        existing_student_response = self.client.post(
+            reverse("standalone:magic_enrol", args=[existing_link.token]),
+            {
+                "full_name": "Existing Student",
+                "email": self.student.email,
+                "password1": "password123",
+                "password2": "password123",
+                "institution": "",
+            },
+        )
+        existing_link.refresh_from_db()
+
+        self.assertEqual(existing_student_response.status_code, 302)
+        self.assertEqual(existing_link.use_count, 0)
+        self.assertTrue(existing_link.is_active)
+
+        staff_response = self.client.post(
+            reverse("standalone:magic_enrol", args=[existing_link.token]),
+            {
+                "full_name": "Teacher User",
+                "email": self.teacher.email,
+                "password1": "password123",
+                "password2": "password123",
+                "institution": "",
+            },
+        )
+        existing_link.refresh_from_db()
+
+        self.assertEqual(staff_response.status_code, 200)
+        self.assertContains(staff_response, "Use a student email address")
+        self.assertEqual(existing_link.use_count, 0)
 
     def test_teacher_can_upload_supported_content_and_generate_chunks(self):
         course = self.create_course()
@@ -1373,13 +1620,15 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(practice.learning_objective_id, objective_b.pk)
         self.assertEqual(validation.learning_objective_id, objective_b.pk)
 
-    def test_practice_quiz_does_not_repeat_question_for_student(self):
+    def test_student_practice_quiz_answer_persists_and_reload_reconstructs_transcript(self):
         course = self.create_course()
         enrollment = Enrollment.objects.create(course=course, student=self.student)
-        block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
+        block, _, objective, chunk = self.create_preview_content_block(course)
         q1 = QuestionBankItem.objects.create(
             course=course,
             block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
             bank_type=QuestionBankItem.BankType.PRACTICE,
             status=QuestionBankItem.Status.APPROVED,
             stem="Question one?",
@@ -1387,27 +1636,45 @@ class StandaloneFlowTests(TestCase):
             distractors=["B", "C", "D"],
             question_hash="hash-1",
         )
-        QuestionBankItem.objects.create(
-            course=course,
-            block=block,
-            bank_type=QuestionBankItem.BankType.PRACTICE,
-            status=QuestionBankItem.Status.APPROVED,
-            stem="Question two?",
-            correct_answer="A",
-            distractors=["B", "C", "D"],
-            question_hash="hash-2",
-        )
         self.client.force_login(self.student)
-        start = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
-        attempt_url = start.url
-        attempt_page = self.client.get(attempt_url)
-        self.assertContains(attempt_page, "Question one?")
-        response = self.client.post(attempt_url, {"question_id": q1.pk, "answer": "A"})
-        self.assertContains(response, "Question two?")
-        self.assertNotContains(response, "Question one?")
-        self.assertEqual(PracticeAttempt.objects.filter(enrollment=enrollment).count(), 1)
+        page = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
 
-    def test_practice_quiz_skips_future_block_questions(self):
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "preview-chat-shell", html=False)
+        self.assertContains(page, "student-preview-data", html=False)
+        self.assertContains(page, reverse("standalone:student_practice_action", args=[course.pk, 0, "ACTION"]), html=False)
+        self.assertTrue(PracticeMessage.objects.filter(enrollment=enrollment, kind="text").exists())
+        self.assertEqual(PracticeAttempt.objects.count(), 0)
+
+        quiz_response = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+        self.assertEqual(quiz_response.status_code, 200)
+        block_payload = next(item for item in quiz_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_id"], q1.pk)
+        self.assertEqual(enrollment.question_states.get(question=q1).times_presented, 1)
+        self.assertTrue(PracticeMessage.objects.filter(enrollment=enrollment, kind="question", question=q1).exists())
+
+        answer_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": q1.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(answer_response.status_code, 200)
+        self.assertEqual(PracticeAttempt.objects.filter(enrollment=enrollment).count(), 1)
+        self.assertEqual(PracticeAttemptQuestion.objects.filter(attempt__enrollment=enrollment, question=q1, is_correct=True).count(), 1)
+        self.assertTrue(PracticeMessage.objects.filter(enrollment=enrollment, kind="feedback").exists())
+        enrollment.refresh_from_db()
+        self.assertEqual(float(enrollment.mastery_score), 100.0)
+        self.assertEqual(float(enrollment.coverage_score), 100.0)
+        self.assertEqual(float(enrollment.engagement_score), 5.0)
+        self.assertEqual(float(enrollment.target_score), 5.0)
+
+        reload_response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
+        self.assertContains(reload_response, "Question one?")
+        self.assertContains(reload_response, "Correct.")
+
+    def test_student_practice_skips_future_block_questions(self):
         course = self.create_course()
         Enrollment.objects.create(course=course, student=self.student)
         released_block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
@@ -1439,13 +1706,223 @@ class StandaloneFlowTests(TestCase):
         )
 
         self.client.force_login(self.student)
-        start = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
-        attempt_page = self.client.get(start.url)
+        released_response = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, released_block.pk, "quiz"]))
+        future_response = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, future_block.pk, "quiz"]))
 
-        self.assertContains(attempt_page, "Released question?")
-        self.assertNotContains(attempt_page, "Future question?")
+        released_block_payload = next(item for item in released_response.json()["preview"]["blocks"] if item["id"] == released_block.pk)
+        released_questions = [message for message in released_block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(released_questions[-1]["text"], "Released question?")
+        future_block_payload = next(item for item in future_response.json()["preview"]["blocks"] if item["id"] == future_block.pk)
+        self.assertTrue(any("becomes available" in message["text"] for message in future_block_payload["transcript"] if message["kind"] == "text"))
+        self.assertFalse(any(message.get("text") == "Future question?" for message in future_block_payload["transcript"]))
 
-    def test_practice_quiz_redirects_when_no_released_questions_are_available(self):
+    def test_student_practice_flag_persists_and_skips_question(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Flag me?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="First explanation.",
+            question_hash="student-practice-flag-a",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Use me next?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Second explanation.",
+            question_hash="student-practice-flag-b",
+        )
+        self.client.force_login(self.student)
+
+        self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+        flag_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "flag"]),
+            data=json.dumps({"question_id": first_question.pk}),
+            content_type="application/json",
+        )
+        next_response = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(flag_response.status_code, 200)
+        self.assertTrue(QuestionFlag.objects.filter(enrollment__student=self.student, question=first_question).exists())
+        block_payload = next(item for item in next_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_id"], second_question.pk)
+
+    def test_student_practice_supports_maq_and_waq_with_draft_alignment(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        maq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Select all correct ideas?",
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            correct_answer="Membranes regulate transport",
+            additional_correct_answers=["Signalling coordinates responses"],
+            distractors=["Gravity drives diffusion", "DNA replication happens in the nucleus"],
+            explanation="This follows directly from this block.",
+            question_hash="student-practice-maq",
+        )
+        waq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="How would you explain membrane transport?",
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            correct_answer="Membranes regulate what enters and leaves the cell.",
+            written_answer_keywords=["membranes", "regulate transport", "enters and leaves"],
+            explanation="This follows directly from this block.",
+            question_hash="student-practice-waq",
+        )
+        self.client.force_login(self.student)
+
+        with self.settings(OPENAI_API_KEY=""):
+            maq_quiz = self.client.post(
+                reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]),
+                data=json.dumps({"question_type": QuestionBankItem.QuestionType.MAQ}),
+                content_type="application/json",
+            ).json()["preview"]
+            maq_message = [message for message in maq_quiz["blocks"][0]["transcript"] if message["kind"] == "question"][-1]
+            self.assertEqual(maq_message["question_id"], maq.pk)
+            self.client.post(
+                reverse("standalone:student_practice_action", args=[course.pk, block.pk, "answer"]),
+                data=json.dumps(
+                    {
+                        "question_id": maq.pk,
+                        "answers": ["Membranes regulate transport", "Signalling coordinates responses"],
+                    }
+                ),
+                content_type="application/json",
+            )
+            draft_response = self.client.post(
+                reverse("standalone:student_practice_action", args=[course.pk, block.pk, "draft_answer"]),
+                data=json.dumps({"question_id": waq.pk, "answer_text": "Membranes regulate transport into and out of cells."}),
+                content_type="application/json",
+            )
+            self.assertEqual(draft_response.json()["alignment"]["alignment_score"], 0)
+            waq_quiz = self.client.post(
+                reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]),
+                data=json.dumps({"question_type": QuestionBankItem.QuestionType.WAQ}),
+                content_type="application/json",
+            ).json()["preview"]
+            waq_message = [message for message in waq_quiz["blocks"][0]["transcript"] if message["kind"] == "question"][-1]
+            self.assertEqual(waq_message["question_id"], waq.pk)
+            draft_response = self.client.post(
+                reverse("standalone:student_practice_action", args=[course.pk, block.pk, "draft_answer"]),
+                data=json.dumps({"question_id": waq.pk, "answer_text": "Membranes regulate what enters and leaves cells."}),
+                content_type="application/json",
+            )
+            self.assertGreater(draft_response.json()["alignment"]["alignment_score"], 0)
+            self.client.post(
+                reverse("standalone:student_practice_action", args=[course.pk, block.pk, "answer"]),
+                data=json.dumps({"question_id": waq.pk, "answer_text": "Membranes regulate what enters and leaves cells."}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(PracticeAttemptQuestion.objects.filter(attempt__enrollment=enrollment, question=maq, is_correct=True).count(), 1)
+        self.assertEqual(PracticeAttemptQuestion.objects.filter(attempt__enrollment=enrollment, question=waq, is_correct=True).count(), 1)
+
+    def test_student_practice_advanced_question_types_unlock_at_configured_threshold(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        block.config.target_question_count = 2
+        block.config.save(update_fields=["target_question_count", "updated_at"])
+        Enrollment.objects.create(course=course, student=self.student)
+        mcq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Single answer first?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows directly from this block.",
+            question_hash="student-practice-threshold-mcq",
+        )
+        maq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Select all after threshold?",
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            correct_answer="Membranes regulate transport",
+            additional_correct_answers=["Signalling coordinates responses"],
+            distractors=["Gravity drives diffusion", "DNA replication happens in the nucleus"],
+            explanation="This follows directly from this block.",
+            question_hash="student-practice-threshold-maq",
+        )
+        self.client.force_login(self.student)
+
+        first_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.MAQ}),
+            content_type="application/json",
+        ).json()["preview"]
+        first_message = [message for message in first_response["blocks"][0]["transcript"] if message["kind"] == "question"][-1]
+        self.assertEqual(first_message["question_id"], mcq.pk)
+        self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": mcq.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+        unlocked_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.MAQ}),
+            content_type="application/json",
+        ).json()["preview"]
+        unlocked_message = [message for message in unlocked_response["blocks"][0]["transcript"] if message["kind"] == "question"][-1]
+        self.assertEqual(unlocked_message["question_id"], maq.pk)
+        self.assertTrue(unlocked_response["blocks"][0]["metrics"]["advanced_question_types_unlocked"])
+
+    def test_student_practice_action_rejects_teacher_and_other_student(self):
+        course = self.create_course()
+        other_student = User.objects.create_user(
+            username="other-student",
+            email="other-student@example.com",
+            password="password123",
+            role=User.Role.STUDENT,
+        )
+        Enrollment.objects.create(course=course, student=other_student)
+        block, _, _, _ = self.create_preview_content_block(course)
+
+        self.client.force_login(self.teacher)
+        teacher_response = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+        self.client.force_login(self.student)
+        other_student_response = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(teacher_response.status_code, 404)
+        self.assertEqual(other_student_response.status_code, 404)
+
+    def test_validation_practice_redirects_when_no_released_questions_are_available(self):
         course = self.create_course()
         Enrollment.objects.create(course=course, student=self.student)
         future_block = CourseBlock.objects.create(
@@ -1466,7 +1943,7 @@ class StandaloneFlowTests(TestCase):
         )
 
         self.client.force_login(self.student)
-        response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]), follow=True)
+        response = self.client.get(f"{reverse('standalone:practice_quiz', args=[course.pk])}?mode=validation_practice", follow=True)
 
         self.assertRedirects(response, reverse("standalone:student_dashboard"))
         self.assertContains(response, "No practice questions are available yet for the released blocks in this course.")
@@ -1632,6 +2109,8 @@ class StandaloneFlowTests(TestCase):
 
     def test_student_preview_forced_question_type_prefers_matching_bank_item(self):
         course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         QuestionBankItem.objects.create(
             course=course,
@@ -1677,6 +2156,154 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(question_messages[-1]["question_id"], forced_maq.pk)
         self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MAQ)
 
+    def test_student_preview_forced_advanced_types_use_mcq_until_threshold_met(self):
+        course = self.create_course()
+        maq_block, _, maq_objective, maq_chunk = self.create_preview_content_block(course, title="Week 1", order=1)
+        waq_block, _, waq_objective, waq_chunk = self.create_preview_content_block(course, title="Week 2", order=2)
+        for block in (maq_block, waq_block):
+            block.config.target_question_count = 2
+            block.config.save(update_fields=["target_question_count", "updated_at"])
+
+        maq_mcq = QuestionBankItem.objects.create(
+            course=course,
+            block=maq_block,
+            learning_objective=maq_objective,
+            source_chunk=maq_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Single answer MAQ block question?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows directly from this block.",
+            question_hash="locked-maq-mcq-preview",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=maq_block,
+            learning_objective=maq_objective,
+            source_chunk=maq_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Select all correct ideas?",
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            correct_answer="Membranes regulate transport",
+            additional_correct_answers=["Signalling coordinates responses"],
+            distractors=["Gravity drives diffusion", "DNA replication happens in the nucleus"],
+            explanation="This follows directly from this block.",
+            question_hash="locked-maq-preview",
+        )
+        waq_mcq = QuestionBankItem.objects.create(
+            course=course,
+            block=waq_block,
+            learning_objective=waq_objective,
+            source_chunk=waq_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Single answer WAQ block question?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows directly from this block.",
+            question_hash="locked-waq-mcq-preview",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=waq_block,
+            learning_objective=waq_objective,
+            source_chunk=waq_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="How would you explain membrane transport?",
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            correct_answer="Membranes regulate what enters and leaves the cell.",
+            written_answer_keywords=["membranes", "regulate transport", "enters and leaves"],
+            explanation="This follows directly from this block.",
+            question_hash="locked-waq-preview",
+        )
+        self.client.force_login(self.teacher)
+
+        cases = [
+            (maq_block, QuestionBankItem.QuestionType.MAQ, maq_mcq.pk),
+            (waq_block, QuestionBankItem.QuestionType.WAQ, waq_mcq.pk),
+        ]
+        for block, requested_type, expected_question_id in cases:
+            with self.subTest(requested_type=requested_type):
+                response = self.client.post(
+                    reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+                    data=json.dumps({"question_type": requested_type}),
+                    content_type="application/json",
+                )
+
+                self.assertEqual(response.status_code, 200)
+                block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+                question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+                self.assertEqual(question_messages[-1]["question_id"], expected_question_id)
+                self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MCQ)
+                self.assertFalse(block_payload["metrics"]["advanced_question_types_unlocked"])
+                self.assertEqual(block_payload["metrics"]["advanced_question_start_percent"], 50)
+
+    def test_student_preview_forced_advanced_type_unlocks_at_configured_target_progress(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        block.config.target_question_count = 2
+        block.config.save(update_fields=["target_question_count", "updated_at"])
+        first_mcq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Single answer question?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows directly from this block.",
+            question_hash="threshold-unlock-mcq-preview",
+        )
+        unlocked_maq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Select all correct ideas?",
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            correct_answer="Membranes regulate transport",
+            additional_correct_answers=["Signalling coordinates responses"],
+            distractors=["Gravity drives diffusion", "DNA replication happens in the nucleus"],
+            explanation="This follows directly from this block.",
+            question_hash="threshold-unlock-maq-preview",
+        )
+        self.client.force_login(self.teacher)
+
+        first_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        first_block_payload = next(item for item in first_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        first_question_messages = [message for message in first_block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(first_question_messages[-1]["question_id"], first_mcq.pk)
+        self.assertFalse(first_block_payload["metrics"]["advanced_question_types_unlocked"])
+
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": first_mcq.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        unlocked_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.MAQ}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(unlocked_response.status_code, 200)
+        unlocked_block_payload = next(item for item in unlocked_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        unlocked_question_messages = [message for message in unlocked_block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(unlocked_question_messages[-1]["question_id"], unlocked_maq.pk)
+        self.assertEqual(unlocked_question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MAQ)
+        self.assertTrue(unlocked_block_payload["metrics"]["advanced_question_types_unlocked"])
+
     def test_student_preview_question_payload_includes_further_study_questions(self):
         course = self.create_course()
         block, _, objective, chunk = self.create_preview_content_block(course)
@@ -1709,7 +2336,8 @@ class StandaloneFlowTests(TestCase):
         course = self.create_course()
         block, _, _, _ = self.create_preview_content_block(course)
         course.config.maq_ratio_percent = 0
-        course.config.save(update_fields=["maq_ratio_percent", "updated_at"])
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["maq_ratio_percent", "advanced_question_start_percent", "updated_at"])
         self.client.force_login(self.teacher)
 
         response = self.client.post(
@@ -1726,6 +2354,8 @@ class StandaloneFlowTests(TestCase):
 
     def test_student_preview_forced_waq_prefers_matching_bank_item(self):
         course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         QuestionBankItem.objects.create(
             course=course,
@@ -1775,7 +2405,8 @@ class StandaloneFlowTests(TestCase):
         course = self.create_course()
         block, _, _, _ = self.create_preview_content_block(course)
         course.config.waq_ratio_percent = 0
-        course.config.save(update_fields=["waq_ratio_percent", "updated_at"])
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["waq_ratio_percent", "advanced_question_start_percent", "updated_at"])
         self.client.force_login(self.teacher)
 
         response = self.client.post(
@@ -1793,6 +2424,8 @@ class StandaloneFlowTests(TestCase):
 
     def test_student_preview_forced_waq_prefers_fresher_objective_before_repeating_same_one(self):
         course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
         block, asset, objective_a, chunk = self.create_preview_content_block(course)
         objective_b = LearningObjective.objects.create(
             course=course,
@@ -1963,6 +2596,7 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(question_messages[-1]["correct_answers"], ["A"])
         self.assertEqual(PracticeAttempt.objects.count(), 0)
         self.assertEqual(EnrollmentQuestionState.objects.count(), 0)
+        self.assertEqual(PracticeMessage.objects.count(), 0)
 
     def test_student_preview_feedback_includes_varying_keep_going_note(self):
         course = self.create_course()
@@ -2060,6 +2694,8 @@ class StandaloneFlowTests(TestCase):
 
     def test_student_preview_waq_draft_answer_updates_alignment(self):
         course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         practice = QuestionBankItem.objects.create(
             course=course,
@@ -2098,6 +2734,8 @@ class StandaloneFlowTests(TestCase):
     @override_settings(OPENAI_API_KEY="test-key")
     def test_student_preview_waq_draft_answer_uses_semantic_check_by_character_bucket(self):
         course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         practice = QuestionBankItem.objects.create(
             course=course,
@@ -2219,6 +2857,8 @@ class StandaloneFlowTests(TestCase):
 
     def test_student_preview_maq_exact_match_is_required_for_correctness(self):
         course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         practice = QuestionBankItem.objects.create(
             course=course,
@@ -2263,6 +2903,8 @@ class StandaloneFlowTests(TestCase):
 
     def test_student_preview_maq_feedback_reports_missing_and_extra_answers(self):
         course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         practice = QuestionBankItem.objects.create(
             course=course,
@@ -2300,6 +2942,8 @@ class StandaloneFlowTests(TestCase):
 
     def test_student_preview_waq_correct_submission_updates_question_and_feedback(self):
         course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         practice = QuestionBankItem.objects.create(
             course=course,
@@ -2340,6 +2984,8 @@ class StandaloneFlowTests(TestCase):
 
     def test_student_preview_waq_incorrect_submission_reveals_model_answer(self):
         course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         practice = QuestionBankItem.objects.create(
             course=course,
@@ -2380,6 +3026,8 @@ class StandaloneFlowTests(TestCase):
 
     def test_student_preview_chat_is_suspended_while_waq_is_pending(self):
         course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         QuestionBankItem.objects.create(
             course=course,

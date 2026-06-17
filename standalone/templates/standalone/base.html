@@ -68,6 +68,14 @@
     {% endif %}
     {% block content %}{% endblock %}
   </main>
+  {% block app_footer %}
+    <footer class="app-footer" data-app-footer>
+      <div class="app-footer-brand">
+        <img src="{% static 'website/images/mcq-anchor-logo.png' %}" alt="MCQ Anchor logo">
+        <p>Continuous practice. Anchored assessment.</p>
+      </div>
+    </footer>
+  {% endblock %}
   {% block extra_body %}{% endblock %}
 </body>
 </html>

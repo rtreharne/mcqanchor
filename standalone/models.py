@@ -108,6 +108,7 @@ class CourseConfig(TimeStampedModel):
     distractor_count = models.PositiveSmallIntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(5)])
     maq_ratio_percent = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
     waq_ratio_percent = models.PositiveSmallIntegerField(default=10, validators=[MinValueValidator(0), MaxValueValidator(100)])
+    advanced_question_start_percent = models.PositiveSmallIntegerField(default=50, validators=[MinValueValidator(0), MaxValueValidator(100)])
     revalidation_attempts = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(10)])
     show_validation_feedback_immediately = models.BooleanField(default=False)
 
@@ -472,6 +473,39 @@ class PracticeAttemptQuestion(TimeStampedModel):
 
     def __str__(self) -> str:
         return f"Question {self.order} in {self.attempt}"
+
+
+class PracticeMessage(TimeStampedModel):
+    enrollment = models.ForeignKey(Enrollment, on_delete=models.CASCADE, related_name="practice_messages")
+    block = models.ForeignKey(CourseBlock, on_delete=models.CASCADE, related_name="practice_messages")
+    question = models.ForeignKey(
+        QuestionBankItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="practice_messages",
+    )
+    attempt_question = models.ForeignKey(
+        PracticeAttemptQuestion,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="practice_messages",
+    )
+    message_id = models.CharField(max_length=100)
+    sequence = models.PositiveIntegerField()
+    role = models.CharField(max_length=20)
+    kind = models.CharField(max_length=30)
+    text = models.TextField(blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    source_blocks = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ["enrollment", "sequence", "created_at"]
+        unique_together = (("enrollment", "message_id"), ("enrollment", "sequence"))
+
+    def __str__(self) -> str:
+        return f"{self.kind} message for {self.enrollment}"
 
 
 class ValidationEvent(TimeStampedModel):

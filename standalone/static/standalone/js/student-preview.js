@@ -112,6 +112,43 @@ if (previewRoot && previewDataNode) {
     return question?.question_type === "waq" ? question : null;
   }
 
+  function isAdvancedQuestionType(questionType) {
+    return questionType === "maq" || questionType === "waq";
+  }
+
+  function advancedQuestionUnlockText(block = currentBlock()) {
+    const metrics = block?.metrics || {};
+    const threshold = Number(metrics.advanced_question_start_percent || 0);
+    const completed = Number(metrics.completed_count || 0);
+    const target = Number(metrics.target_question_count || 0);
+    if (!threshold || !target) {
+      return "Locked";
+    }
+    return `Unlocks at ${threshold}% target (${completed}/${target})`;
+  }
+
+  function syncQuizMenuItems() {
+    if (!quizMenuPanel) {
+      return;
+    }
+    const block = currentBlock();
+    const unlocked = block?.metrics?.advanced_question_types_unlocked !== false;
+    quizMenuPanel.querySelectorAll("[data-quiz-type]").forEach((button) => {
+      const questionType = button.dataset.quizType || "";
+      const locked = isAdvancedQuestionType(questionType) && !unlocked;
+      const copy = button.querySelector(".preview-quiz-menu-item-copy");
+      if (copy && !copy.dataset.defaultText) {
+        copy.dataset.defaultText = copy.textContent || "";
+      }
+      button.disabled = requestInFlight || locked;
+      button.setAttribute("aria-disabled", button.disabled ? "true" : "false");
+      button.classList.toggle("is-locked", locked);
+      if (copy) {
+        copy.textContent = locked ? advancedQuestionUnlockText(block) : copy.dataset.defaultText;
+      }
+    });
+  }
+
   function updateQuestionMessage(questionId, updater) {
     if (!questionId || typeof updater !== "function") {
       return null;
@@ -293,6 +330,7 @@ if (previewRoot && previewDataNode) {
     if (!quizMenu || !quizMenuTrigger || !quizMenuPanel || requestInFlight) {
       return;
     }
+    syncQuizMenuItems();
     quizMenu.dataset.open = "true";
     quizMenuTrigger.setAttribute("aria-expanded", "true");
     quizMenuPanel.removeAttribute("hidden");
@@ -428,6 +466,7 @@ if (previewRoot && previewDataNode) {
     if (quizMenuTrigger) {
       quizMenuTrigger.disabled = requestInFlight || !!input.value.trim() || isWaqMode;
     }
+    syncQuizMenuItems();
     renderWaqAlignment(activeWaq);
   }
 
@@ -463,6 +502,7 @@ if (previewRoot && previewDataNode) {
     if (disabled) {
       closeQuizMenu();
     }
+    syncQuizMenuItems();
   }
 
   function updateComposerClearance() {
@@ -1776,7 +1816,7 @@ if (previewRoot && previewDataNode) {
     button.addEventListener("click", async (event) => {
       event.preventDefault();
       event.stopPropagation();
-      if (requestInFlight) {
+      if (requestInFlight || button.disabled) {
         return;
       }
       const block = currentBlock();

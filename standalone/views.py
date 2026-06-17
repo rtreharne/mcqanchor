@@ -8,8 +8,8 @@ from django.contrib import messages
 from django.contrib.auth import authenticate, login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LogoutView
-from django.db import close_old_connections
-from django.db import transaction
+from django.db import close_old_connections, transaction
+from django.db.models import Avg, Count, Q
 from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -79,6 +79,14 @@ from standalone.services.preview import (
     submit_preview_answer,
 )
 from standalone.services.questions import generate_question_banks
+from standalone.services.student_practice import (
+    draft_student_practice_written_answer,
+    flag_student_practice_question,
+    request_student_practice_quiz,
+    send_student_practice_chat_message,
+    serialize_student_practice_state,
+    submit_student_practice_answer,
+)
 from standalone.services.validation_pdf import build_validation_pack_pdf
 from standalone.tasks import process_content_asset_task, run_block_creation_processing, run_content_asset_processing
 
@@ -166,6 +174,40 @@ def _student_enrollment_or_404(user: User, course_id: int) -> Enrollment:
     )
 
 
+def _normalise_access_email(email: str) -> str:
+    return str(email or "").strip().lower()
+
+
+def _email_domain(email: str) -> str:
+    return _normalise_access_email(email).rsplit("@", 1)[-1]
+
+
+def _student_user_for_access_form(form, email: str):
+    email = _normalise_access_email(email)
+    user = User.objects.filter(email__iexact=email).first()
+    if user is None:
+        user = User.objects.create_user(
+            username=UserCreationFromInviteMixin.build_username(email),
+            email=email,
+            password=form.cleaned_data["password1"],
+            role=User.Role.STUDENT,
+            is_email_verified=True,
+        )
+        user.first_name = form.cleaned_data["full_name"].split(" ", 1)[0]
+        user.last_name = form.cleaned_data["full_name"].split(" ", 1)[1] if " " in form.cleaned_data["full_name"] else ""
+        user.save(update_fields=["first_name", "last_name"])
+        StudentProfile.objects.get_or_create(user=user, defaults={"institution": form.cleaned_data.get("institution", "")})
+        return user
+
+    if user.role != User.Role.STUDENT:
+        form.add_error("email", "This email belongs to a staff or teacher account. Use a student email address.")
+        return None
+    if not user.check_password(form.cleaned_data["password1"]):
+        form.add_error("password1", "Enter the password for this existing student account.")
+        return None
+    return user
+
+
 def home(request: HttpRequest) -> HttpResponse:
     if request.user.is_authenticated:
         return redirect("standalone:dashboard")
@@ -204,8 +246,30 @@ def teacher_dashboard(request: HttpRequest) -> HttpResponse:
     courses = Course.objects.filter(teacher=request.user).select_related("config")
     if request.user.role == User.Role.INTERNAL or request.user.is_superuser:
         courses = Course.objects.all().select_related("config", "teacher")
+    courses = courses.annotate(
+        student_count=Count("enrollments", distinct=True),
+        question_count=Count("question_bank_items", distinct=True),
+        block_count=Count("blocks", distinct=True),
+        active_block_count=Count(
+            "blocks",
+            filter=Q(blocks__available_from__lte=timezone.localdate()),
+            distinct=True,
+        ),
+        practice_mastery_average=Avg("enrollments__mastery_score"),
+        practice_coverage_average=Avg("enrollments__coverage_score"),
+        practice_engagement_average=Avg("enrollments__engagement_score"),
+        practice_target_average=Avg("enrollments__target_score"),
+    )
+    course_list = list(courses)
+    _attach_course_practice_averages(course_list)
     context = {
-        "courses": courses,
+        "courses": course_list,
+        "dashboard_stats": {
+            "course_count": len(course_list),
+            "student_count": sum(course.student_count for course in course_list),
+            "question_count": sum(course.question_count for course in course_list),
+            "active_block_count": sum(course.active_block_count for course in course_list),
+        },
         "teacher_invitations": TeacherInvitation.objects.order_by("-created_at")[:10],
         "student_invitations": StudentInvitation.objects.select_related("course").order_by("-created_at")[:10],
     }
@@ -301,7 +365,26 @@ def course_detail(request: HttpRequest, course_id: int) -> HttpResponse:
     return render(request, "standalone/course_detail.html", _course_detail_context(course))
 
 def _course_detail_context(course: Course):
-    blocks = list(course.blocks.select_related("config").prefetch_related("assets", "learning_objectives"))
+    blocks = list(
+        course.blocks.select_related("config")
+        .annotate(
+            asset_count=Count("assets", distinct=True),
+            objective_count=Count("learning_objectives", distinct=True),
+            approved_question_count=Count(
+                "question_bank_items",
+                filter=Q(question_bank_items__status=QuestionBankItem.Status.APPROVED),
+                distinct=True,
+            ),
+        )
+        .prefetch_related("assets", "learning_objectives")
+    )
+    _attach_course_practice_average(course)
+    magic_links = list(course.magic_links.all())
+    active_magic_link_count = sum(
+        1
+        for magic_link in magic_links
+        if magic_link.is_active and not magic_link.is_expired and magic_link.use_count < magic_link.max_uses
+    )
     for block in blocks:
         return_to = f"{reverse('standalone:course_detail', args=[course.pk])}#assets-content-{block.pk}"
         block.upload_url = f"{reverse('standalone:asset_upload', args=[block.pk])}?next={quote(return_to, safe='/:?=&')}"
@@ -309,11 +392,60 @@ def _course_detail_context(course: Course):
     return {
         "course": course,
         "blocks": blocks,
+        "course_student_count": course.enrollments.count(),
         "draft_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.DRAFT).count(),
         "approved_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.APPROVED).count(),
         "events": course.validation_events.all(),
         "allowed_emails": course.allowed_emails.all(),
+        "self_enrol_enabled": course.config.self_enrol_enabled and settings.STANDALONE_ENABLE_SELF_ENROL,
+        "self_enrol_url": reverse("standalone:self_enrol", args=[course.slug]),
+        "active_magic_link_count": active_magic_link_count,
     }
+
+
+def _attach_course_practice_averages(courses):
+    for course in courses:
+        _normalise_course_practice_averages(course)
+
+
+def _attach_course_practice_average(course: Course) -> None:
+    averages = course.enrollments.aggregate(
+        practice_mastery_average=Avg("mastery_score"),
+        practice_coverage_average=Avg("coverage_score"),
+        practice_engagement_average=Avg("engagement_score"),
+        practice_target_average=Avg("target_score"),
+    )
+    for key, value in averages.items():
+        setattr(course, key, value)
+    _normalise_course_practice_averages(course)
+
+
+def _normalise_course_practice_averages(course: Course) -> None:
+    metrics = {}
+    for metric_name in ("mastery", "coverage", "engagement", "target"):
+        attr_name = f"practice_{metric_name}_average"
+        metric_value = round(float(getattr(course, attr_name, 0) or 0), 2)
+        setattr(course, attr_name, metric_value)
+        metrics[metric_name] = metric_value
+    course.practice_overall_average = _weighted_practice_average(course, metrics)
+
+
+def _weighted_practice_average(course: Course, metrics: dict) -> float:
+    total_weight = (
+        course.config.mastery_weight
+        + course.config.coverage_weight
+        + course.config.engagement_weight
+        + course.config.target_weight
+    )
+    if total_weight <= 0:
+        return 0.0
+    weighted_total = (
+        metrics["mastery"] * course.config.mastery_weight
+        + metrics["coverage"] * course.config.coverage_weight
+        + metrics["engagement"] * course.config.engagement_weight
+        + metrics["target"] * course.config.target_weight
+    )
+    return round(weighted_total / total_weight, 2)
 
 
 def _refresh_course_summary_after_asset_change(course: Course) -> None:
@@ -427,6 +559,8 @@ def student_preview(request: HttpRequest, course_id: int) -> HttpResponse:
         {
             "course": course,
             "preview_state": preview_state,
+            "action_url_template": reverse("standalone:student_preview_action", args=[course.pk, 0, "ACTION"]),
+            "is_student_practice": False,
         },
     )
 
@@ -579,12 +713,18 @@ def add_allowed_email(request: HttpRequest, course_id: int) -> HttpResponse:
     course = _teacher_course_or_404(request.user, course_id)
     form = CourseAllowedEmailForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
-        allowed_email = form.save(commit=False)
-        allowed_email.course = course
-        allowed_email.save()
-        messages.success(request, "Allowed student email added.")
+        email = _normalise_access_email(form.cleaned_data["email"])
+        if CourseAllowedEmail.objects.filter(course=course, email__iexact=email).exists():
+            messages.info(request, "That student email is already on the self-enrol allowlist.")
+        else:
+            CourseAllowedEmail.objects.create(course=course, email=email)
+            messages.success(request, "Allowed student email added.")
         return redirect("standalone:course_detail", course.pk)
-    return render(request, "standalone/form_page.html", {"title": f"Allow self-enrol email for {course.title}", "form": form})
+    return render(
+        request,
+        "standalone/form_page.html",
+        {"title": f"Add self-enrol allowlist email for {course.title}", "form": form, "submit_label": "Add email"},
+    )
 
 
 @login_required
@@ -619,9 +759,17 @@ def magic_link_create(request: HttpRequest, course_id: int) -> HttpResponse:
     form = MagicLinkCreateForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
         magic_link = form.save(course=course, created_by=request.user)
-        messages.success(request, f"Magic link created: {request.build_absolute_uri(reverse('standalone:magic_enrol', args=[magic_link.token]))}")
+        magic_url = request.build_absolute_uri(reverse("standalone:magic_enrol", args=[magic_link.token]))
+        messages.success(
+            request,
+            f"Magic link created. It expires on {magic_link.expires_at:%d %b %Y, %H:%M} and can enrol {magic_link.max_uses} new student(s): {magic_url}",
+        )
         return redirect("standalone:course_detail", course.pk)
-    return render(request, "standalone/form_page.html", {"title": f"Create magic link for {course.title}", "form": form})
+    return render(
+        request,
+        "standalone/form_page.html",
+        {"title": f"Create magic link for {course.title}", "form": form, "submit_label": "Create magic link"},
+    )
 
 
 @transaction.atomic
@@ -665,37 +813,26 @@ def self_enrol(request: HttpRequest, course_slug: str) -> HttpResponse:
         raise Http404
     form = SelfEnrolForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
-        email = form.cleaned_data["email"].lower()
-        domain = email.split("@")[-1]
-        if course.config.self_enrol_domain and domain.lower() != course.config.self_enrol_domain.lower():
+        email = _normalise_access_email(form.cleaned_data["email"])
+        domain = _email_domain(email)
+        if course.config.self_enrol_domain and domain != course.config.self_enrol_domain.lower():
             form.add_error("email", "This email domain is not allowed for self-enrolment.")
         elif not CourseAllowedEmail.objects.filter(course=course, email__iexact=email).exists():
             form.add_error("email", "This email is not on the self-enrolment list for this course.")
         else:
-            user = User.objects.filter(email__iexact=email).first()
-            if user is None:
-                user = User.objects.create_user(
-                    username=UserCreationFromInviteMixin.build_username(email),
-                    email=email,
-                    password=form.cleaned_data["password1"],
-                    role=User.Role.STUDENT,
-                    is_email_verified=True,
+            user = _student_user_for_access_form(form, email)
+            if user is not None:
+                Enrollment.objects.get_or_create(course=course, student=user, defaults={"source": "self_enrol"})
+                send_logged_email(
+                    recipient=email,
+                    subject=f"Enrolment confirmed for {course.title}",
+                    body=f"You are now enrolled on {course.title} in MCQ Anchor.",
+                    event_type="self_enrol_confirmation",
+                    related_object=str(course.pk),
                 )
-                user.first_name = form.cleaned_data["full_name"].split(" ", 1)[0]
-                user.last_name = form.cleaned_data["full_name"].split(" ", 1)[1] if " " in form.cleaned_data["full_name"] else ""
-                user.save(update_fields=["first_name", "last_name"])
-                StudentProfile.objects.create(user=user, institution=form.cleaned_data.get("institution", ""))
-            Enrollment.objects.get_or_create(course=course, student=user, defaults={"source": "self_enrol"})
-            send_logged_email(
-                recipient=email,
-                subject=f"Enrolment confirmed for {course.title}",
-                body=f"You are now enrolled on {course.title} in MCQ Anchor.",
-                event_type="self_enrol_confirmation",
-                related_object=str(course.pk),
-            )
-            login(request, user)
-            return redirect("standalone:student_dashboard")
-    return render(request, "standalone/form_page.html", {"title": f"Self-enrol in {course.title}", "form": form})
+                login(request, user)
+                return redirect("standalone:student_dashboard")
+    return render(request, "standalone/form_page.html", {"title": f"Self-enrol in {course.title}", "form": form, "submit_label": "Join course"})
 
 
 @transaction.atomic
@@ -707,41 +844,31 @@ def magic_enrol(request: HttpRequest, token) -> HttpResponse:
 
     form = MagicLinkEmailForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
-        email = form.cleaned_data["email"].lower()
-        domain = email.split("@")[-1]
-        if magic_link.course.config.self_enrol_domain and domain.lower() != magic_link.course.config.self_enrol_domain.lower():
+        email = _normalise_access_email(form.cleaned_data["email"])
+        domain = _email_domain(email)
+        if magic_link.course.config.self_enrol_domain and domain != magic_link.course.config.self_enrol_domain.lower():
             form.add_error("email", "This email domain is not allowed for this course.")
         else:
-            user = User.objects.filter(email__iexact=email).first()
-            if user is None:
-                user = User.objects.create_user(
-                    username=UserCreationFromInviteMixin.build_username(email),
-                    email=email,
-                    password=form.cleaned_data["password1"],
-                    role=User.Role.STUDENT,
-                    is_email_verified=True,
-                )
-                user.first_name = form.cleaned_data["full_name"].split(" ", 1)[0]
-                user.last_name = form.cleaned_data["full_name"].split(" ", 1)[1] if " " in form.cleaned_data["full_name"] else ""
-                user.save(update_fields=["first_name", "last_name"])
-                StudentProfile.objects.create(user=user, institution=form.cleaned_data.get("institution", ""))
-            Enrollment.objects.get_or_create(course=magic_link.course, student=user, defaults={"source": "magic_link"})
-            StudentInvitation.objects.create(
-                course=magic_link.course,
-                email=email,
-                invitation_type=StudentInvitation.InvitationType.MAGIC,
-                created_by=magic_link.created_by,
-                expires_at=timezone.now() + timedelta(seconds=1),
-                accepted_at=timezone.now(),
-                enrolled_user=user,
-            )
-            magic_link.use_count += 1
-            if magic_link.use_count >= magic_link.max_uses:
-                magic_link.is_active = False
-            magic_link.save(update_fields=["use_count", "is_active", "updated_at"])
-            login(request, user)
-            return redirect("standalone:student_dashboard")
-    return render(request, "standalone/form_page.html", {"title": f"Join {magic_link.course.title}", "form": form})
+            user = _student_user_for_access_form(form, email)
+            if user is not None:
+                _enrollment, created = Enrollment.objects.get_or_create(course=magic_link.course, student=user, defaults={"source": "magic_link"})
+                if created:
+                    StudentInvitation.objects.create(
+                        course=magic_link.course,
+                        email=email,
+                        invitation_type=StudentInvitation.InvitationType.MAGIC,
+                        created_by=magic_link.created_by,
+                        expires_at=timezone.now() + timedelta(seconds=1),
+                        accepted_at=timezone.now(),
+                        enrolled_user=user,
+                    )
+                    magic_link.use_count += 1
+                    if magic_link.use_count >= magic_link.max_uses:
+                        magic_link.is_active = False
+                    magic_link.save(update_fields=["use_count", "is_active", "updated_at"])
+                login(request, user)
+                return redirect("standalone:student_dashboard")
+    return render(request, "standalone/form_page.html", {"title": f"Join {magic_link.course.title}", "form": form, "submit_label": "Join course"})
 
 
 @login_required
@@ -968,8 +1095,7 @@ def validation_pack_pdf(request: HttpRequest, event_id: int) -> HttpResponse:
     return HttpResponse(pdf_bytes, content_type="application/pdf", headers={"Content-Disposition": f'inline; filename="validation-pack-{event.pk}.pdf"'})
 
 
-@login_required
-def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
+def _legacy_practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
     enrollment = _student_enrollment_or_404(request.user, course_id)
     today = timezone.localdate()
     mode = request.GET.get("mode", PracticeAttempt.AttemptType.PRACTICE)
@@ -1053,6 +1179,81 @@ def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
             "question_number": attempt.attempt_questions.count() + 1,
         },
     )
+
+
+@login_required
+def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
+    mode = request.GET.get("mode", PracticeAttempt.AttemptType.PRACTICE)
+    if mode == PracticeAttempt.AttemptType.VALIDATION_PRACTICE or request.method == "POST":
+        return _legacy_practice_quiz(request, course_id)
+    if mode != PracticeAttempt.AttemptType.PRACTICE:
+        mode = PracticeAttempt.AttemptType.PRACTICE
+    enrollment = _student_enrollment_or_404(request.user, course_id)
+    preview_state = serialize_student_practice_state(enrollment)
+    return render(
+        request,
+        "standalone/student_preview.html",
+        {
+            "course": enrollment.course,
+            "preview_state": preview_state,
+            "action_url_template": reverse("standalone:student_practice_action", args=[enrollment.course_id, 0, "ACTION"]),
+            "is_student_practice": True,
+            "mode": mode,
+        },
+    )
+
+
+def _student_practice_payload(enrollment: Enrollment, block: CourseBlock, action: str, request: HttpRequest) -> JsonResponse:
+    if action == "quiz":
+        requested_question_type = None
+        if request.body and "application/json" in (request.content_type or ""):
+            try:
+                data = json.loads(request.body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+            requested_question_type = str(data.get("question_type", "")).strip().lower() or None
+        payload = request_student_practice_quiz(enrollment, block, requested_question_type=requested_question_type)
+        return JsonResponse({"ok": True, "preview": payload})
+
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+
+    if action == "answer":
+        selected_answers = data.get("answers")
+        if not isinstance(selected_answers, list):
+            selected_answer = str(data.get("answer", "")).strip()
+            selected_answers = [selected_answer] if selected_answer else []
+        question_id = int(data.get("question_id") or 0)
+        answer_text = str(data.get("answer_text", "")).strip()
+        payload = submit_student_practice_answer(enrollment, block, question_id, selected_answers, answer_text=answer_text)
+        return JsonResponse({"ok": True, "preview": payload})
+    if action == "draft_answer":
+        question_id = int(data.get("question_id") or 0)
+        answer_text = str(data.get("answer_text", "")).strip()
+        payload = draft_student_practice_written_answer(enrollment, block, question_id, answer_text)
+        return JsonResponse({"ok": True, "alignment": payload})
+    if action == "chat":
+        question = str(data.get("question", "")).strip()
+        if not question:
+            return JsonResponse({"ok": False, "error": "Please enter a course question first."}, status=400)
+        payload = send_student_practice_chat_message(enrollment, block, question)
+        return JsonResponse({"ok": True, "preview": payload})
+    if action == "flag":
+        question_id = int(data.get("question_id") or 0)
+        payload = flag_student_practice_question(enrollment, block, question_id)
+        return JsonResponse({"ok": True, "preview": payload})
+    raise Http404
+
+
+@login_required
+def student_practice_action(request: HttpRequest, course_id: int, block_id: int, action: str) -> JsonResponse:
+    if request.method != "POST" or not _is_student(request.user):
+        raise Http404
+    enrollment = _student_enrollment_or_404(request.user, course_id)
+    block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id, course=enrollment.course)
+    return _student_practice_payload(enrollment, block, action, request)
 
 
 class StandaloneLogoutView(LogoutView):

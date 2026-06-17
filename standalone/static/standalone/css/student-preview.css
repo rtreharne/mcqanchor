@@ -1469,6 +1469,17 @@ body {
   outline: none;
 }
 
+.preview-quiz-menu-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.preview-quiz-menu-item:disabled:hover {
+  border-color: transparent;
+  background: rgba(246, 251, 255, 0.72);
+  color: var(--ink);
+}
+
 .preview-quiz-menu-item-title {
   font-size: 0.86rem;
   font-weight: 800;

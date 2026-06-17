@@ -17,6 +17,7 @@ from standalone.models import (
     NotificationLog,
     PracticeAttempt,
     PracticeAttemptQuestion,
+    PracticeMessage,
     QuestionBankItem,
     StudentInvitation,
     StudentProfile,
@@ -77,6 +78,7 @@ admin.site.register(ValidationPack)
 admin.site.register(ValidationSubmission)
 admin.site.register(NotificationLog)
 admin.site.register(PracticeAttemptQuestion)
+admin.site.register(PracticeMessage)
 
 
 @admin.register(Enrollment)

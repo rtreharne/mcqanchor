@@ -5,17 +5,26 @@
   <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}">
 {% endblock %}
 {% block app_nav_links %}
-  <a href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
+  {% if is_student_practice %}
+    <a href="{% url 'standalone:student_dashboard' %}">Dashboard</a>
+  {% else %}
+    <a href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
+  {% endif %}
 {% endblock %}
 {% block app_nav_menu_actions %}
-  <a class="button secondary app-nav-menu-action" href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
+  {% if is_student_practice %}
+    <a class="button secondary app-nav-menu-action" href="{% url 'standalone:student_dashboard' %}">Dashboard</a>
+  {% else %}
+    <a class="button secondary app-nav-menu-action" href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
+  {% endif %}
 {% endblock %}
 {% block app_shell_class %} preview-app-shell{% endblock %}
+{% block app_footer %}{% endblock %}
 {% block content %}
 <section
   class="preview-page"
   data-student-preview
-  data-action-url-template="{% url 'standalone:student_preview_action' course.pk 0 'ACTION' %}"
+  data-action-url-template="{{ action_url_template|default:'' }}"
 >
   <aside class="preview-sidebar">
     <div class="preview-sidebar-head">

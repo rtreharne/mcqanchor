@@ -85,6 +85,14 @@ class CourseConfigForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["self_enrol_enabled"].label = "Enable self-enrol allowlist"
+        self.fields["self_enrol_enabled"].help_text = (
+            "Students can use the course self-enrol URL only if their exact email address has been added to the allowlist."
+        )
+        self.fields["self_enrol_domain"].label = "Restrict enrolment domain"
+        self.fields["self_enrol_domain"].help_text = (
+            "Optional. Enter a domain such as example.ac.uk. It applies to both self-enrol allowlist signups and magic links."
+        )
         self.fields["maq_ratio_percent"].label = "Multiple-answer question ratio (%)"
         self.fields["maq_ratio_percent"].help_text = (
             "Target percentage of newly generated questions that should allow multiple correct answers."
@@ -93,12 +101,33 @@ class CourseConfigForm(forms.ModelForm):
         self.fields["waq_ratio_percent"].help_text = (
             "Target percentage of newly generated questions that should use typed written answers."
         )
+        self.fields["advanced_question_start_percent"].label = "Start MAQ/WAQ after target progress (%)"
+        self.fields["advanced_question_start_percent"].help_text = (
+            "Block progress threshold before students are asked multiple-answer or written-answer questions. "
+            "Use 0 to allow them from the start."
+        )
+
+    def clean_self_enrol_domain(self):
+        value = (self.cleaned_data.get("self_enrol_domain") or "").strip().lower()
+        if value.startswith("@"):
+            value = value[1:]
+        return value
 
 
 class CourseAllowedEmailForm(forms.ModelForm):
     class Meta:
         model = CourseAllowedEmail
         fields = ["email"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["email"].label = "Allowed student email"
+        self.fields["email"].help_text = (
+            "Self-enrolment requires this exact email address. Magic links do not require an allowlist entry."
+        )
+
+    def clean_email(self):
+        return self.cleaned_data["email"].strip().lower()
 
 
 class StudentInvitationForm(forms.ModelForm):
@@ -321,6 +350,19 @@ class MagicLinkCreateForm(forms.ModelForm):
     class Meta:
         model = CourseMagicLink
         fields = ["max_uses"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["max_uses"].label = "Maximum new enrolments"
+        self.fields["max_uses"].help_text = (
+            "Each new student account enrolled through this active link consumes one use. Existing enrolled students can reuse an active link without consuming another use."
+        )
+
+    def clean_max_uses(self):
+        value = self.cleaned_data["max_uses"]
+        if value < 1:
+            raise forms.ValidationError("Magic links must allow at least one enrolment.")
+        return value
 
     def save(self, course, created_by, commit=True):
         magic_link = super().save(commit=False)

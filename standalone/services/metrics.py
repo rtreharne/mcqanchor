@@ -1,44 +1,66 @@
 from decimal import Decimal
+from datetime import timedelta
 
 from django.utils import timezone
 
-from standalone.models import Enrollment, PracticeAttempt, QuestionBankItem
+from standalone.models import Enrollment, PracticeAttempt, PracticeAttemptQuestion
+from standalone.services.preview import PREVIEW_ENGAGEMENT_WINDOW_DAYS
+
+
+def _decimal_percent(value: float) -> Decimal:
+    return Decimal(str(round(value, 2))).quantize(Decimal("0.01"))
 
 
 def refresh_enrollment_metrics(enrollment: Enrollment) -> None:
     today = timezone.localdate()
-    official_attempts = enrollment.practice_attempts.filter(attempt_type=PracticeAttempt.AttemptType.PRACTICE)
     previous_scores = {
         "mastery": enrollment.mastery_score,
         "coverage": enrollment.coverage_score,
         "engagement": enrollment.engagement_score,
         "target": enrollment.target_score,
     }
+    course = enrollment.course
+    blocks = list(course.blocks.prefetch_related("learning_objectives").order_by("order", "created_at"))
+    metric_blocks = [block for block in blocks if block.available_from <= today] or blocks
 
-    asked_questions = QuestionBankItem.objects.filter(
-        attempt_questions__attempt__enrollment=enrollment,
-        attempt_questions__attempt__attempt_type=PracticeAttempt.AttemptType.PRACTICE,
-    ).distinct()
-    total_questions = asked_questions.count() or 1
-    correct_questions = asked_questions.filter(
-        attempt_questions__attempt__enrollment=enrollment,
-        attempt_questions__is_correct=True,
-    ).distinct().count()
+    if not metric_blocks:
+        mastery = coverage = engagement = target = Decimal("0.00")
+    else:
+        block_scores = []
+        for block in metric_blocks:
+            answers = PracticeAttemptQuestion.objects.filter(
+                attempt__enrollment=enrollment,
+                attempt__attempt_type=PracticeAttempt.AttemptType.PRACTICE,
+                question__block=block,
+            ).select_related("question")
+            completed_count = answers.count()
+            correct_count = answers.filter(is_correct=True).count()
+            total_objectives = block.learning_objectives.count()
+            covered_objectives = answers.filter(
+                is_correct=True,
+                question__learning_objective__isnull=False,
+            ).values("question__learning_objective_id").distinct().count()
+            engagement_deadline = block.available_from + timedelta(days=PREVIEW_ENGAGEMENT_WINDOW_DAYS)
+            on_time_count = sum(
+                1
+                for answer in answers
+                if block.available_from <= answer.created_at.date() <= engagement_deadline
+            )
+            target_question_count = max(1, block.preview_target_question_count)
+            block_scores.append(
+                {
+                    "mastery": correct_count * 100 / completed_count if completed_count else 0.0,
+                    "coverage": covered_objectives * 100 / total_objectives if total_objectives else 0.0,
+                    "engagement": min(100, on_time_count * 100 / target_question_count) if today >= block.available_from else 0.0,
+                    "target": min(100, completed_count * 100 / target_question_count),
+                }
+            )
 
-    mastery = Decimal(correct_questions * 100 / total_questions).quantize(Decimal("0.01"))
-
-    total_objectives = enrollment.course.learning_objectives.filter(block__available_from__lte=today).count() or 1
-    covered_objectives = enrollment.course.learning_objectives.filter(
-        block__available_from__lte=today,
-        question_bank_items__attempt_questions__attempt__enrollment=enrollment
-    ).distinct().count()
-    coverage = Decimal(covered_objectives * 100 / total_objectives).quantize(Decimal("0.01"))
-
-    engagement = Decimal(min(100, official_attempts.count() * 10)).quantize(Decimal("0.01"))
-
-    released_blocks = enrollment.course.blocks.filter(available_from__lte=today).count() or 1
-    touched_blocks = enrollment.course.blocks.filter(available_from__lte=today, practice_attempts__enrollment=enrollment).distinct().count()
-    target = Decimal(touched_blocks * 100 / released_blocks).quantize(Decimal("0.01"))
+        block_count = len(block_scores)
+        mastery = _decimal_percent(sum(score["mastery"] for score in block_scores) / block_count)
+        coverage = _decimal_percent(sum(score["coverage"] for score in block_scores) / block_count)
+        engagement = _decimal_percent(sum(score["engagement"] for score in block_scores) / block_count)
+        target = _decimal_percent(sum(score["target"] for score in block_scores) / block_count)
 
     enrollment.mastery_score = mastery
     enrollment.coverage_score = coverage
