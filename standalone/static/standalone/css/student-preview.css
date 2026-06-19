@@ -615,6 +615,30 @@ body {
   white-space: pre;
 }
 
+.preview-question-code-snippet {
+  display: grid;
+  gap: 0.42rem;
+  margin-top: 0.75rem;
+}
+
+.preview-question-code-label {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 1.55rem;
+  padding: 0.16rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(46, 190, 169, 0.15);
+  color: #0f6b5d;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.preview-question-code-block {
+  margin-top: 0;
+}
+
 .preview-message-list {
   margin: 0;
   padding-left: 1.2rem;

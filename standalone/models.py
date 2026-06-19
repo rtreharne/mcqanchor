@@ -108,6 +108,7 @@ class CourseConfig(TimeStampedModel):
     distractor_count = models.PositiveSmallIntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(5)])
     maq_ratio_percent = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
     waq_ratio_percent = models.PositiveSmallIntegerField(default=10, validators=[MinValueValidator(0), MaxValueValidator(100)])
+    coding_question_ratio_percent = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
     advanced_question_start_percent = models.PositiveSmallIntegerField(default=50, validators=[MinValueValidator(0), MaxValueValidator(100)])
     revalidation_attempts = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(10)])
     show_validation_feedback_immediately = models.BooleanField(default=False)
@@ -320,6 +321,55 @@ class ContentChunk(TimeStampedModel):
         return f"Chunk {self.ordinal} for {self.asset}"
 
 
+class CourseImport(TimeStampedModel):
+    class Status(models.TextChoices):
+        UPLOADED = "uploaded", "Uploaded"
+        ANALYZING = "analyzing", "Analyzing"
+        READY = "ready", "Ready"
+        CREATING = "creating", "Creating blocks"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="imports")
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="course_imports")
+    source_file = models.FileField(upload_to="standalone/imports/%Y/%m/%d")
+    original_filename = models.CharField(max_length=255)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.UPLOADED)
+    progress = models.PositiveSmallIntegerField(default=0)
+    error = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.original_filename} for {self.course}"
+
+
+class CourseImportChapter(TimeStampedModel):
+    course_import = models.ForeignKey(CourseImport, on_delete=models.CASCADE, related_name="chapters")
+    title = models.CharField(max_length=255)
+    order = models.PositiveSmallIntegerField(default=1)
+    start_page = models.PositiveIntegerField(default=1)
+    end_page = models.PositiveIntegerField(default=1)
+    confidence = models.PositiveSmallIntegerField(default=50)
+    extracted_text = models.TextField(blank=True)
+    selected = models.BooleanField(default=True)
+    created_block = models.ForeignKey(
+        CourseBlock,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="import_chapters",
+    )
+
+    class Meta:
+        ordering = ["order", "start_page", "pk"]
+        unique_together = ("course_import", "order")
+
+    def __str__(self) -> str:
+        return f"{self.course_import}: {self.title}"
+
+
 class QuestionBankItem(TimeStampedModel):
     class BankType(models.TextChoices):
         PRACTICE = "practice", "Practice"
@@ -329,6 +379,10 @@ class QuestionBankItem(TimeStampedModel):
         MCQ = "mcq", "Single-answer"
         MAQ = "maq", "Multiple-answer"
         WAQ = "waq", "Written-answer"
+
+    class CodingQuestionKind(models.TextChoices):
+        COMPREHENSION = "comprehension", "Code comprehension"
+        DEBUG = "debug", "Debugging"
 
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
@@ -359,6 +413,10 @@ class QuestionBankItem(TimeStampedModel):
     difficulty = models.CharField(max_length=50, blank=True)
     question_hash = models.CharField(max_length=64, db_index=True)
     is_numerical = models.BooleanField(default=False)
+    is_coding_question = models.BooleanField(default=False)
+    coding_language = models.CharField(max_length=50, blank=True)
+    coding_question_kind = models.CharField(max_length=30, choices=CodingQuestionKind.choices, blank=True)
+    code_snippet = models.TextField(blank=True)
 
     class Meta:
         ordering = ["bank_type", "block__order", "created_at"]

@@ -1,0 +1,100 @@
+{% extends "standalone/base.html" %}
+{% block app_nav_links %}
+  <a href="{% url 'standalone:teacher_dashboard' %}">Dashboard</a>
+  <a href="{% url 'standalone:course_detail' course.pk %}">Course</a>
+{% endblock %}
+{% block app_nav_menu_actions %}
+  <a class="button secondary app-nav-menu-action" href="{% url 'standalone:teacher_dashboard' %}">Dashboard</a>
+  <a class="button secondary app-nav-menu-action" href="{% url 'standalone:course_detail' course.pk %}">Course</a>
+{% endblock %}
+{% block content %}
+{% if course_import.status == 'analyzing' or course_import.status == 'creating' %}
+  <meta http-equiv="refresh" content="5">
+{% endif %}
+<section class="panel course-import-review">
+  <div class="section-head compact course-section-head">
+    <div>
+      <h1>PDF chapter import</h1>
+      <p class="lead">{{ course_import.original_filename }} for {{ course.title }}</p>
+    </div>
+    <div class="section-actions">
+      <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}">Back to course</a>
+    </div>
+  </div>
+
+  <div class="regeneration-status-panel{% if course_import.status == 'analyzing' or course_import.status == 'creating' %} is-running{% elif course_import.status == 'completed' %} is-complete{% elif course_import.status == 'failed' %} is-failed{% endif %}">
+    <div class="regeneration-status-head">
+      <strong>{{ course_import.get_status_display }}</strong>
+      <span>{{ course_import.progress }}%</span>
+    </div>
+    <div class="regeneration-progress" aria-hidden="true">
+      <span style="width: {{ course_import.progress }}%"></span>
+    </div>
+    {% if course_import.status == 'uploaded' or course_import.status == 'analyzing' %}
+      <p class="regeneration-status-copy">Detecting chapters from the uploaded PDF.</p>
+    {% elif course_import.status == 'ready' %}
+      <p class="regeneration-status-copy">Select the chapters to convert into course blocks.</p>
+    {% elif course_import.status == 'creating' %}
+      <p class="regeneration-status-copy">Creating course blocks and generating descriptions and learning objectives.</p>
+    {% elif course_import.status == 'completed' %}
+      <p class="regeneration-status-copy">Selected chapters have been converted into course blocks.</p>
+    {% elif course_import.status == 'failed' %}
+      <p class="regeneration-status-copy">The import did not complete successfully.</p>
+    {% endif %}
+    {% if course_import.error %}
+      <p class="regeneration-status-error">{{ course_import.error }}</p>
+    {% endif %}
+  </div>
+
+  {% if course_import.status == 'ready' %}
+    <form method="post" class="stack-form course-import-chapter-form">
+      {% csrf_token %}
+      {{ form.non_field_errors }}
+      {% if form.selected_chapters.errors %}
+        {% for error in form.selected_chapters.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+      {% endif %}
+      <div class="course-import-chapter-list">
+        {% for chapter in chapters %}
+          <label class="course-import-chapter-row">
+            <input
+              type="checkbox"
+              name="selected_chapters"
+              value="{{ chapter.pk }}"
+              {% if chapter.selected and not chapter.created_block_id %}checked{% endif %}
+            >
+            <span class="course-import-chapter-main">
+              <strong>{{ chapter.title }}</strong>
+              <small>Pages {{ chapter.start_page }}-{{ chapter.end_page }} · confidence {{ chapter.confidence }}%</small>
+            </span>
+          </label>
+        {% endfor %}
+      </div>
+      <div class="action-row">
+        <button class="button" type="submit">Create selected blocks</button>
+        <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}">Cancel</a>
+      </div>
+    </form>
+  {% elif course_import.status == 'completed' %}
+    <div class="course-import-chapter-list">
+      {% for chapter in chapters %}
+        <div class="course-import-chapter-row">
+          <span class="course-import-chapter-main">
+            <strong>{{ chapter.title }}</strong>
+            <small>Pages {{ chapter.start_page }}-{{ chapter.end_page }}</small>
+          </span>
+          {% if chapter.created_block %}
+            <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}#block-content-{{ chapter.created_block.pk }}">Open block</a>
+          {% else %}
+            <span class="block-chip">Not selected</span>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% elif course_import.status == 'failed' %}
+    <div class="action-row">
+      <a class="button" href="{% url 'standalone:course_import_upload' course.pk %}">Try another PDF</a>
+      <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}">Back to course</a>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

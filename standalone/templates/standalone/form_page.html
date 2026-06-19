@@ -9,7 +9,7 @@
     {% for field in form %}
       <div class="field">
         <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-        {% if field.name == "file" %}
+        {% if field.name == "file" or field.name == "source_file" %}
           {% if is_upload_form or has_upload_picker %}
             <div class="upload-picker-row">
               {{ field }}

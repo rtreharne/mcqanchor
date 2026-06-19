@@ -207,9 +207,19 @@ def sanitize_summary(text: str) -> str:
     value = normalize_text(text)
     value = value.replace("\u2013", "-").replace("\u2014", "-")
     value = value.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
+    prefix_patterns = (
+        r"^(?:the\s+)?(?:teaching\s+content|uploaded\s+teaching\s+material|uploaded\s+material|course\s+material|course\s+content|content|material)\s+(?:provides|offers|covers|introduces|explores|discusses|focuses\s+on|is\s+about)\s+",
+        r"^(?:this\s+)?(?:teaching\s+content|uploaded\s+teaching\s+material|uploaded\s+material|course\s+material|course\s+content|content|material)\s+(?:provides|offers|covers|introduces|explores|discusses|focuses\s+on|is\s+about)\s+",
+    )
+    for pattern in prefix_patterns:
+        value = re.sub(pattern, "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^(?:an?|the)\s+overview\s+of\s+", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+([,.;:!?])", r"\1", value)
     value = re.sub(r"[ \t]+", " ", value)
-    return value.strip()
+    value = value.strip()
+    if value and value[0].isalpha():
+        value = value[0].upper() + value[1:]
+    return value
 
 
 def _dedupe_texts(items: list[str]) -> list[str]:
@@ -336,6 +346,8 @@ Return strict JSON with exactly these keys:
 
 Rules:
 - no numbering or bullets in the output
+- write the summary as a direct course/block description, not a description of the uploaded content
+- do not use phrases like "the teaching content", "the uploaded material", "the content provides", "the textbook covers", or "this material discusses"
 - no ambiguous references such as "this", "that", "it", or "etc."
 - each learning objective should start with a clear action verb
 - remove odd characters and formatting noise
@@ -382,6 +394,8 @@ Return strict JSON with exactly these keys:
 Rules:
 - use only the supplied uploaded-material notes
 - no numbering or bullets in the output
+- write the summary as a direct course/block description, not a description of the uploaded notes
+- do not use phrases like "the teaching content", "the uploaded material", "the content provides", "the textbook covers", or "this material discusses"
 - no ambiguous references such as "this", "that", "it", or "etc."
 - each learning objective should start with a clear action verb
 - remove odd characters and formatting noise
@@ -516,7 +530,7 @@ def _replace_block_objectives(block, source_asset: ContentAsset, objective_texts
     return created_or_updated
 
 
-def _refresh_course_summary_from_blocks(course) -> bool:
+def refresh_course_summary_from_blocks(course) -> bool:
     course_fragments = [block.summary for block in course.blocks.all() if block.summary.strip()]
     if not course_fragments:
         return False
@@ -554,7 +568,7 @@ def regenerate_block_descriptions_and_objectives(block, progress_callback=None) 
     block.summary = block_summary
     block.save(update_fields=["summary", "updated_at"])
     objective_count = _replace_block_objectives(block, assets[0], objectives)
-    _refresh_course_summary_from_blocks(block.course)
+    refresh_course_summary_from_blocks(block.course)
     if progress_callback:
         progress_callback(100)
     return {"blocks": 1, "objectives": objective_count}

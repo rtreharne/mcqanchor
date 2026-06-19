@@ -1,6 +1,8 @@
 from datetime import timedelta
+import io
 import json
 import re
+import tempfile
 
 from django.contrib.auth import get_user_model
 from django.core import mail
@@ -18,6 +20,8 @@ from standalone.models import (
     CourseAllowedEmail,
     CourseBlock,
     CourseConfig,
+    CourseImport,
+    CourseImportChapter,
     CourseMagicLink,
     Enrollment,
     EnrollmentQuestionState,
@@ -31,10 +35,12 @@ from standalone.models import (
     TeacherInvitation,
     ValidationEvent,
 )
-from standalone.tasks import run_block_creation_processing, run_block_regeneration
+from standalone.tasks import run_block_creation_processing, run_block_regeneration, run_course_import_block_creation
 from standalone.services.content import chunk_text, summarize_block_content
+from standalone.services.pdf_import import analyze_pdf_chapters
 from standalone.services.preview import PREVIEW_SESSION_KEY
 from standalone.services.questions import (
+    coding_signal_for_text,
     fallback_further_study_questions,
     further_study_questions_for_question,
     generate_question_pair_for_block,
@@ -104,6 +110,53 @@ class StandaloneFlowTests(TestCase):
         )
         return block, asset, objective, chunk
 
+    def create_coding_content_block(self, course, *, extension=".py", text=None):
+        code_text = text or "```python\ndef double(value):\n    return value * 2\n\nresult = double(4)\n```"
+        block = CourseBlock.objects.create(course=course, title="Coding", summary="Coding summary", order=1)
+        BlockConfig.objects.create(block=block)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile(f"code{extension}", code_text.encode("utf-8"), content_type="text/plain"),
+            original_filename=f"code{extension}",
+            extension=extension,
+            include_in_generation=True,
+            processing_status=ContentAsset.ProcessingStatus.PROCESSED,
+            extracted_text=code_text,
+        )
+        objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Explain how code structure affects program behavior",
+        )
+        chunk = ContentChunk.objects.create(
+            asset=asset,
+            course=course,
+            block=block,
+            ordinal=1,
+            text=code_text,
+            token_count=max(1, len(code_text.split())),
+            checksum="coding-chunk",
+        )
+        return block, asset, objective, chunk
+
+    def build_pdf_upload(self, pages, filename="book.pdf"):
+        from reportlab.pdfgen import canvas
+
+        buffer = io.BytesIO()
+        pdf = canvas.Canvas(buffer)
+        for page_lines in pages:
+            y = 790
+            for line in page_lines:
+                pdf.drawString(72, y, line)
+                y -= 18
+            pdf.showPage()
+        pdf.save()
+        return SimpleUploadedFile(filename, buffer.getvalue(), content_type="application/pdf")
+
     def test_chunk_text_splits_single_long_paragraph_to_target_size(self):
         text = " ".join(["word"] * 700)
         chunks = chunk_text(text, target_size=1200)
@@ -156,6 +209,69 @@ class StandaloneFlowTests(TestCase):
         self.assertTrue(any("Section summaries:" in prompt for prompt in prompts))
         self.assertFalse(any("Block title:" in prompt for prompt in prompts))
 
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_summarize_block_content_removes_content_meta_prefixes(self):
+        class DummyResponse:
+            output_text = (
+                '{"summary":"The teaching content provides an overview of membrane transport.",'
+                '"learning_objectives":["Explain membrane transport"]}'
+            )
+
+        with patch("standalone.services.content.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            summary, _objectives = summarize_block_content("Membrane transport regulates cell exchange.", max_items=3)
+
+        self.assertEqual(summary, "Membrane transport.")
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_pdf_import_detects_chapters_from_page_headings(self):
+        upload = self.build_pdf_upload(
+            [
+                ["Chapter 1 Foundations", "Cells are the basic unit of life."],
+                ["Chapter 2 Membranes", "Membranes regulate transport and signalling."],
+            ]
+        )
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf_file:
+            pdf_file.write(upload.read())
+            pdf_file.flush()
+
+            chapters = analyze_pdf_chapters(pdf_file.name)
+
+        self.assertEqual([chapter.title for chapter in chapters], ["Chapter 1: Foundations", "Chapter 2: Membranes"])
+        self.assertEqual(chapters[0].start_page, 1)
+        self.assertEqual(chapters[0].end_page, 1)
+        self.assertIn("Cells are the basic unit of life", chapters[0].extracted_text)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_pdf_import_falls_back_to_single_chapter_without_headings(self):
+        upload = self.build_pdf_upload([["Foundations of cell biology", "No chapter heading is present."]])
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf_file:
+            pdf_file.write(upload.read())
+            pdf_file.flush()
+
+            chapters = analyze_pdf_chapters(pdf_file.name)
+
+        self.assertEqual(len(chapters), 1)
+        self.assertEqual(chapters[0].title, "Imported PDF")
+        self.assertEqual(chapters[0].start_page, 1)
+        self.assertEqual(chapters[0].end_page, 1)
+
+    def test_coding_signal_detects_common_languages(self):
+        cases = [
+            ("python", "```python\ndef total(values):\n    return sum(values)\n```", ".txt"),
+            ("r", "x <- c(1, 2, 3)\nmean(x)", ".r"),
+            ("java", "public class Demo {\n  public static void main(String[] args) {\n    System.out.println(\"Hi\");\n  }\n}", ".txt"),
+            ("matlab", "function y = squareValue(x)\ny = x.^2;\nend", ".m"),
+        ]
+
+        for expected_language, text, extension in cases:
+            with self.subTest(expected_language):
+                signal = coding_signal_for_text(text, extension=extension)
+                self.assertEqual(signal["language"], expected_language)
+                self.assertTrue(signal["snippet"])
+
+        self.assertEqual(coding_signal_for_text("Cell membranes regulate transport.")["language"], "")
+
     def test_teacher_invitation_activation_creates_teacher_account(self):
         self.client.force_login(self.internal)
         response = self.client.post(reverse("standalone:teacher_invite"), {"email": "newteacher@example.com"})
@@ -207,6 +323,7 @@ class StandaloneFlowTests(TestCase):
                 "distractor_count": 3,
                 "maq_ratio_percent": 35,
                 "waq_ratio_percent": 15,
+                "coding_question_ratio_percent": 50,
                 "advanced_question_start_percent": 40,
                 "revalidation_attempts": 0,
                 "show_validation_feedback_immediately": "",
@@ -217,7 +334,201 @@ class StandaloneFlowTests(TestCase):
         course.config.refresh_from_db()
         self.assertEqual(course.config.maq_ratio_percent, 35)
         self.assertEqual(course.config.waq_ratio_percent, 15)
+        self.assertEqual(course.config.coding_question_ratio_percent, 50)
         self.assertEqual(course.config.advanced_question_start_percent, 40)
+
+    def test_teacher_can_delete_course_from_detail_page(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile("delete-me.txt", b"Delete this file", content_type="text/plain"),
+            original_filename="delete-me.txt",
+            extension=".txt",
+        )
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("delete-me.pdf", b"%PDF-1.4", content_type="application/pdf"),
+            original_filename="delete-me.pdf",
+        )
+        asset_name = asset.file.name
+        import_name = course_import.source_file.name
+        self.client.force_login(self.teacher)
+
+        detail_response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
+        self.assertContains(detail_response, reverse("standalone:course_delete", args=[course.pk]))
+        delete_response = self.client.post(reverse("standalone:course_delete", args=[course.pk]))
+
+        self.assertEqual(delete_response.status_code, 302)
+        self.assertEqual(delete_response.url, reverse("standalone:teacher_dashboard"))
+        self.assertFalse(Course.objects.filter(pk=course.pk).exists())
+        self.assertFalse(asset.file.storage.exists(asset_name))
+        self.assertFalse(course_import.source_file.storage.exists(import_name))
+
+    def test_teacher_cannot_delete_another_teachers_course(self):
+        other_teacher = User.objects.create_user(
+            username="otherteacher",
+            email="otherteacher@example.com",
+            password="password123",
+            role=User.Role.TEACHER,
+        )
+        course = Course.objects.create(teacher=other_teacher, title="Other Course", slug="other-course")
+        CourseConfig.objects.create(course=course)
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:course_delete", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Course.objects.filter(pk=course.pk).exists())
+
+    def test_course_delete_requires_post(self):
+        course = self.create_course()
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse("standalone:course_delete", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Course.objects.filter(pk=course.pk).exists())
+
+    def test_coding_question_ratio_defaults_to_zero(self):
+        course = self.create_course()
+
+        self.assertEqual(course.config.coding_question_ratio_percent, 0)
+
+    def test_question_coding_metadata_defaults_to_non_coding(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="What is membrane transport?",
+            correct_answer="Movement across membranes.",
+            distractors=["Unrelated option", "Another unrelated option", "A third unrelated option"],
+            question_hash="non-coding-defaults",
+        )
+
+        self.assertFalse(question.is_coding_question)
+        self.assertEqual(question.coding_language, "")
+        self.assertEqual(question.coding_question_kind, "")
+        self.assertEqual(question.code_snippet, "")
+
+    def test_teacher_can_upload_pdf_for_course_import(self):
+        course = self.create_course()
+        self.client.force_login(self.teacher)
+        upload = self.build_pdf_upload([["Chapter 1 Foundations", "Cells are the basic unit of life."]])
+
+        with patch("standalone.views._queue_course_import_analysis") as mock_queue:
+            response = self.client.post(reverse("standalone:course_import_upload", args=[course.pk]), {"source_file": upload})
+
+        self.assertEqual(response.status_code, 302)
+        course_import = CourseImport.objects.get(course=course)
+        self.assertEqual(course_import.original_filename, "book.pdf")
+        self.assertEqual(course_import.status, CourseImport.Status.UPLOADED)
+        mock_queue.assert_called_once_with(course_import.pk)
+
+    def test_course_import_upload_rejects_non_pdf(self):
+        course = self.create_course()
+        self.client.force_login(self.teacher)
+        upload = SimpleUploadedFile("notes.txt", b"Chapter 1", content_type="text/plain")
+
+        response = self.client.post(reverse("standalone:course_import_upload", args=[course.pk]), {"source_file": upload})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CourseImport.objects.count(), 0)
+        self.assertContains(response, "Please upload a PDF file.")
+
+    def test_teacher_can_review_and_submit_selected_import_chapters(self):
+        course = self.create_course()
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            status=CourseImport.Status.READY,
+            progress=100,
+        )
+        chapter_one = CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 1: Foundations",
+            order=1,
+            start_page=1,
+            end_page=2,
+            extracted_text="Cells are the basic unit of life.",
+        )
+        CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 2: Membranes",
+            order=2,
+            start_page=3,
+            end_page=4,
+            extracted_text="Membranes regulate transport.",
+        )
+        self.client.force_login(self.teacher)
+
+        get_response = self.client.get(reverse("standalone:course_import_review", args=[course_import.pk]))
+        self.assertContains(get_response, "Chapter 1: Foundations")
+
+        with patch("standalone.views._queue_course_import_block_creation") as mock_queue:
+            post_response = self.client.post(
+                reverse("standalone:course_import_review", args=[course_import.pk]),
+                {"selected_chapters": [str(chapter_one.pk)]},
+            )
+
+        self.assertEqual(post_response.status_code, 302)
+        mock_queue.assert_called_once_with(course_import.pk, [chapter_one.pk])
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_course_import_block_creation_creates_blocks_for_selected_chapters_only(self):
+        course = self.create_course()
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            status=CourseImport.Status.READY,
+            progress=100,
+        )
+        chapter_one = CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 1: Foundations",
+            order=1,
+            start_page=1,
+            end_page=2,
+            extracted_text="Cells are the basic unit of life. Cells contain organelles and membranes.",
+        )
+        chapter_two = CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 2: Membranes",
+            order=2,
+            start_page=3,
+            end_page=4,
+            extracted_text="Membranes regulate transport.",
+        )
+
+        run_course_import_block_creation(course_import.pk, [chapter_one.pk])
+
+        course_import.refresh_from_db()
+        chapter_one.refresh_from_db()
+        chapter_two.refresh_from_db()
+        self.assertEqual(course_import.status, CourseImport.Status.COMPLETED)
+        self.assertIsNotNone(chapter_one.created_block)
+        self.assertIsNone(chapter_two.created_block)
+        self.assertEqual(course.blocks.count(), 1)
+        block = course.blocks.get()
+        self.assertEqual(block.title, "Chapter 1: Foundations")
+        asset = block.assets.get()
+        self.assertEqual(asset.extension, ".txt")
+        self.assertEqual(asset.processing_status, ContentAsset.ProcessingStatus.PROCESSED)
+        self.assertIn("Cells contain organelles", asset.extracted_text)
+        course.refresh_from_db()
+        self.assertTrue(course.summary)
 
     def test_authenticated_user_visiting_login_redirects_to_dashboard(self):
         self.client.force_login(self.teacher)
@@ -314,10 +625,13 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, "Target MCQs")
         self.assertContains(response, "Enrolment routes")
         self.assertContains(response, "Course blocks")
+        self.assertContains(response, "Danger zone")
+        self.assertContains(response, "Delete course")
+        self.assertContains(response, 'action="%s"' % reverse("standalone:course_delete", args=[course.pk]), html=False)
         self.assertContains(response, "Self-enrol allowlist")
         self.assertContains(response, "Magic links")
         page_html = response.content.decode("utf-8")
-        self.assertEqual(page_html.count("course-section-head"), 2)
+        self.assertEqual(page_html.count("course-section-head"), 3)
         self.assertLess(page_html.find("Course blocks"), page_html.find("Enrolment routes"))
         self.assertContains(response, "Students can join from the self-enrol URL only when their exact email address is on this course", html=False)
         self.assertContains(response, "Magic links do not require an exact allowlist email.")
@@ -1468,6 +1782,149 @@ class StandaloneFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertTrue(course.question_bank_items.filter(bank_type=QuestionBankItem.BankType.PRACTICE).exists())
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_question_generation_rejects_textbook_meta_stems(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MAQ,
+                    "stem": "What is one of the main topics covered in the source text?",
+                    "correct_answers": ["Membrane transport", "Cell signalling"],
+                    "distractors": ["Unrelated astronomy", "Medieval history", "Poetry analysis"],
+                    "further_study_questions": [
+                        "Why does membrane transport matter?",
+                        "How would you explain cell signalling?",
+                        "What common mistake should I avoid with membranes?",
+                    ],
+                    "explanation": "The source text covers membrane transport and cell signalling.",
+                    "difficulty": "core",
+                }
+            )
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            practice, validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MAQ)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertNotIn("main topics covered", practice.stem.lower())
+        self.assertNotIn("source text", practice.stem.lower())
+        self.assertNotIn("textbook", practice.stem.lower())
+        self.assertNotIn("content covers", practice.explanation.lower())
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_coding_question_generation_can_use_existing_answer_types(self):
+        for index, question_type in enumerate((
+            QuestionBankItem.QuestionType.MCQ,
+            QuestionBankItem.QuestionType.MAQ,
+            QuestionBankItem.QuestionType.WAQ,
+        ), start=1):
+            with self.subTest(question_type):
+                course = Course.objects.create(teacher=self.teacher, title=f"Coding {index}", slug=f"coding-{index}", summary="Code.")
+                CourseConfig.objects.create(course=course)
+                course.config.coding_question_ratio_percent = 100
+                course.config.waq_ratio_percent = 0
+                course.config.maq_ratio_percent = 0
+                course.config.save(update_fields=["coding_question_ratio_percent", "waq_ratio_percent", "maq_ratio_percent", "updated_at"])
+                block, _asset, _objective, _chunk = self.create_coding_content_block(course)
+
+                practice, validation = generate_question_pair_for_block(block, question_type=question_type)
+
+                self.assertIsNotNone(practice)
+                self.assertIsNotNone(validation)
+                self.assertEqual(practice.question_type, question_type)
+                self.assertTrue(practice.is_coding_question)
+                self.assertEqual(practice.coding_language, "python")
+                self.assertIn("double", practice.code_snippet)
+                self.assertIn(practice.coding_question_kind, {"comprehension", "debug"})
+                self.assertEqual(validation.code_snippet, practice.code_snippet)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_coding_ratio_is_ignored_without_coding_chunks(self):
+        course = self.create_course()
+        course.config.coding_question_ratio_percent = 100
+        course.config.save(update_fields=["coding_question_ratio_percent", "updated_at"])
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+
+        practice, _validation = generate_question_pair_for_block(block)
+
+        self.assertIsNotNone(practice)
+        self.assertFalse(practice.is_coding_question)
+        self.assertEqual(practice.code_snippet, "")
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_bad_ai_coding_payload_falls_back_to_non_coding_question(self):
+        course = self.create_course()
+        course.config.coding_question_ratio_percent = 100
+        course.config.save(update_fields=["coding_question_ratio_percent", "updated_at"])
+        block, _asset, _objective, _chunk = self.create_coding_content_block(course)
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "What does this snippet do?",
+                    "correct_answers": ["It doubles the input."],
+                    "distractors": ["It reads a file.", "It opens a network connection.", "It deletes a value."],
+                    "further_study_questions": [
+                        "How does return affect the function?",
+                        "What would happen with a different input?",
+                        "Why does function naming matter?",
+                    ],
+                    "explanation": "The function doubles the input.",
+                    "difficulty": "core",
+                    "is_coding_question": True,
+                    "coding_language": "python",
+                    "coding_question_kind": "comprehension",
+                    "code_snippet": "",
+                }
+            )
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            practice, _validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MCQ)
+
+        self.assertIsNotNone(practice)
+        self.assertFalse(practice.is_coding_question)
+        self.assertEqual(practice.code_snippet, "")
+
+    def test_preview_payload_includes_coding_question_metadata(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_coding_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="What does this Python snippet return?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It returns twice the input value.",
+            distractors=["It reads from disk.", "It opens a socket.", "It mutates a global variable."],
+            explanation="The function multiplies the argument by two.",
+            question_hash="coding-preview-question",
+            is_coding_question=True,
+            coding_language="python",
+            coding_question_kind=QuestionBankItem.CodingQuestionKind.COMPREHENSION,
+            code_snippet="def double(value):\n    return value * 2",
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        question_payload = [message for message in block_payload["transcript"] if message["kind"] == "question"][-1]
+        self.assertEqual(question_payload["question_id"], question.pk)
+        self.assertTrue(question_payload["is_coding_question"])
+        self.assertEqual(question_payload["coding_language"], "python")
+        self.assertEqual(question_payload["coding_question_kind"], "comprehension")
+        self.assertIn("return value * 2", question_payload["code_snippet"])
 
     def test_generate_question_pair_creates_maq_when_course_is_below_target_ratio(self):
         course = self.create_course()
@@ -2977,7 +3434,7 @@ class StandaloneFlowTests(TestCase):
         block_payload = next(item for item in answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
         feedback_messages = [message for message in block_payload["transcript"] if message["kind"] == "feedback"]
         question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
-        self.assertEqual(feedback_messages[-1]["text"], "Correct. This follows directly from this block.")
+        self.assertEqual(feedback_messages[-1]["text"], "Correct. The correct answer reflects the key relationship being tested.")
         self.assertEqual(question_messages[-1]["submitted_text"], "Membranes regulate transport by controlling what enters and leaves the cell.")
         self.assertEqual(question_messages[-1]["alignment_state"], "aligned")
         self.assertFalse(question_messages[-1]["model_answer_revealed"])

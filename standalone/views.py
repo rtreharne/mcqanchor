@@ -25,6 +25,8 @@ from standalone.forms import (
     CourseBlockForm,
     CourseConfigForm,
     CourseForm,
+    CourseImportChapterSelectionForm,
+    CourseImportUploadForm,
     CourseTitleInlineForm,
     EmailOrUsernameAuthenticationForm,
     LearningObjectiveInlineForm,
@@ -45,6 +47,7 @@ from standalone.models import (
     CourseAllowedEmail,
     CourseBlock,
     CourseConfig,
+    CourseImport,
     CourseMagicLink,
     Enrollment,
     LearningObjective,
@@ -88,7 +91,15 @@ from standalone.services.student_practice import (
     submit_student_practice_answer,
 )
 from standalone.services.validation_pdf import build_validation_pack_pdf
-from standalone.tasks import process_content_asset_task, run_block_creation_processing, run_content_asset_processing
+from standalone.tasks import (
+    analyze_course_pdf_import_task,
+    create_blocks_from_course_import_task,
+    process_content_asset_task,
+    run_block_creation_processing,
+    run_content_asset_processing,
+    run_course_import_analysis,
+    run_course_import_block_creation,
+)
 
 
 def _is_teacher(user: User) -> bool:
@@ -148,6 +159,36 @@ def _queue_block_creation_processing(block_id: int) -> None:
         close_old_connections()
         try:
             run_block_creation_processing(block_id)
+        finally:
+            close_old_connections()
+
+    Thread(target=runner, daemon=True).start()
+
+
+def _queue_course_import_analysis(import_id: int) -> None:
+    if _celery_is_enabled():
+        analyze_course_pdf_import_task.delay(import_id)
+        return
+
+    def runner() -> None:
+        close_old_connections()
+        try:
+            run_course_import_analysis(import_id)
+        finally:
+            close_old_connections()
+
+    Thread(target=runner, daemon=True).start()
+
+
+def _queue_course_import_block_creation(import_id: int, selected_chapter_ids: list[int]) -> None:
+    if _celery_is_enabled():
+        create_blocks_from_course_import_task.delay(import_id, selected_chapter_ids)
+        return
+
+    def runner() -> None:
+        close_old_connections()
+        try:
+            run_course_import_block_creation(import_id, selected_chapter_ids)
         finally:
             close_old_connections()
 
@@ -352,7 +393,7 @@ def course_create(request: HttpRequest) -> HttpResponse:
         course.teacher = request.user if request.user.role == User.Role.TEACHER else request.user
         course.save()
         CourseConfig.objects.create(course=course)
-        messages.success(request, "Course created.")
+        messages.success(request, "Course created. You can add blocks manually or import a PDF textbook to detect chapters.")
         return redirect("standalone:course_detail", course.pk)
     return render(request, "standalone/form_page.html", {"title": "Create course", "form": form})
 
@@ -363,6 +404,24 @@ def course_detail(request: HttpRequest, course_id: int) -> HttpResponse:
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
     return render(request, "standalone/course_detail.html", _course_detail_context(course))
+
+
+@login_required
+def course_delete(request: HttpRequest, course_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    course_title = course.title
+
+    for asset in ContentAsset.objects.filter(block__course=course):
+        asset.file.delete(save=False)
+    for course_import in course.imports.all():
+        course_import.source_file.delete(save=False)
+
+    course.delete()
+    messages.success(request, f"Deleted course {course_title}.")
+    return redirect("standalone:teacher_dashboard")
+
 
 def _course_detail_context(course: Course):
     blocks = list(
@@ -396,6 +455,7 @@ def _course_detail_context(course: Course):
         "draft_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.DRAFT).count(),
         "approved_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.APPROVED).count(),
         "events": course.validation_events.all(),
+        "recent_imports": course.imports.order_by("-created_at")[:3],
         "allowed_emails": course.allowed_emails.all(),
         "self_enrol_enabled": course.config.self_enrol_enabled and settings.STANDALONE_ENABLE_SELF_ENROL,
         "self_enrol_url": reverse("standalone:self_enrol", args=[course.slug]),
@@ -869,6 +929,69 @@ def magic_enrol(request: HttpRequest, token) -> HttpResponse:
                 login(request, user)
                 return redirect("standalone:student_dashboard")
     return render(request, "standalone/form_page.html", {"title": f"Join {magic_link.course.title}", "form": form, "submit_label": "Join course"})
+
+
+@login_required
+def course_import_upload(request: HttpRequest, course_id: int) -> HttpResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    form = CourseImportUploadForm(request.POST or None, request.FILES or None)
+    if request.method == "POST" and form.is_valid():
+        course_import = form.save(course=course, uploaded_by=request.user)
+        _queue_course_import_analysis(course_import.pk)
+        messages.success(request, "PDF uploaded. Chapter detection is running in the background.")
+        return redirect("standalone:course_import_review", course_import.pk)
+    return render(
+        request,
+        "standalone/form_page.html",
+        {
+            "title": f"Import PDF textbook into {course.title}",
+            "form": form,
+            "has_upload_picker": True,
+            "submit_label": "Analyze PDF",
+            "submit_progress_label": "Uploading PDF...",
+            "cancel_url": reverse("standalone:course_detail", args=[course.pk]),
+        },
+    )
+
+
+@login_required
+def course_import_review(request: HttpRequest, import_id: int) -> HttpResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    course_import = get_object_or_404(CourseImport.objects.select_related("course", "uploaded_by"), pk=import_id)
+    course = _teacher_course_or_404(request.user, course_import.course_id)
+    chapters = list(course_import.chapters.order_by("order", "pk"))
+    initial = {
+        "selected_chapters": [
+            str(chapter.pk)
+            for chapter in chapters
+            if chapter.selected and chapter.created_block_id is None
+        ]
+    }
+    form = CourseImportChapterSelectionForm(request.POST or None, chapters=chapters, initial=initial)
+
+    if request.method == "POST":
+        if course_import.status != CourseImport.Status.READY:
+            messages.error(request, "This import is not ready for chapter selection yet.")
+            return redirect("standalone:course_import_review", course_import.pk)
+        if form.is_valid():
+            selected_chapter_ids = form.cleaned_data["selected_chapters"]
+            _queue_course_import_block_creation(course_import.pk, selected_chapter_ids)
+            messages.success(request, "Selected chapters are being converted into course blocks.")
+            return redirect("standalone:course_import_review", course_import.pk)
+
+    return render(
+        request,
+        "standalone/course_import_review.html",
+        {
+            "course": course,
+            "course_import": course_import,
+            "chapters": chapters,
+            "form": form,
+        },
+    )
 
 
 @login_required

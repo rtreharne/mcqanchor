@@ -12,6 +12,7 @@ from standalone.models import (
     CourseAllowedEmail,
     CourseBlock,
     CourseConfig,
+    CourseImport,
     CourseMagicLink,
     LearningObjective,
     StudentInvitation,
@@ -78,6 +79,60 @@ class CourseTitleInlineForm(forms.ModelForm):
         return title
 
 
+class CourseImportUploadForm(forms.ModelForm):
+    class Meta:
+        model = CourseImport
+        fields = ["source_file"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["source_file"].label = "PDF textbook"
+        self.fields["source_file"].help_text = "Upload one PDF. The system will detect chapters before creating any blocks."
+        self.fields["source_file"].widget.attrs.update(
+            {
+                "accept": ".pdf,application/pdf",
+                "class": "upload-native-input",
+                "data-upload-input": "true",
+            }
+        )
+
+    def clean_source_file(self):
+        uploaded_file = self.cleaned_data["source_file"]
+        filename = uploaded_file.name.lower()
+        content_type = getattr(uploaded_file, "content_type", "")
+        if not filename.endswith(".pdf") and content_type != "application/pdf":
+            raise forms.ValidationError("Please upload a PDF file.")
+        return uploaded_file
+
+    def save(self, course, uploaded_by, commit=True):
+        course_import = super().save(commit=False)
+        course_import.course = course
+        course_import.uploaded_by = uploaded_by
+        course_import.original_filename = self.cleaned_data["source_file"].name
+        if commit:
+            course_import.save()
+        return course_import
+
+
+class CourseImportChapterSelectionForm(forms.Form):
+    selected_chapters = forms.MultipleChoiceField(widget=forms.CheckboxSelectMultiple, required=True)
+
+    def __init__(self, *args, chapters=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.chapters = list(chapters or [])
+        self.fields["selected_chapters"].choices = [(str(chapter.pk), chapter.title) for chapter in self.chapters]
+
+    def clean_selected_chapters(self):
+        selected = self.cleaned_data["selected_chapters"]
+        if not selected:
+            raise forms.ValidationError("Select at least one chapter.")
+        valid_ids = {str(chapter.pk) for chapter in self.chapters}
+        invalid_ids = set(selected) - valid_ids
+        if invalid_ids:
+            raise forms.ValidationError("One or more selected chapters are not available for this import.")
+        return [int(chapter_id) for chapter_id in selected]
+
+
 class CourseConfigForm(forms.ModelForm):
     class Meta:
         model = CourseConfig
@@ -100,6 +155,10 @@ class CourseConfigForm(forms.ModelForm):
         self.fields["waq_ratio_percent"].label = "Written-answer question ratio (%)"
         self.fields["waq_ratio_percent"].help_text = (
             "Target percentage of newly generated questions that should use typed written answers."
+        )
+        self.fields["coding_question_ratio_percent"].label = "Coding question ratio (%)"
+        self.fields["coding_question_ratio_percent"].help_text = (
+            "Target percentage of newly generated questions that should use coding comprehension or debugging snippets when coding content is detected."
         )
         self.fields["advanced_question_start_percent"].label = "Start MAQ/WAQ after target progress (%)"
         self.fields["advanced_question_start_percent"].help_text = (

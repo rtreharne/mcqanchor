@@ -14,6 +14,7 @@ urlpatterns = [
     path("teacher/activate/<uuid:token>/", views.teacher_activate, name="teacher_activate"),
     path("teacher/courses/new/", views.course_create, name="course_create"),
     path("teacher/courses/<int:course_id>/", views.course_detail, name="course_detail"),
+    path("teacher/courses/<int:course_id>/delete/", views.course_delete, name="course_delete"),
     path("teacher/courses/<int:course_id>/student-preview/", views.student_preview, name="student_preview"),
     path(
         "teacher/courses/<int:course_id>/student-preview/blocks/<int:block_id>/<str:action>/",
@@ -26,6 +27,8 @@ urlpatterns = [
     path("teacher/courses/<int:course_id>/allowed-emails/new/", views.add_allowed_email, name="allowed_email_add"),
     path("teacher/courses/<int:course_id>/invite-student/", views.student_invite_create, name="student_invite"),
     path("teacher/courses/<int:course_id>/magic-link/", views.magic_link_create, name="magic_link_create"),
+    path("teacher/courses/<int:course_id>/import-pdf/", views.course_import_upload, name="course_import_upload"),
+    path("teacher/course-imports/<int:import_id>/", views.course_import_review, name="course_import_review"),
     path("teacher/courses/<int:course_id>/blocks/new/", views.block_create, name="block_create"),
     path("teacher/courses/<int:course_id>/generate-bank/", views.generate_course_bank, name="generate_course_bank"),
     path("teacher/courses/<int:course_id>/approve-questions/", views.approve_course_questions, name="approve_course_questions"),

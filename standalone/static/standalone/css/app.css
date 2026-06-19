@@ -1187,6 +1187,8 @@ button.button[disabled] {
 
 .dashboard-course-section,
 .course-blocks-section,
+.course-import-status-panel,
+.course-danger-panel,
 .student-access-panel {
   display: grid;
   gap: 0.85rem;
@@ -1270,6 +1272,123 @@ button.button[disabled] {
   line-height: 1.5;
 }
 
+.course-danger-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid rgba(132, 38, 38, 0.18);
+  border-radius: 0.5rem;
+  background: rgba(255, 240, 240, 0.88);
+}
+
+.course-danger-card h3,
+.course-danger-card p {
+  margin: 0;
+}
+
+.course-danger-card h3 {
+  color: #842626;
+}
+
+.course-danger-card p {
+  margin-top: 0.28rem;
+  color: #6f3a3a;
+  line-height: 1.45;
+}
+
+.preview-question-code-snippet {
+  display: grid;
+  gap: 0.42rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.preview-question-code-label {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 1.55rem;
+  padding: 0.16rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(46, 190, 169, 0.15);
+  color: #0f6b5d;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.preview-message-code-block {
+  margin: 0;
+  padding: 0.82rem 0.9rem;
+  overflow-x: auto;
+  border-radius: 1rem;
+  background: rgba(10, 28, 52, 0.95);
+  border: 1px solid rgba(146, 190, 255, 0.16);
+}
+
+.preview-message-code {
+  display: block;
+  color: #dff6ff;
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.course-import-status-list,
+.course-import-chapter-list {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.course-import-status-row,
+.course-import-chapter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid rgba(23, 48, 82, 0.1);
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.92);
+  color: inherit;
+  text-decoration: none;
+}
+
+.course-import-status-row > span,
+.course-import-chapter-main {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.course-import-status-row strong,
+.course-import-chapter-main strong {
+  overflow-wrap: anywhere;
+}
+
+.course-import-status-row small,
+.course-import-chapter-main small {
+  color: var(--muted);
+}
+
+.course-import-review {
+  display: grid;
+  gap: 1rem;
+}
+
+.course-import-chapter-form {
+  gap: 0.8rem;
+}
+
+.course-import-chapter-row input {
+  width: auto;
+  flex: 0 0 auto;
+}
+
 .course-card-status,
 .block-chip,
 .subsection-count > span:first-child {
@@ -1288,12 +1407,16 @@ button.button[disabled] {
 }
 
 .course-card-status.is-active,
+.status-chip.is-ready,
 .status-chip.is-completed {
   border-color: rgba(13, 138, 100, 0.18);
   background: rgba(233, 251, 246, 0.96);
   color: #0d7154;
 }
 
+.status-chip.is-uploaded,
+.status-chip.is-analyzing,
+.status-chip.is-creating,
 .status-chip.is-queued,
 .status-chip.is-running {
   border-color: rgba(179, 119, 26, 0.2);

@@ -41,9 +41,31 @@
     <div class="workspace-actions course-primary-actions">
       <a class="button" href="{% url 'standalone:student_preview' course.pk %}">Student preview</a>
       <a class="button secondary" href="{% url 'standalone:block_create' course.pk %}">Add block</a>
+      <a class="button secondary" href="{% url 'standalone:course_import_upload' course.pk %}">Import PDF textbook</a>
       <a class="button secondary" href="{% url 'standalone:course_config' course.pk %}">Settings</a>
     </div>
   </div>
+
+  {% if recent_imports %}
+    <section class="course-import-status-panel" aria-labelledby="course-imports-heading">
+      <div class="section-head compact course-section-head">
+        <div>
+          <h2 id="course-imports-heading">PDF imports</h2>
+        </div>
+      </div>
+      <div class="course-import-status-list">
+        {% for import in recent_imports %}
+          <a class="course-import-status-row" href="{% url 'standalone:course_import_review' import.pk %}">
+            <span>
+              <strong>{{ import.original_filename }}</strong>
+              <small>{{ import.created_at|date:"j M Y H:i" }}</small>
+            </span>
+            <span class="block-chip status-chip is-{{ import.status }}">{{ import.get_status_display }}{% if import.status == 'analyzing' or import.status == 'creating' %} {{ import.progress }}%{% endif %}</span>
+          </a>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
 
   <section class="course-blocks-section" aria-labelledby="course-blocks-heading">
     <div class="section-head compact course-section-head course-blocks-head">
@@ -339,7 +361,10 @@
         <div class="empty-state">
           <h2>Add your first block</h2>
           <p>Blocks hold the source files, descriptions, and learning objectives used to generate practice.</p>
-          <a class="button" href="{% url 'standalone:block_create' course.pk %}">Add block</a>
+          <div class="action-row">
+            <a class="button" href="{% url 'standalone:block_create' course.pk %}">Add block</a>
+            <a class="button secondary" href="{% url 'standalone:course_import_upload' course.pk %}">Import PDF textbook</a>
+          </div>
         </div>
       {% endfor %}
     </div>
@@ -380,6 +405,28 @@
           <a class="button secondary" href="{% url 'standalone:magic_link_create' course.pk %}">Create magic link</a>
         </div>
       </article>
+    </div>
+  </section>
+
+  <section class="course-danger-panel" aria-labelledby="course-danger-heading">
+    <div class="section-head compact course-section-head">
+      <div>
+        <h2 id="course-danger-heading">Danger zone</h2>
+      </div>
+    </div>
+    <div class="course-danger-card">
+      <div>
+        <h3>Delete course</h3>
+        <p>Deletes this course, blocks, uploads, learning objectives, generated questions, enrolments, invitations, validation events, and PDF imports.</p>
+      </div>
+      <form
+        method="post"
+        action="{% url 'standalone:course_delete' course.pk %}"
+        onsubmit="return window.confirm('Delete this course permanently? This will remove all blocks, uploads, learning objectives, generated questions, enrolments, invitations, validation events, and PDF imports.');"
+      >
+        {% csrf_token %}
+        <button class="button warning" type="submit">Delete course</button>
+      </form>
     </div>
   </section>
 </section>

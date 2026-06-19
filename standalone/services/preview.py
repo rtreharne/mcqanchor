@@ -165,6 +165,10 @@ def _question_prompt_message(course_state: dict, block: CourseBlock, question: Q
         block_label=block.title,
         learning_objective=(question.learning_objective.text if question.learning_objective else "General course understanding"),
         further_study_questions=further_study_questions_for_question(question),
+        is_coding_question=question.is_coding_question,
+        coding_language=question.coding_language,
+        coding_question_kind=question.coding_question_kind,
+        code_snippet=question.code_snippet,
         answered=False,
         flagged=False,
     )
@@ -1297,6 +1301,10 @@ def _serialized_transcript(course_state: dict, transcript: list[dict]) -> list[d
             question = questions_by_id.get(int(message_payload.get("question_id") or 0))
             if question is not None:
                 message_payload.setdefault("further_study_questions", further_study_questions_for_question(question))
+                message_payload.setdefault("is_coding_question", question.is_coding_question)
+                message_payload.setdefault("coding_language", question.coding_language)
+                message_payload.setdefault("coding_question_kind", question.coding_question_kind)
+                message_payload.setdefault("code_snippet", question.code_snippet)
         if message_payload.get("kind") == "question" and message_payload.get("question_type") == QuestionBankItem.QuestionType.WAQ:
             if not message_payload.get("answered"):
                 draft = _written_answer_draft(course_state, int(message_payload["question_id"]))

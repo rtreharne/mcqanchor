@@ -976,6 +976,31 @@ if (previewRoot && previewDataNode) {
     }
   }
 
+  function appendQuestionCodeSnippet(container, message) {
+    if (!container || !message?.is_coding_question || !message.code_snippet) {
+      return;
+    }
+    const wrapper = document.createElement("div");
+    wrapper.className = "preview-question-code-snippet";
+    const label = document.createElement("span");
+    label.className = "preview-question-code-label";
+    const kind = message.coding_question_kind === "debug" ? "Debug" : "Code";
+    const language = String(message.coding_language || "").trim();
+    label.textContent = language ? `${kind} · ${language}` : kind;
+    const pre = document.createElement("pre");
+    pre.className = "preview-message-code-block preview-question-code-block";
+    if (language) {
+      pre.dataset.language = language;
+    }
+    const code = document.createElement("code");
+    code.className = "preview-message-code";
+    code.textContent = String(message.code_snippet || "").replace(/^\n+|\n+$/g, "");
+    pre.appendChild(code);
+    wrapper.appendChild(label);
+    wrapper.appendChild(pre);
+    container.appendChild(wrapper);
+  }
+
   function appendFurtherStudyAction(actions, message) {
     if (
       !actions
@@ -1081,6 +1106,7 @@ if (previewRoot && previewDataNode) {
       } else {
         article.innerHTML = `<p>${message.text}</p>`;
       }
+      appendQuestionCodeSnippet(article, message);
 
       if (message.question_type === "waq" && !message.answered && !message.flagged) {
         const helper = document.createElement("p");

@@ -5,6 +5,12 @@
   <p class="lead">Question {{ question_number }}</p>
   <article class="card">
     <h2>{{ question.stem }}</h2>
+    {% if question.is_coding_question and question.code_snippet %}
+      <div class="preview-question-code-snippet">
+        <span class="preview-question-code-label">{% if question.coding_question_kind == "debug" %}Debug{% else %}Code{% endif %}{% if question.coding_language %} · {{ question.coding_language }}{% endif %}</span>
+        <pre class="preview-message-code-block preview-question-code-block"><code class="preview-message-code">{{ question.code_snippet }}</code></pre>
+      </div>
+    {% endif %}
     {% if question.learning_objective %}<p><strong>Learning objective:</strong> {{ question.learning_objective.text }}</p>{% endif %}
     <form method="post" class="stack-form">
       {% csrf_token %}
@@ -20,4 +26,3 @@
   </article>
 </section>
 {% endblock %}
-
