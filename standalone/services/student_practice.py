@@ -2,6 +2,7 @@ import re
 from types import SimpleNamespace
 
 from django.db import transaction
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -13,6 +14,9 @@ from standalone.models import (
     PracticeMessage,
     QuestionBankItem,
     QuestionFlag,
+    ValidationAttempt,
+    ValidationBooking,
+    ValidationEvent,
 )
 from standalone.services.metrics import refresh_enrollment_metrics
 from standalone.services.preview import (
@@ -244,12 +248,133 @@ def _sync_state_to_enrollment(enrollment: Enrollment, course_state: dict, *, ref
             refresh_enrollment_metrics(enrollment)
 
 
+def student_validation_cta(enrollment: Enrollment) -> dict | None:
+    now = timezone.now()
+    events = list(
+        ValidationEvent.objects.filter(course=enrollment.course, mode=ValidationEvent.Mode.DIGITAL_INVIGILATION)
+        .order_by("starts_at", "created_at")
+    )
+    if not events:
+        return None
+
+    attempts_by_event_id = {
+        attempt.event_id: attempt
+        for attempt in ValidationAttempt.objects.filter(enrollment=enrollment).select_related("event")
+    }
+    bookings_by_event_id = {
+        booking.event_id: booking
+        for booking in ValidationBooking.objects.filter(enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+    }
+
+    for event in events:
+        booking = bookings_by_event_id.get(event.pk)
+        attempt = attempts_by_event_id.get(event.pk)
+        if booking is None:
+            continue
+        if attempt is not None:
+            return {
+                "label": "Open validation",
+                "url": reverse("standalone:validation_attempt", args=[attempt.pk]),
+                "event_title": "validation session",
+                "status": "attempt",
+                "starts_at": event.starts_at.isoformat(),
+            }
+        if event.starts_at <= now:
+            return {
+                "label": "Open validation",
+                "url": reverse("standalone:validation_start", args=[event.pk]),
+                "event_title": "validation session",
+                "status": "booked",
+                "starts_at": event.starts_at.isoformat(),
+            }
+        return {
+            "label": "View booking",
+            "url": reverse("standalone:student_dashboard"),
+            "event_title": "validation session",
+            "status": "booked",
+            "starts_at": event.starts_at.isoformat(),
+        }
+
+    for event in events:
+        if event.booking_is_open(now):
+            return {
+                "label": "Book validation",
+                "url": reverse("standalone:validation_book", args=[event.pk]),
+                "event_title": "validation session",
+                "status": "bookable",
+                "starts_at": event.starts_at.isoformat(),
+            }
+
+    event = events[0]
+    return {
+        "label": "View validation",
+        "url": reverse("standalone:student_dashboard"),
+        "event_title": "validation session",
+        "status": "scheduled",
+        "starts_at": event.starts_at.isoformat(),
+    }
+
+
+def _inject_validation_reminders(payload: dict, enrollment: Enrollment) -> dict:
+    cta = student_validation_cta(enrollment)
+    if cta is None:
+        return payload
+
+    completed_count = int(payload.get("course", {}).get("metrics", {}).get("completed_count") or 0)
+    reminder_index = completed_count // 10
+    starts_at = _aware_datetime(cta.get("starts_at"))
+    starts_label = starts_at.strftime("%d %b %Y, %H:%M") if starts_at else ""
+    reminder_messages = []
+    for index in range(reminder_index + 1):
+        threshold_count = index * 10
+        if index == 0:
+            if cta["status"] == "booked":
+                reminder_text = (
+                    f"A digital validation has been scheduled for this course. "
+                    f"Your session is {cta.get('event_title', 'upcoming')} on {starts_label}."
+                )
+            else:
+                reminder_text = (
+                    f"A digital validation has been created for this course. "
+                    f"{cta.get('event_title', 'This validation')} is ready when you are."
+                )
+        else:
+            if cta["status"] == "booked":
+                reminder_text = (
+                    f"You've completed {threshold_count} practice questions. "
+                    f"Your digital validation is booked{f' for {starts_label}' if starts_label else ''}."
+                )
+            else:
+                reminder_text = (
+                    f"You've completed {threshold_count} practice questions. "
+                    "Remember to book your digital validation."
+                )
+
+        reminder_messages.append(
+            {
+                "id": f"validation-reminder-{index}-{cta['status']}",
+                "role": "assistant",
+                "kind": "validation_reminder",
+                "text": reminder_text,
+                "cta_label": cta["label"],
+                "cta_url": cta["url"],
+                "event_title": cta.get("event_title", ""),
+            }
+        )
+    for block in payload.get("blocks", []):
+        transcript = list(block.get("transcript") or [])
+        transcript = [message for message in transcript if str(message.get("kind")) != "validation_reminder"]
+        transcript.extend(reminder_messages)
+        block["transcript"] = transcript
+    return payload
+
+
 def serialize_student_practice_state(enrollment: Enrollment, *, active_block_id=None) -> dict:
     course_state = _student_course_state(enrollment)
     request = _fake_request(enrollment.course, course_state)
     payload = serialize_preview_state(request, enrollment.course, active_block_id=active_block_id)
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course), refresh_metrics=False)
-    return payload
+    return _inject_validation_reminders(payload, enrollment)
 
 
 def request_student_practice_quiz(enrollment: Enrollment, block, requested_question_type: str | None = None) -> dict:
@@ -257,7 +382,7 @@ def request_student_practice_quiz(enrollment: Enrollment, block, requested_quest
     request = _fake_request(enrollment.course, course_state)
     payload = request_preview_quiz(request, enrollment.course, block, requested_question_type=requested_question_type)
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course), refresh_metrics=False)
-    return payload
+    return _inject_validation_reminders(payload, enrollment)
 
 
 def draft_student_practice_written_answer(enrollment: Enrollment, block, question_id: int, answer_text: str) -> dict:
@@ -278,7 +403,7 @@ def submit_student_practice_answer(enrollment: Enrollment, block, question_id: i
         answer_text=answer_text,
     )
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course))
-    return payload
+    return _inject_validation_reminders(payload, enrollment)
 
 
 def send_student_practice_chat_message(enrollment: Enrollment, block, question: str) -> dict:
@@ -286,7 +411,7 @@ def send_student_practice_chat_message(enrollment: Enrollment, block, question: 
     request = _fake_request(enrollment.course, course_state)
     payload = send_preview_chat_message(request, enrollment.course, block, question)
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course), refresh_metrics=False)
-    return payload
+    return _inject_validation_reminders(payload, enrollment)
 
 
 def flag_student_practice_question(enrollment: Enrollment, block, question_id: int) -> dict:
@@ -294,4 +419,4 @@ def flag_student_practice_question(enrollment: Enrollment, block, question_id: i
     request = _fake_request(enrollment.course, course_state)
     payload = flag_preview_question(request, enrollment.course, block, question_id)
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course), refresh_metrics=False)
-    return payload
+    return _inject_validation_reminders(payload, enrollment)

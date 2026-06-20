@@ -8,6 +8,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 from standalone.models import ValidationBooking, ValidationPack, ValidationSubmission
+from standalone.services.validation_flow import get_or_create_official_attempt
 
 
 def build_validation_pack_pdf(pack: ValidationPack, bookings: list[ValidationBooking]) -> bytes:
@@ -16,7 +17,11 @@ def build_validation_pack_pdf(pack: ValidationPack, bookings: list[ValidationBoo
     width, height = A4
 
     for booking in bookings:
-        submission, _ = ValidationSubmission.objects.get_or_create(booking=booking)
+        attempt = get_or_create_official_attempt(booking.enrollment, booking.event, booking=booking)
+        submission, _ = ValidationSubmission.objects.get_or_create(booking=booking, defaults={"attempt": attempt})
+        if submission.attempt_id != attempt.pk:
+            submission.attempt = attempt
+            submission.save(update_fields=["attempt", "updated_at"])
         qr_image = qrcode.make(str(submission.qr_token))
         qr_buffer = BytesIO()
         qr_image.save(qr_buffer, format="PNG")
@@ -36,12 +41,12 @@ def build_validation_pack_pdf(pack: ValidationPack, bookings: list[ValidationBoo
         pdf.drawString(20 * mm, height - 72 * mm, "Validation questions")
         pdf.setFont("Helvetica", 11)
         y_position = height - 82 * mm
-        questions = booking.event.course.question_bank_items.filter(
-            bank_type="validation",
-            status="approved",
-            block__available_from__lte=timezone.localdate(),
-        )[: pack.event.question_count]
-        for index, question in enumerate(questions, start=1):
+        questions = (
+            attempt.attempt_questions.select_related("question")
+            .order_by("order", "created_at")
+        )
+        for index, attempt_question in enumerate(questions, start=1):
+            question = attempt_question.question
             pdf.drawString(20 * mm, y_position, f"{index}. {question.stem[:85]}")
             y_position -= 9 * mm
             if y_position < 55 * mm:

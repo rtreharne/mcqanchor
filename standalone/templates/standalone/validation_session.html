@@ -1,0 +1,100 @@
+{% extends "standalone/base.html" %}
+{% load static %}
+{% block title %}Validation | {{ course.title }}{% endblock %}
+{% block extra_head %}
+  <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}">
+{% endblock %}
+{% block app_nav_links %}
+  <a href="{{ session_exit_url }}">Exit validation</a>
+{% endblock %}
+{% block app_nav_menu_actions %}
+  <a class="button secondary app-nav-menu-action" href="{{ session_exit_url }}">Exit validation</a>
+{% endblock %}
+{% block app_shell_class %} preview-app-shell{% endblock %}
+{% block app_footer %}{% endblock %}
+{% block content %}
+<section
+  class="preview-page validation-page"
+  data-validation-session
+  data-action-url-template="{{ session_action_url }}"
+>
+  <section class="preview-chat-shell validation-chat-shell">
+    <div class="preview-chat-header validation-chat-header">
+      <div class="preview-chat-header-main">
+        <p class="preview-eyebrow">
+          {% if session_state.mode == 'validation_practice' %}
+            Practice validation
+          {% else %}
+            Digital invigilation
+          {% endif %}
+        </p>
+        <h2>{{ session_state.title }}</h2>
+        <p class="validation-chat-subtitle">{{ course.title }}</p>
+      </div>
+      <div class="validation-chat-meta">
+        <div class="validation-meta-pill">
+          <span>Progress</span>
+          <strong data-validation-progress-label></strong>
+        </div>
+        <div class="validation-meta-pill validation-meta-pill--timer">
+          <span>Time left</span>
+          <strong data-validation-timer></strong>
+        </div>
+      </div>
+    </div>
+    {% if session_state.mode != 'validation_practice' %}
+      <section class="validation-instructions-panel">
+        <p class="preview-sidebar-section-label">Validation instructions</p>
+        {% if session_state.selected_blocks %}
+          <p class="validation-instructions-copy"><strong>Released course blocks:</strong> {{ session_state.selected_blocks|join:", " }}</p>
+        {% endif %}
+        <ul class="preview-message-list validation-instructions-list">
+          <li class="preview-message-list-item">You must attend the validation centre to participate.</li>
+          <li class="preview-message-list-item">You must not use multiple devices.</li>
+          <li class="preview-message-list-item">Validation is closed book.</li>
+          <li class="preview-message-list-item">Do not navigate away from this validation. Leaving for more than {{ session_state.navigation_grace_seconds }} seconds will void it.</li>
+          <li class="preview-message-list-item">You may not copy any validation questions.</li>
+          <li class="preview-message-list-item">You may not paste into written responses.</li>
+        </ul>
+      </section>
+    {% endif %}
+    <div class="validation-room-code" hidden data-validation-room-code>
+      <span class="validation-room-code-label">Room display code</span>
+      <strong data-validation-room-code-value></strong>
+      <small data-validation-room-code-countdown></small>
+    </div>
+    <div class="preview-chat-transcript validation-chat-transcript" aria-live="polite" aria-label="Validation transcript"></div>
+    <form class="preview-chat-form validation-chat-form">
+      <p class="preview-chat-status" role="status" aria-live="polite"></p>
+      <div class="preview-waq-alignment" hidden data-waq-alignment>
+        <div class="preview-waq-alignment-head">
+          <span>Answer alignment</span>
+          <div class="preview-waq-alignment-meta">
+            <span class="preview-waq-alignment-loader" hidden data-waq-alignment-loader>
+              <span class="preview-waq-alignment-loader-dots" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </span>
+              Checking...
+            </span>
+            <strong data-waq-alignment-label>Start typing</strong>
+          </div>
+        </div>
+        <div class="preview-waq-alignment-track" aria-hidden="true">
+          <span data-waq-alignment-fill></span>
+        </div>
+      </div>
+      <label class="preview-sr-only" for="validation-chat-input">Validation answer</label>
+      <div class="preview-chat-composer validation-chat-composer">
+        <textarea id="validation-chat-input" rows="1" maxlength="500" placeholder="Write your answer..."></textarea>
+        <button class="button" type="submit" data-validation-submit>Submit</button>
+      </div>
+    </form>
+  </section>
+</section>
+{{ session_state|json_script:"validation-session-data" }}
+{% endblock %}
+{% block extra_body %}
+  <script src="{% static 'standalone/js/validation-session.js' %}"></script>
+{% endblock %}

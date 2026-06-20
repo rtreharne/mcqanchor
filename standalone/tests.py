@@ -12,6 +12,7 @@ from django.urls import reverse
 from django.utils import timezone
 from unittest.mock import patch
 
+from standalone.forms import CourseForm, ValidationEventForm
 from standalone.models import (
     BlockConfig,
     ContentAsset,
@@ -33,13 +34,18 @@ from standalone.models import (
     QuestionFlag,
     StudentInvitation,
     TeacherInvitation,
+    ValidationAttempt,
+    ValidationAttemptQuestion,
+    ValidationBooking,
     ValidationEvent,
 )
 from standalone.tasks import run_block_creation_processing, run_block_regeneration, run_course_import_block_creation
 from standalone.services.content import chunk_text, summarize_block_content
-from standalone.services.pdf_import import analyze_pdf_chapters
+from standalone.services.pdf_import import analyze_pdf_chapters, _select_outline_items
 from standalone.services.preview import PREVIEW_SESSION_KEY
+from standalone.services.validation_flow import _pick_locked_questions, current_room_code
 from standalone.services.questions import (
+    _normalize_generated_payload,
     coding_signal_for_text,
     fallback_further_study_questions,
     further_study_questions_for_question,
@@ -256,6 +262,141 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(chapters[0].start_page, 1)
         self.assertEqual(chapters[0].end_page, 1)
 
+    def test_course_form_auto_generates_slug_and_defaults(self):
+        form = CourseForm(data={"title": "  Cell Biology 101  "})
+
+        self.assertTrue(form.is_valid(), form.errors)
+        course = form.save(commit=False)
+
+        self.assertEqual(course.title, "Cell Biology 101")
+        self.assertEqual(course.slug, "cell-biology-101")
+        self.assertEqual(course.summary, "")
+        self.assertTrue(course.is_active)
+
+    def test_course_form_generates_unique_slug(self):
+        Course.objects.create(
+            teacher=self.teacher,
+            title="Cell Biology 101",
+            slug="cell-biology-101",
+            summary="Existing summary",
+            is_active=False,
+        )
+        form = CourseForm(data={"title": "Cell Biology 101"})
+
+        self.assertTrue(form.is_valid(), form.errors)
+        course = form.save(commit=False)
+
+        self.assertEqual(course.slug, "cell-biology-101-2")
+        self.assertEqual(course.summary, "")
+        self.assertTrue(course.is_active)
+
+    def test_validation_event_form_requires_minimum_fifty_minute_session(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        starts_at = timezone.now() + timedelta(days=1)
+        ends_at = starts_at + timedelta(minutes=49)
+
+        form = ValidationEventForm(
+            data={
+                "title": "Too short validation",
+                "starts_at": starts_at.strftime("%Y-%m-%dT%H:%M"),
+                "ends_at": ends_at.strftime("%Y-%m-%dT%H:%M"),
+                "location": "Validation Centre",
+                "capacity": 30,
+                "late_booking_cutoff_minutes": 20,
+                "question_count": 10,
+                "time_limit_minutes": 20,
+                "audit_prompt_count": 2,
+                "feedback_release_mode": ValidationEvent.FeedbackReleaseMode.IMMEDIATE,
+            },
+            course=course,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("at least 50 minutes", form.non_field_errors()[0])
+
+    def test_validation_event_form_hides_title_and_generates_internal_session_title(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        starts_at = timezone.now() + timedelta(days=1)
+        ends_at = starts_at + timedelta(hours=1)
+
+        form = ValidationEventForm(
+            data={
+                "starts_at": starts_at.strftime("%Y-%m-%dT%H:%M"),
+                "ends_at": ends_at.strftime("%Y-%m-%dT%H:%M"),
+                "location": "Validation Centre",
+                "capacity": 30,
+                "late_booking_cutoff_minutes": 20,
+                "question_count": 10,
+                "time_limit_minutes": 20,
+                "audit_prompt_count": 2,
+                "feedback_release_mode": ValidationEvent.FeedbackReleaseMode.IMMEDIATE,
+            },
+            course=course,
+        )
+
+        self.assertNotIn("title", form.fields)
+        self.assertTrue(form.is_valid(), form.errors)
+        event = form.save(commit=False)
+        self.assertTrue(event.title.startswith("Validation session "))
+
+    def test_coding_question_payload_removes_fenced_code_from_stem(self):
+        payload = _normalize_generated_payload(
+            {
+                "question_type": "mcq",
+                "stem": 'Consider this R snippet: ```r\nlibrary(tibble)\ndf <- data.frame(x = 1:5)\n``` What does it print?',
+                "correct_answers": ["A tibble-style print output."],
+                "distractors": ["It opens a file.", "It performs a network call.", "It deletes a column."],
+                "further_study_questions": ["Why does tibble printing differ?"],
+                "explanation": "Tibbles print differently.",
+                "difficulty": "core",
+                "is_coding_question": True,
+                "coding_language": "r",
+                "coding_question_kind": "comprehension",
+                "code_snippet": "library(tibble)\ndf <- data.frame(x = 1:5)",
+            },
+            QuestionBankItem.QuestionType.MCQ,
+            distractor_count=3,
+        )
+
+        self.assertNotIn("```", payload["stem"])
+        self.assertEqual(payload["stem"], "Consider this R snippet: What does it print?")
+
+    def test_pdf_import_outline_selection_prefers_chapter_depth_below_part_headings(self):
+        items = _select_outline_items(
+            [
+                ("Preface", 8, 0),
+                ("Acknowledgements", 10, 0),
+                ("Core Curriculum", 11, 0),
+                ("Electives", 168, 0),
+                ("References", 379, 0),
+                ("Appendices", 380, 0),
+                ("Basics", 12, 1),
+                ("Tibbles", 18, 1),
+                ("Data Manipulation with dplyr", 28, 1),
+                ("Data Visualization with ggplot2", 72, 1),
+                ("Refresher: Tidy Exploratory Data Analysis", 114, 1),
+                ("Reproducible Reporting with RMarkdown", 156, 1),
+                ("RStudio", 12, 2),
+                ("Basic operations", 13, 2),
+                ("Functions", 15, 2),
+                ("Tibbles (data frames)", 17, 2),
+            ]
+        )
+
+        self.assertEqual(
+            [title for title, _page_number, _depth in items],
+            [
+                "Basics",
+                "Tibbles",
+                "Data Manipulation with dplyr",
+                "Data Visualization with ggplot2",
+                "Refresher: Tidy Exploratory Data Analysis",
+                "Reproducible Reporting with RMarkdown",
+            ],
+        )
+
     def test_coding_signal_detects_common_languages(self):
         cases = [
             ("python", "```python\ndef total(values):\n    return sum(values)\n```", ".txt"),
@@ -337,6 +478,30 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(course.config.coding_question_ratio_percent, 50)
         self.assertEqual(course.config.advanced_question_start_percent, 40)
 
+    def test_course_config_field_autosave_updates_and_normalises_values(self):
+        course = self.create_course()
+        self.client.force_login(self.teacher)
+
+        domain_response = self.client.post(
+            reverse("standalone:update_course_config_field", args=[course.pk, "self_enrol_domain"]),
+            {"self_enrol_domain": "@Example.AC.UK"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(domain_response.status_code, 200)
+        course.config.refresh_from_db()
+        self.assertEqual(course.config.self_enrol_domain, "example.ac.uk")
+
+        checkbox_response = self.client.post(
+            reverse("standalone:update_course_config_field", args=[course.pk, "show_validation_feedback_immediately"]),
+            {},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(checkbox_response.status_code, 200)
+        course.config.refresh_from_db()
+        self.assertFalse(course.config.show_validation_feedback_immediately)
+
     def test_teacher_can_delete_course_from_detail_page(self):
         course = self.create_course()
         block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
@@ -366,6 +531,168 @@ class StandaloneFlowTests(TestCase):
         self.assertFalse(Course.objects.filter(pk=course.pk).exists())
         self.assertFalse(asset.file.storage.exists(asset_name))
         self.assertFalse(course_import.source_file.storage.exists(import_name))
+
+    def test_teacher_can_delete_validation_event_from_course_detail(self):
+        course = self.create_course()
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Delete me",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=1),
+            ends_at=timezone.now() + timedelta(days=1, hours=2),
+            location="Centre",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(days=1, hours=1, minutes=40),
+            late_booking_cutoff_minutes=20,
+            question_count=10,
+            time_limit_minutes=20,
+        )
+        self.client.force_login(self.teacher)
+
+        detail_response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
+        self.assertContains(detail_response, reverse("standalone:validation_event_delete", args=[event.pk]), html=False)
+
+        delete_response = self.client.post(reverse("standalone:validation_event_delete", args=[event.pk]))
+
+        self.assertEqual(delete_response.status_code, 302)
+        self.assertEqual(delete_response.url, reverse("standalone:course_detail", args=[course.pk]))
+        self.assertFalse(ValidationEvent.objects.filter(pk=event.pk).exists())
+
+    def test_teacher_dashboard_shows_validation_event_delete_action(self):
+        course = self.create_course()
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Dashboard delete me",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=1),
+            ends_at=timezone.now() + timedelta(days=1, hours=2),
+            location="Centre",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(days=1, hours=1, minutes=40),
+            late_booking_cutoff_minutes=20,
+            question_count=10,
+            time_limit_minutes=20,
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse("standalone:teacher_dashboard"))
+
+        self.assertContains(response, "Validation sessions")
+        self.assertContains(response, "Dashboard delete me")
+        self.assertContains(response, reverse("standalone:validation_event_delete", args=[event.pk]), html=False)
+
+    def test_teacher_cannot_delete_another_teachers_validation_event(self):
+        other_teacher = User.objects.create_user(
+            username="otherteacher-validation",
+            email="otherteacher-validation@example.com",
+            password="password123",
+            role=User.Role.TEACHER,
+        )
+        course = Course.objects.create(teacher=other_teacher, title="Other Course", slug="other-course-validation")
+        CourseConfig.objects.create(course=course)
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=other_teacher,
+            title="Protected event",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=1),
+            ends_at=timezone.now() + timedelta(days=1, hours=2),
+            location="Centre",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(days=1, hours=1, minutes=40),
+            late_booking_cutoff_minutes=20,
+            question_count=10,
+            time_limit_minutes=20,
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:validation_event_delete", args=[event.pk]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(ValidationEvent.objects.filter(pk=event.pk).exists())
+
+    def test_validation_event_delete_requires_post(self):
+        course = self.create_course()
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Delete me later",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=1),
+            ends_at=timezone.now() + timedelta(days=1, hours=2),
+            location="Centre",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(days=1, hours=1, minutes=40),
+            late_booking_cutoff_minutes=20,
+            question_count=10,
+            time_limit_minutes=20,
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse("standalone:validation_event_delete", args=[event.pk]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(ValidationEvent.objects.filter(pk=event.pk).exists())
+
+    def test_validation_event_delete_is_blocked_after_student_submission(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Submitted validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="submitted-validation-delete-lock",
+        )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Locked validation event",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=1),
+            ends_at=timezone.now() + timedelta(days=1, hours=2),
+            location="Centre",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(days=1, hours=1, minutes=40),
+            late_booking_cutoff_minutes=20,
+            question_count=10,
+            time_limit_minutes=20,
+        )
+        attempt = ValidationAttempt.objects.create(
+            enrollment=enrollment,
+            event=event,
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            expires_at=timezone.now() + timedelta(days=1, hours=2),
+            feedback_release_mode=ValidationEvent.FeedbackReleaseMode.IMMEDIATE,
+        )
+        ValidationAttemptQuestion.objects.create(
+            attempt=attempt,
+            question=question,
+            order=1,
+            question_type=question.question_type,
+            selected_answers=["A"],
+            is_correct=True,
+            answered_at=timezone.now(),
+        )
+        self.client.force_login(self.teacher)
+
+        detail_response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
+        self.assertContains(detail_response, "Delete locked")
+        self.assertNotContains(detail_response, reverse("standalone:validation_event_delete", args=[event.pk]), html=False)
+
+        delete_response = self.client.post(reverse("standalone:validation_event_delete", args=[event.pk]), follow=True)
+
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertTrue(ValidationEvent.objects.filter(pk=event.pk).exists())
+        self.assertContains(delete_response, "cannot be deleted because a student has already submitted validation")
 
     def test_teacher_cannot_delete_another_teachers_course(self):
         other_teacher = User.objects.create_user(
@@ -603,14 +930,28 @@ class StandaloneFlowTests(TestCase):
         self.assertNotContains(response, 'class="eyebrow"', html=False)
         self.assertNotContains(response, 'class="course-management-links"', html=False)
         self.assertContains(response, 'class="block-chip-row"', html=False)
-        self.assertContains(response, 'class="section-head compact course-section-head course-blocks-head"', html=False)
+        self.assertContains(response, 'class="section-head compact course-section-head course-blocks-head course-section-toggle"', html=False)
         self.assertContains(response, 'href="%s"' % reverse("standalone:teacher_dashboard"), html=False)
         self.assertContains(response, 'href="%s"' % reverse("standalone:student_preview", args=[course.pk]), html=False)
         self.assertContains(response, 'href="%s"' % reverse("standalone:block_create", args=[course.pk]), html=False)
-        self.assertContains(response, 'href="%s"' % reverse("standalone:course_config", args=[course.pk]), html=False)
+        self.assertContains(response, 'href="%s"' % reverse("standalone:course_import_upload", args=[course.pk]), html=False)
+        self.assertContains(response, 'href="#course-settings-content"', html=False)
         self.assertContains(response, 'href="%s"' % reverse("standalone:student_invite", args=[course.pk]), html=False)
         self.assertContains(response, ">Dashboard<", html=False)
+        self.assertContains(response, ">Student preview<", html=False)
         self.assertContains(response, ">Settings<", html=False)
+        self.assertContains(response, ">Course settings<", html=False)
+        self.assertContains(response, "Auto-save")
+        self.assertContains(response, "Multiple-answer question ratio (%)")
+        self.assertContains(response, "Written-answer question ratio (%)")
+        self.assertContains(response, 'data-settings-toast', html=False)
+        self.assertContains(
+            response,
+            'data-course-config-url="%s"' % reverse("standalone:update_course_config_field", args=[course.pk, "maq_ratio_percent"]),
+            html=False,
+        )
+        self.assertContains(response, ">Import PDF textbook<", html=False)
+        self.assertContains(response, ">Add new block<", html=False)
         self.assertContains(response, ">Invite student<", html=False)
         self.assertContains(response, reverse("standalone:asset_upload", args=[block.pk]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:block_delete", args=[block.pk]), html=False)
@@ -625,13 +966,21 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, "Target MCQs")
         self.assertContains(response, "Enrolment routes")
         self.assertContains(response, "Course blocks")
+        self.assertContains(response, "Course settings")
+        self.assertContains(response, "PDF imports")
         self.assertContains(response, "Danger zone")
         self.assertContains(response, "Delete course")
         self.assertContains(response, 'action="%s"' % reverse("standalone:course_delete", args=[course.pk]), html=False)
         self.assertContains(response, "Self-enrol allowlist")
         self.assertContains(response, "Magic links")
         page_html = response.content.decode("utf-8")
-        self.assertEqual(page_html.count("course-section-head"), 3)
+        self.assertEqual(page_html.count("course-section-head"), 6)
+        self.assertIn('id="course-settings-content"', page_html)
+        self.assertIn('id="course-imports-content"', page_html)
+        self.assertIn('id="course-validation-content"', page_html)
+        self.assertIn('id="course-blocks-content"', page_html)
+        self.assertIn('id="student-access-content"', page_html)
+        self.assertIn('id="course-danger-content"', page_html)
         self.assertLess(page_html.find("Course blocks"), page_html.find("Enrolment routes"))
         self.assertContains(response, "Students can join from the self-enrol URL only when their exact email address is on this course", html=False)
         self.assertContains(response, "Magic links do not require an exact allowlist email.")
@@ -642,8 +991,8 @@ class StandaloneFlowTests(TestCase):
         self.assertNotContains(response, "Draft questions")
         self.assertNotContains(response, "Approved questions")
         self.assertNotContains(response, "Allowed emails")
-        self.assertNotContains(response, "Validation events")
-        self.assertNotContains(response, "Create validation event")
+        self.assertContains(response, "Validation")
+        self.assertContains(response, "Create validation session")
         self.assertNotContains(response, "Regenerate descriptions and objectives")
         self.assertNotContains(response, "Generate question bank")
         self.assertNotContains(response, "Approve all draft questions")
@@ -745,7 +1094,8 @@ class StandaloneFlowTests(TestCase):
         response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
 
         self.assertContains(response, 'class="practice-average-panel course-practice-average-panel"', html=False)
-        self.assertNotContains(response, 'class="practice-average-label"', html=False)
+        self.assertContains(response, 'class="practice-average-label"', html=False)
+        self.assertContains(response, "Practice averages")
         self.assertContains(response, "Overall practice")
         self.assertContains(response, "Mastery")
         self.assertContains(response, "Coverage")
@@ -871,6 +1221,23 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(block.regeneration_status, CourseBlock.RegenerationStatus.QUEUED)
         self.assertEqual(block.regeneration_progress, 5)
         self.assertEqual(block.regeneration_error, "")
+
+    def test_block_delete_allowed_while_regeneration_is_running(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(
+            course=course,
+            title="Week 1",
+            summary="Old summary",
+            order=1,
+            regeneration_status=CourseBlock.RegenerationStatus.RUNNING,
+            regeneration_progress=55,
+        )
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(reverse("standalone:block_delete", args=[block.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(CourseBlock.objects.filter(pk=block.pk).exists())
 
     def test_run_block_regeneration_updates_summary_objectives_and_completion_status(self):
         course = self.create_course()
@@ -1857,30 +2224,50 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(practice.code_snippet, "")
 
     @override_settings(OPENAI_API_KEY="test-key")
-    def test_bad_ai_coding_payload_falls_back_to_non_coding_question(self):
+    def test_bad_ai_coding_payload_falls_back_to_language_aligned_coding_question(self):
         course = self.create_course()
         course.config.coding_question_ratio_percent = 100
         course.config.save(update_fields=["coding_question_ratio_percent", "updated_at"])
-        block, _asset, _objective, _chunk = self.create_coding_content_block(course)
+        block, _asset, _objective, _chunk = self.create_coding_content_block(
+            course,
+            extension=".r",
+            text="""```r
+summarise_values <- function(values) {
+  cleaned <- values[values > 0]
+  mean(cleaned)
+}
+
+numbers <- c(4, -2, 8, 10)
+result <- summarise_values(numbers)
+print(result)
+```""",
+        )
 
         class DummyResponse:
             output_text = json.dumps(
                 {
                     "question_type": QuestionBankItem.QuestionType.MCQ,
-                    "stem": "What does this snippet do?",
-                    "correct_answers": ["It doubles the input."],
-                    "distractors": ["It reads a file.", "It opens a network connection.", "It deletes a value."],
+                    "stem": "After the code runs, what is the value of result in this MATLAB example?",
+                    "correct_answers": ["7.333333"],
+                    "distractors": ["5", "8", "It depends on an unseen file."],
                     "further_study_questions": [
-                        "How does return affect the function?",
-                        "What would happen with a different input?",
-                        "Why does function naming matter?",
+                        "How does the function affect the result?",
+                        "What would happen with different inputs?",
+                        "Why does filtering matter here?",
                     ],
-                    "explanation": "The function doubles the input.",
+                    "explanation": "This MATLAB code calculates a mean after filtering.",
                     "difficulty": "core",
                     "is_coding_question": True,
-                    "coding_language": "python",
+                    "coding_language": "matlab",
                     "coding_question_kind": "comprehension",
-                    "code_snippet": "",
+                    "code_snippet": """summarise_values <- function(values) {
+  cleaned <- values[values > 0]
+  mean(cleaned)
+}
+
+numbers <- c(4, -2, 8, 10)
+result <- summarise_values(numbers)
+print(result)""",
                 }
             )
 
@@ -1889,8 +2276,242 @@ class StandaloneFlowTests(TestCase):
             practice, _validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MCQ)
 
         self.assertIsNotNone(practice)
-        self.assertFalse(practice.is_coding_question)
-        self.assertEqual(practice.code_snippet, "")
+        self.assertTrue(practice.is_coding_question)
+        self.assertEqual(practice.coding_language, "r")
+        self.assertIn("summarise_values", practice.code_snippet)
+        self.assertNotIn("matlab", practice.stem.lower())
+        self.assertNotRegex(practice.stem.lower(), r"what is the value of|after the code runs")
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_ai_coding_payload_language_is_forced_to_detected_block_language(self):
+        course = self.create_course()
+        course.config.coding_question_ratio_percent = 100
+        course.config.save(update_fields=["coding_question_ratio_percent", "updated_at"])
+        block, _asset, _objective, _chunk = self.create_coding_content_block(
+            course,
+            extension=".r",
+            text='library(tibble)\ndf <- data.frame(x = 1:5, y = letters[1:5])\nprint(df[, "x"])',
+        )
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "What does this code do?",
+                    "correct_answers": ["It prints the x column."],
+                    "distractors": ["It writes a file.", "It opens a socket.", "It trains a model."],
+                    "further_study_questions": [
+                        "Why does subsetting matter here?",
+                        "How does tibble printing differ?",
+                        "What mistake should I avoid with column extraction?",
+                    ],
+                    "explanation": "The snippet prints a selected column.",
+                    "difficulty": "core",
+                    "is_coding_question": True,
+                    "coding_language": "matlab",
+                    "coding_question_kind": "comprehension",
+                    "code_snippet": 'library(tibble)\ndf <- data.frame(x = 1:5, y = letters[1:5])\nprint(df[, "x"])',
+                }
+            )
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            practice, _validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MCQ)
+
+        self.assertIsNotNone(practice)
+        self.assertTrue(practice.is_coding_question)
+        self.assertEqual(practice.coding_language, "r")
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_openai_coding_prompt_requests_longer_interpretive_examples(self):
+        course = self.create_course()
+        course.config.coding_question_ratio_percent = 100
+        course.config.save(update_fields=["coding_question_ratio_percent", "updated_at"])
+        block, _asset, _objective, _chunk = self.create_coding_content_block(
+            course,
+            extension=".r",
+            text="""```r
+summarise_values <- function(values) {
+  cleaned <- values[values > 0]
+  mean(cleaned)
+}
+
+numbers <- c(4, -2, 8, 10)
+result <- summarise_values(numbers)
+print(result)
+```""",
+        )
+        prompts = []
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "Which statement best explains how the R function logic and call site work together?",
+                    "correct_answers": ["The function filters values before taking the mean, and the printed result depends on that return value."],
+                    "distractors": ["The code loads an external file.", "The result is unrelated to the function body.", "The function is never used."],
+                    "further_study_questions": [
+                        "How would you adapt the function for missing values?",
+                        "Why does the call site matter here?",
+                        "What mistake should I avoid when tracing returned values?",
+                    ],
+                    "explanation": "The function returns the mean of positive values and the later lines depend on that return value.",
+                    "difficulty": "core",
+                    "is_coding_question": True,
+                    "coding_language": "r",
+                    "coding_question_kind": "comprehension",
+                    "code_snippet": """summarise_values <- function(values) {
+  cleaned <- values[values > 0]
+  mean(cleaned)
+}
+
+numbers <- c(4, -2, 8, 10)
+result <- summarise_values(numbers)
+print(result)""",
+                }
+            )
+
+        def capture_create(*args, **kwargs):
+            prompts.append(kwargs["input"][1]["content"][0]["text"])
+            return DummyResponse()
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = capture_create
+            practice, _validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MCQ)
+
+        self.assertIsNotNone(practice)
+        self.assertTrue(prompts)
+        prompt = prompts[0]
+        self.assertIn("6 to 16 meaningful lines", prompt)
+        self.assertIn("prefer a named function or helper plus a call site", prompt)
+        self.assertIn("do not ask students to manually compute the value of a single variable", prompt)
+        self.assertIn("keep the question entirely in R", prompt)
+
+    def test_preview_filters_out_mismatched_coding_language_questions(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_coding_content_block(
+            course,
+            extension=".r",
+            text='library(tibble)\ndf <- data.frame(x = 1:5, y = letters[1:5])\nprint(df[, "x"])',
+        )
+        matlab_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="What does this MATLAB snippet return?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It returns a column vector.",
+            distractors=["It plots a graph.", "It opens a file.", "It sends a request."],
+            explanation="This MATLAB snippet returns a vector.",
+            question_hash="matlab-mismatch-preview",
+            is_coding_question=True,
+            coding_language="matlab",
+            coding_question_kind=QuestionBankItem.CodingQuestionKind.COMPREHENSION,
+            code_snippet="x = (1:5)';\ndisp(x)",
+        )
+        r_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem='What does this R snippet print?',
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It prints the x column.",
+            distractors=["It deletes x.", "It opens a file.", "It creates a plot."],
+            explanation="The R snippet prints a selected column.",
+            question_hash="r-preview-question",
+            is_coding_question=True,
+            coding_language="r",
+            coding_question_kind=QuestionBankItem.CodingQuestionKind.COMPREHENSION,
+            code_snippet='library(tibble)\ndf <- data.frame(x = 1:5, y = letters[1:5])\nprint(df[, "x"])',
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        question_payload = [message for message in block_payload["transcript"] if message["kind"] == "question"][-1]
+        self.assertEqual(question_payload["question_id"], r_question.pk)
+        self.assertEqual(question_payload["coding_language"], "r")
+        self.assertNotEqual(question_payload["question_id"], matlab_question.pk)
+
+    def test_official_validation_filters_out_coding_questions_with_wrong_language_references(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, _asset, objective, chunk = self.create_coding_content_block(
+            course,
+            extension=".r",
+            text="""```r
+summarise_values <- function(values) {
+  cleaned <- values[values > 0]
+  mean(cleaned)
+}
+
+numbers <- c(4, -2, 8, 10)
+result <- summarise_values(numbers)
+print(result)
+```""",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Which statement best explains what this MATLAB function returns?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It returns a filtered mean.",
+            distractors=["It opens a file.", "It calls Simulink.", "It plots a figure."],
+            explanation="This MATLAB function returns a filtered mean.",
+            question_hash="validation-wrong-language-reference",
+            is_coding_question=True,
+            coding_language="r",
+            coding_question_kind=QuestionBankItem.CodingQuestionKind.COMPREHENSION,
+            code_snippet="""summarise_values <- function(values) {
+  cleaned <- values[values > 0]
+  mean(cleaned)
+}
+
+numbers <- c(4, -2, 8, 10)
+result <- summarise_values(numbers)
+print(result)""",
+        )
+        correct_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Which statement best explains how this R function and call site work together?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="The function filters positive values before returning the mean used later in the script.",
+            distractors=["The function is never called.", "The code reads from a hidden file.", "The result ignores the function body."],
+            explanation="The call site uses the function return value to produce the printed result.",
+            question_hash="validation-right-language-reference",
+            is_coding_question=True,
+            coding_language="r",
+            coding_question_kind=QuestionBankItem.CodingQuestionKind.COMPREHENSION,
+            code_snippet="""summarise_values <- function(values) {
+  cleaned <- values[values > 0]
+  mean(cleaned)
+}
+
+numbers <- c(4, -2, 8, 10)
+result <- summarise_values(numbers)
+print(result)""",
+        )
+
+        selected = _pick_locked_questions(course, enrollment, 1, include_written=True, blocks=[block])
+
+        self.assertEqual([question.pk for question in selected], [correct_question.pk])
 
     def test_preview_payload_includes_coding_question_metadata(self):
         course = self.create_course()
@@ -2240,7 +2861,7 @@ class StandaloneFlowTests(TestCase):
             explanation="This follows directly from this block.",
             question_hash="student-practice-maq",
         )
-        waq = QuestionBankItem.objects.create(
+        first_waq = QuestionBankItem.objects.create(
             course=course,
             block=block,
             learning_objective=objective,
@@ -2403,7 +3024,7 @@ class StandaloneFlowTests(TestCase):
         response = self.client.get(f"{reverse('standalone:practice_quiz', args=[course.pk])}?mode=validation_practice", follow=True)
 
         self.assertRedirects(response, reverse("standalone:student_dashboard"))
-        self.assertContains(response, "No practice questions are available yet for the released blocks in this course.")
+        self.assertContains(response, "No validation questions are available yet for this course.")
         self.assertEqual(PracticeAttempt.objects.count(), 0)
 
     def test_student_preview_page_renders_launches_full_screen_chat_shell(self):
@@ -2501,6 +3122,7 @@ class StandaloneFlowTests(TestCase):
         )
 
         first_block_metrics = next(block["metrics"] for block in preview["blocks"] if block["id"] == first_block.pk)
+        self.assertEqual(first_block_metrics["overall"], 71.5)
         self.assertEqual(first_block_metrics["correct_count"], 1)
         self.assertEqual(first_block_metrics["incorrect_count"], 0)
         self.assertEqual(first_block_metrics["completed_count"], 1)
@@ -2508,6 +3130,9 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(first_block_metrics["total_objective_count"], 1)
         self.assertEqual(first_block_metrics["on_time_count"], 1)
         self.assertEqual(first_block_metrics["engagement_window_days"], 7)
+
+        second_block_metrics = next(block["metrics"] for block in preview["blocks"] if block["id"] == second_block.pk)
+        self.assertEqual(second_block_metrics["overall"], 1.5)
 
     def test_student_preview_quiz_uses_existing_bank_before_generating_new_pair(self):
         course = self.create_course()
@@ -2563,6 +3188,8 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(len(practice_items), 1)
         self.assertEqual(len(validation_items), 1)
         self.assertEqual(practice_items[0].linked_question_id, validation_items[0].pk)
+        self.assertEqual(validation_items[0].stem, practice_items[0].stem)
+        self.assertNotIn("validation variant", validation_items[0].stem.lower())
 
     def test_student_preview_forced_question_type_prefers_matching_bank_item(self):
         course = self.create_course()
@@ -3312,6 +3939,41 @@ class StandaloneFlowTests(TestCase):
             "Please keep messages respectful and appropriate. All conversations are logged and auditable by teachers.",
         )
 
+    def test_student_preview_quiz_re_surfaces_pending_question_after_chat_message(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="What does the membrane do?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It regulates transport.",
+            distractors=["It stores DNA.", "It produces ATP.", "It breaks down glucose."],
+            explanation="Membranes regulate movement into and out of cells.",
+            question_hash="preview-pending-question-resurface",
+        )
+        self.client.force_login(self.teacher)
+
+        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "chat"]),
+            data='{"question": "can you explain that a bit more?"}',
+            content_type="application/json",
+        )
+        response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(len(question_messages), 1)
+        self.assertEqual(question_messages[-1]["question_id"], practice.pk)
+        self.assertEqual(block_payload["transcript"][-1]["kind"], "question")
+        self.assertEqual(block_payload["transcript"][-1]["question_id"], practice.pk)
+
     def test_student_preview_maq_exact_match_is_required_for_correctness(self):
         course = self.create_course()
         course.config.advanced_question_start_percent = 0
@@ -3711,7 +4373,7 @@ class StandaloneFlowTests(TestCase):
         next_question = [message for message in next_quiz["blocks"][0]["transcript"] if message["kind"] == "question"][-1]["question_id"]
         self.assertEqual(next_question, follow_on.pk)
 
-    def test_validation_booking_enforces_capacity_and_pdf_generation(self):
+    def test_validation_booking_enforces_capacity_for_digital_session(self):
         course = self.create_course()
         Enrollment.objects.create(course=course, student=self.student)
         block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
@@ -3729,6 +4391,7 @@ class StandaloneFlowTests(TestCase):
             course=course,
             created_by=self.teacher,
             title="Morning session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
             starts_at=timezone.now() + timedelta(days=2),
             location="Room 101",
             capacity=1,
@@ -3750,7 +4413,2044 @@ class StandaloneFlowTests(TestCase):
         full_response = self.client.get(reverse("standalone:validation_book", args=[event.pk]), follow=True)
         self.assertContains(full_response, "already full")
 
+    def test_validation_booking_stays_open_while_session_is_running_before_cutoff(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Running-session validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="running-session-validation-question",
+        )
+        ends_at = timezone.now() + timedelta(minutes=30)
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Running session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=30),
+            ends_at=ends_at,
+            location="Room 101",
+            capacity=2,
+            freeze_at=ends_at - timedelta(minutes=10),
+            late_booking_cutoff_minutes=10,
+            question_count=1,
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:validation_book", args=[event.pk]), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(ValidationBooking.objects.filter(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED).exists())
+        self.assertContains(response, "Validation booked.")
+
+    def test_validation_booking_closes_within_configured_cutoff_before_session_end(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Late booking validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="late-booking-validation-question",
+        )
+        ends_at = timezone.now() + timedelta(minutes=5)
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Closing soon session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=20),
+            ends_at=ends_at,
+            location="Room 102",
+            capacity=2,
+            freeze_at=ends_at - timedelta(minutes=10),
+            late_booking_cutoff_minutes=10,
+            question_count=1,
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:validation_book", args=[event.pk]), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(ValidationBooking.objects.filter(event=event, enrollment__student=self.student).exists())
+        self.assertContains(response, "Booking has closed for this validation session.")
+
+    def test_student_dashboard_shows_spaces_left_and_recent_bookings_for_bookable_sessions(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        other_student_recent = User.objects.create_user(
+            username="recentstudent",
+            email="recentstudent@example.com",
+            password="password123",
+            role=User.Role.STUDENT,
+        )
+        other_student_old = User.objects.create_user(
+            username="oldstudent",
+            email="oldstudent@example.com",
+            password="password123",
+            role=User.Role.STUDENT,
+        )
+        recent_enrollment = Enrollment.objects.create(course=course, student=other_student_recent)
+        old_enrollment = Enrollment.objects.create(course=course, student=other_student_old)
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Dashboard validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="dashboard-validation-question",
+        )
+        ends_at = timezone.now() + timedelta(hours=4)
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Visible booking stats session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(hours=1),
+            ends_at=ends_at,
+            location="Validation Centre",
+            capacity=3,
+            freeze_at=ends_at - timedelta(minutes=15),
+            late_booking_cutoff_minutes=15,
+            question_count=1,
+        )
+        ValidationBooking.objects.create(event=event, enrollment=recent_enrollment, status=ValidationBooking.Status.BOOKED)
+        old_booking = ValidationBooking.objects.create(event=event, enrollment=old_enrollment, status=ValidationBooking.Status.BOOKED)
+        ValidationBooking.objects.filter(pk=old_booking.pk).update(updated_at=timezone.now() - timedelta(days=2))
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:student_dashboard"))
+
+        self.assertContains(response, "Bookable invigilated sessions")
+        self.assertContains(response, "Spaces left 1")
+        self.assertContains(response, "Bookings in last 24 hours 1")
+
+    def test_digital_validation_start_samples_all_released_blocks_only(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        released_block, asset, objective, chunk = self.create_preview_content_block(course, title="Released block", order=1)
+        second_released_block, second_asset, second_objective, second_chunk = self.create_preview_content_block(
+            course,
+            title="Second released block",
+            order=2,
+        )
+        future_block, future_asset, future_objective, future_chunk = self.create_preview_content_block(course, title="Future block", order=3)
+        future_block.available_from = timezone.localdate() + timedelta(days=5)
+        future_block.save(update_fields=["available_from", "updated_at"])
+        first_validation_question = QuestionBankItem.objects.create(
+            course=course,
+            block=released_block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why do membranes matter?",
+            correct_answer="They control transport.",
+            distractors=["They stop metabolism.", "They only store DNA.", "They replace ribosomes."],
+            explanation="Membranes regulate exchange.",
+            question_hash="self-validation-question",
+        )
+        second_validation_question = QuestionBankItem.objects.create(
+            course=course,
+            block=second_released_block,
+            learning_objective=second_objective,
+            source_chunk=second_chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why do signals matter?",
+            correct_answer="They coordinate responses.",
+            distractors=["They stop transcription.", "They remove ATP.", "They erase organelles."],
+            explanation="Signals coordinate activity.",
+            question_hash="second-self-validation-question",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=future_block,
+            learning_objective=future_objective,
+            source_chunk=future_chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Future validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Future.",
+            question_hash="future-validation-question",
+        )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Invigilated validation",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=5),
+            location="Centre",
+            capacity=30,
+            freeze_at=timezone.now() + timedelta(minutes=30),
+            question_count=2,
+            time_limit_minutes=15,
+        )
+        ValidationBooking.objects.create(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+
+        self.client.force_login(self.student)
+        start_response = self.client.get(reverse("standalone:validation_start", args=[event.pk]))
+
+        self.assertEqual(start_response.status_code, 302)
+        attempt = ValidationAttempt.objects.get(event=event, enrollment=enrollment)
+        self.assertEqual(attempt.mode, ValidationEvent.Mode.DIGITAL_INVIGILATION)
+        locked_questions = list(attempt.attempt_questions.order_by("order"))
+        self.assertEqual(len(locked_questions), 2)
+        self.assertEqual({item.question for item in locked_questions}, {first_validation_question, second_validation_question})
+
+        page = self.client.get(reverse("standalone:validation_attempt", args=[attempt.pk]))
+        self.assertContains(page, "Validation session")
+        self.assertContains(page, "I have read and understood these instructions")
+        self.assertContains(page, "validation-session-data")
+
+    def test_digital_validation_locked_set_respects_course_question_type_mix(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem="Official MCQ validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="official-validation-mcq-mix",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            stem="Official MAQ validation question?",
+            correct_answer="A",
+            additional_correct_answers=["B"],
+            distractors=["C", "D"],
+            explanation="A and B.",
+            question_hash="official-validation-maq-mix",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            stem="Official WAQ validation question?",
+            correct_answer="A written answer.",
+            written_answer_keywords=["written", "answer"],
+            explanation="A written answer.",
+            question_hash="official-validation-waq-mix",
+        )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Official mix validation",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=5),
+            location="Centre",
+            capacity=30,
+            freeze_at=timezone.now() + timedelta(minutes=30),
+            question_count=3,
+            time_limit_minutes=15,
+        )
+        ValidationBooking.objects.create(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+
+        self.client.force_login(self.student)
+        start_response = self.client.get(reverse("standalone:validation_start", args=[event.pk]))
+
+        self.assertEqual(start_response.status_code, 302)
+        attempt = ValidationAttempt.objects.get(event=event, enrollment=enrollment)
+        question_types = set(attempt.attempt_questions.values_list("question__question_type", flat=True))
+        self.assertIn(QuestionBankItem.QuestionType.MCQ, question_types)
+
+    def test_validation_practice_route_uses_chat_session(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Practice validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Because A is right.",
+            question_hash="validation-practice-chat",
+        )
+
+        self.client.force_login(self.student)
+        with patch("standalone.services.validation_flow.generate_question_pair_for_block", return_value=(None, None)):
+            response = self.client.get(reverse("standalone:validation_practice_session", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Practice validation")
+        self.assertContains(response, "untimed")
+        self.assertNotContains(response, "Time left")
+        self.assertContains(response, "data-validation-launch-loader")
+        attempt = PracticeAttempt.objects.get(
+            enrollment__student=self.student,
+            enrollment__course=course,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+        )
+        self.assertEqual(attempt.attempt_questions.count(), 1)
+        self.assertFalse(attempt.feedback_visible_immediately)
+        self.assertIsNone(attempt.time_limit_minutes)
+
+    def test_validation_practice_restart_creates_fresh_attempt(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Practice validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Because A is right.",
+            question_hash="validation-practice-restart-chat",
+        )
+        stale_attempt = PracticeAttempt.objects.create(
+            enrollment=enrollment,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+            feedback_visible_immediately=False,
+        )
+        PracticeAttemptQuestion.objects.create(
+            attempt=stale_attempt,
+            question=question,
+            order=1,
+            selected_answer="B",
+            is_correct=False,
+            feedback="Not quite.",
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(PracticeAttempt.objects.filter(pk=stale_attempt.pk).exists())
+        fresh_attempt = PracticeAttempt.objects.get(
+            enrollment__student=self.student,
+            enrollment__course=course,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+        )
+        self.assertNotEqual(fresh_attempt.pk, stale_attempt.pk)
+        self.assertEqual(fresh_attempt.attempt_questions.count(), 1)
+        self.assertEqual(fresh_attempt.attempt_questions.first().selected_answer, "")
+
+    def test_validation_practice_submission_advances_to_following_question(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="First practice validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="first-practice-validation-question",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Second practice validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="second-practice-validation-question",
+        )
+
+        self.client.force_login(self.student)
+        page = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+        attempt = PracticeAttempt.objects.get(
+            enrollment__student=self.student,
+            enrollment__course=course,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+        )
+        session_state = page.context["session_state"]
+        first_question_id = session_state["pending_question"]["question_id"]
+        self.assertIn(first_question_id, {first_question.pk, second_question.pk})
+
+        submit_response = self.client.post(
+            reverse("standalone:validation_practice_action", args=[course.pk, attempt.pk, "submit"]),
+            data=json.dumps({"question_id": first_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(submit_response.status_code, 200)
+        submit_session = submit_response.json()["session"]
+        self.assertFalse(submit_session["next_available"])
+        self.assertIsNotNone(submit_session["pending_question"])
+        self.assertNotEqual(submit_session["pending_question"]["question_id"], first_question_id)
+
+    def test_validation_practice_skips_practice_questions_already_seen_by_student(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        seen_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Seen practice question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="seen-practice-validation-question",
+        )
+        fresh_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Fresh practice question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="fresh-practice-validation-question",
+        )
+        EnrollmentQuestionState.objects.create(
+            enrollment=enrollment,
+            question=seen_question,
+            times_presented=1,
+        )
+
+        self.client.force_login(self.student)
+        page = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+
+        self.assertEqual(page.status_code, 200)
+        served_question_id = page.context["session_state"]["pending_question"]["question_id"]
+        self.assertEqual(served_question_id, fresh_question.pk)
+
+    def test_validation_practice_selection_keeps_mcqs_in_mix(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem="MCQ practice validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="validation-practice-mcq-mix",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            stem="MAQ practice validation question?",
+            correct_answer="A",
+            additional_correct_answers=["B"],
+            distractors=["C", "D"],
+            explanation="A and B.",
+            question_hash="validation-practice-maq-mix",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            stem="WAQ practice validation question?",
+            correct_answer="A written answer.",
+            written_answer_keywords=["written", "answer"],
+            explanation="A written answer.",
+            question_hash="validation-practice-waq-mix",
+        )
+        ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Mix event",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=1),
+            location="Validation Centre",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(days=1, hours=1),
+            question_count=3,
+            time_limit_minutes=20,
+        )
+
+        self.client.force_login(self.student)
+        page = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+        attempt = PracticeAttempt.objects.get(
+            enrollment__student=self.student,
+            enrollment__course=course,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+        )
+
+        self.assertEqual(page.status_code, 200)
+        question_types = set(attempt.attempt_questions.values_list("question__question_type", flat=True))
+        self.assertIn(QuestionBankItem.QuestionType.MCQ, question_types)
+
+    def test_validation_practice_skip_advances_to_following_question(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="First skip practice validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="first-skip-practice-validation-question",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Second skip practice validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="second-skip-practice-validation-question",
+        )
+
+        self.client.force_login(self.student)
+        page = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+        attempt = PracticeAttempt.objects.get(
+            enrollment__student=self.student,
+            enrollment__course=course,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+        )
+        first_question_id = page.context["session_state"]["pending_question"]["question_id"]
+        self.assertIn(first_question_id, {first_question.pk, second_question.pk})
+
+        skip_response = self.client.post(
+            reverse("standalone:validation_practice_action", args=[course.pk, attempt.pk, "skip"]),
+            data=json.dumps({"question_id": first_question_id}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(skip_response.status_code, 200)
+        skip_session = skip_response.json()["session"]
+        self.assertFalse(skip_session["next_available"])
+        self.assertIsNotNone(skip_session["pending_question"])
+        self.assertNotEqual(skip_session["pending_question"]["question_id"], first_question_id)
+
+    def test_validation_practice_waq_can_send_multiple_messages_before_next(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        first_waq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            stem="Why does nutrient restriction help researchers study growth-rate dependent gene expression in yeast?",
+            correct_answer="Restricting one nutrient controls growth rate and reveals how gene expression changes with growth rate.",
+            written_answer_keywords=["nutrient restriction", "growth rate", "gene expression"],
+            explanation="Restricting one nutrient controls growth rate and reveals how gene expression changes with growth rate.",
+            question_hash="validation-practice-waq-repeat-send",
+        )
+        second_waq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            stem="How does restricting one nutrient help reveal growth-rate linked gene expression in yeast?",
+            correct_answer="Restricting one nutrient sets growth rate and lets researchers track gene expression changes as growth rate changes.",
+            written_answer_keywords=["nutrient restriction", "growth rate", "gene expression"],
+            explanation="Restricting one nutrient sets growth rate and lets researchers track gene expression changes as growth rate changes.",
+            question_hash="validation-practice-waq-follow-up",
+        )
+
+        self.client.force_login(self.student)
+        page = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+        attempt = PracticeAttempt.objects.get(
+            enrollment__student=self.student,
+            enrollment__course=course,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+        )
+        session_state = page.context["session_state"]
+        served_question_id = session_state["pending_question"]["question_id"]
+        self.assertIn(served_question_id, {first_waq.pk, second_waq.pk})
+
+        first_send = self.client.post(
+            reverse("standalone:validation_practice_action", args=[course.pk, attempt.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer_text": "Nutrient restriction sets the growth rate."}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(first_send.status_code, 200)
+        first_session = first_send.json()["session"]
+        self.assertTrue(first_session["next_available"])
+        self.assertEqual(first_session["pending_question"]["question_id"], served_question_id)
+        self.assertTrue(first_session["pending_question"]["answered"])
+        self.assertFalse(any(message["kind"] == "feedback" for message in first_session["transcript"]))
+        self.assertTrue(any(message["role"] == "user" and message["text"] == "Nutrient restriction sets the growth rate." for message in first_session["transcript"]))
+
+        second_send = self.client.post(
+            reverse("standalone:validation_practice_action", args=[course.pk, attempt.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer_text": "It reveals changes in gene expression."}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(second_send.status_code, 200)
+        second_session = second_send.json()["session"]
+        self.assertTrue(second_session["next_available"])
+        self.assertEqual(second_session["pending_question"]["question_id"], served_question_id)
+        self.assertFalse(any(message["kind"] == "feedback" for message in second_session["transcript"]))
+        self.assertTrue(any(message["role"] == "user" and message["text"] == "It reveals changes in gene expression." for message in second_session["transcript"]))
+        attempt.refresh_from_db()
+        answered_question = attempt.attempt_questions.get(question_id=served_question_id)
+        self.assertTrue(answered_question.is_correct)
+        self.assertIn("growth rate", answered_question.selected_answer)
+        self.assertIn("gene expression", answered_question.selected_answer)
+
+    def test_validation_practice_final_submission_returns_score_projection_and_review(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(
+            course=course,
+            student=self.student,
+            mastery_score=50,
+            coverage_score=50,
+            engagement_score=5,
+            target_score=5,
+        )
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Final practice validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="final-practice-validation-question",
+        )
+
+        self.client.force_login(self.student)
+        page = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+        attempt = PracticeAttempt.objects.get(
+            enrollment__student=self.student,
+            enrollment__course=course,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+        )
+        served_question_id = page.context["session_state"]["pending_question"]["question_id"]
+        self.assertEqual(served_question_id, question.pk)
+
+        submit_response = self.client.post(
+            reverse("standalone:validation_practice_action", args=[course.pk, attempt.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(submit_response.status_code, 200)
+        session = submit_response.json()["session"]
+        self.assertTrue(session["completed"])
+        self.assertIsNone(session["pending_question"])
+        self.assertEqual(session["score"], 100.0)
+        self.assertIn("Practice validation complete.", session["transcript"][0]["text"])
+        self.assertIn("100.0%", session["transcript"][0]["text"])
+        self.assertIn("(36.5 x 80 + 100.0 x 20) / 100 = 49.2%", session["transcript"][1]["text"])
+        self.assertIn("practice validation", session["transcript"][1]["text"].lower())
+        self.assertTrue(any(message["kind"] == "question" and message.get("question_id") == question.pk for message in session["transcript"]))
+        self.assertTrue(any(message["kind"] == "feedback" and message.get("question_id") == question.pk for message in session["transcript"]))
+
+    def test_validation_practice_projection_applies_40_percent_floor(self):
+        course = self.create_course()
+        Enrollment.objects.create(
+            course=course,
+            student=self.student,
+            mastery_score=17.9,
+            coverage_score=17.9,
+            engagement_score=17.9,
+            target_score=17.9,
+        )
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Validation floor question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="practice-validation-floor-question",
+        )
+
+        self.client.force_login(self.student)
+        page = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+        attempt = PracticeAttempt.objects.get(
+            enrollment__student=self.student,
+            enrollment__course=course,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+        )
+        served_question_id = page.context["session_state"]["pending_question"]["question_id"]
+        self.assertEqual(served_question_id, question.pk)
+
+        submit_response = self.client.post(
+            reverse("standalone:validation_practice_action", args=[course.pk, attempt.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        session = submit_response.json()["session"]
+        impact_text = session["transcript"][1]["text"]
+        self.assertIn("(17.9 x 80 + 100.0 x 20) / 100 = 34.3%", impact_text)
+        self.assertIn("projected overall score is lifted to **40.0%**", impact_text)
+        self.assertIn("practice validation", impact_text.lower())
+
+    def test_validation_practice_sidebar_history_links_to_completed_review(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Student history question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="student-validation-history-question",
+        )
+
+        self.client.force_login(self.student)
+        start_response = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+        attempt = PracticeAttempt.objects.get(
+            enrollment__student=self.student,
+            enrollment__course=course,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+        )
+        served_question_id = start_response.context["session_state"]["pending_question"]["question_id"]
+        self.assertEqual(served_question_id, question.pk)
+
+        submit_response = self.client.post(
+            reverse("standalone:validation_practice_action", args=[course.pk, attempt.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+        self.assertTrue(submit_response.json()["session"]["completed"])
+
+        review_response = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?review={attempt.pk}")
+
+        self.assertEqual(review_response.status_code, 200)
+        self.assertTrue(review_response.context["session_state"]["completed"])
+        history = review_response.context["sidebar_state"]["practice_validation_history"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["id"], attempt.pk)
+        self.assertTrue(history[0]["is_active"])
+        self.assertIn(f"review={attempt.pk}", history[0]["url"])
+        self.assertEqual(
+            PracticeAttempt.objects.filter(
+                enrollment__student=self.student,
+                enrollment__course=course,
+                attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+                completed_at__isnull=True,
+            ).count(),
+            0,
+        )
+
+    def test_student_practice_view_shows_validation_practice_link(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        self.create_preview_content_block(course)
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
+
+        self.assertContains(response, reverse("standalone:student_validate", args=[course.pk]), html=False)
+        self.assertContains(response, "Validate")
+        self.assertNotContains(response, "Book validation")
+
+    def test_student_validate_route_shows_bookable_sidebar_state(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        self.create_preview_content_block(course)
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="June validation",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=2),
+            ends_at=timezone.now() + timedelta(days=2, hours=2),
+            location="Validation Centre",
+            capacity=30,
+            freeze_at=timezone.now() + timedelta(days=1),
+            question_count=10,
+            time_limit_minutes=25,
+            late_booking_cutoff_minutes=20,
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:student_validate", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["sidebar_state"]["title"], "Book validation")
+        self.assertEqual(
+            response.context["sidebar_state"]["primary_action"]["url"],
+            reverse("standalone:validation_book", args=[event.pk]),
+        )
+        self.assertFalse(response.context["session_state"]["show_block_switcher"])
+        self.assertContains(response, "PRACTICE AVERAGES")
+        self.assertContains(response, "Book validation")
+        self.assertContains(response, "Start practice validation")
+
+    def test_student_preview_welcome_message_mentions_practice_mode_and_validate(self):
+        course = self.create_course()
+        block, _, _, _ = self.create_preview_content_block(course, title="Origins of Life")
         self.client.force_login(self.teacher)
-        pdf_response = self.client.get(reverse("standalone:validation_pack_pdf", args=[event.pk]))
-        self.assertEqual(pdf_response.status_code, 200)
-        self.assertEqual(pdf_response["Content-Type"], "application/pdf")
+
+        response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        block_payload = next(item for item in response.context["preview_state"]["blocks"] if item["id"] == block.pk)
+        assistant_messages = [message for message in block_payload["transcript"] if message["role"] == "assistant" and message["kind"] == "text"]
+        self.assertEqual(
+            assistant_messages[0]["text"],
+            'Welcome to Origins of Life. You are in practice mode. Tap Quiz to get a question for this block, or ask about anything in the course. If you wish to validate your practice averages then please click "Validate" to enter validate mode.',
+        )
+
+    def test_student_practice_state_includes_validation_reminder_when_digital_event_exists(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="June validation",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=3),
+            location="Validation Centre",
+            capacity=30,
+            freeze_at=timezone.now() + timedelta(days=2),
+            question_count=10,
+            time_limit_minutes=25,
+            audit_prompt_count=2,
+            room_code_secret="fizzy-newt-seed",
+        )
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        preview_state = response.context["preview_state"]
+        reminder_messages = [
+            message
+            for block_payload in preview_state["blocks"]
+            for message in block_payload["transcript"]
+            if message.get("kind") == "validation_reminder"
+        ]
+        self.assertEqual(len(reminder_messages), len(preview_state["blocks"]))
+        self.assertTrue(all("digital validation has been created" in message["text"] for message in reminder_messages))
+        self.assertTrue(all(message["cta_label"] == "Book validation" for message in reminder_messages))
+        self.assertTrue(
+            all(message["cta_url"] == reverse("standalone:validation_book", args=[event.pk]) for message in reminder_messages)
+        )
+
+    def test_student_practice_validation_reminder_repeats_every_ten_completed_questions(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="July validation",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=5),
+            location="Validation Centre",
+            capacity=30,
+            freeze_at=timezone.now() + timedelta(days=4),
+            question_count=10,
+            time_limit_minutes=25,
+            audit_prompt_count=2,
+            room_code_secret="calm-otter-seed",
+        )
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="What does this block cover?",
+            correct_answer="Transport and signalling.",
+            distractors=["Metals", "Planets", "Volcanoes"],
+            explanation="Because that is the focus.",
+            question_hash="validation-reminder-practice-question",
+        )
+        for attempt_index in range(10):
+            attempt = PracticeAttempt.objects.create(
+                enrollment=enrollment,
+                attempt_type=PracticeAttempt.AttemptType.PRACTICE,
+                block=block,
+                completed_at=timezone.now() - timedelta(minutes=attempt_index),
+                score=100,
+            )
+            PracticeAttemptQuestion.objects.create(
+                attempt=attempt,
+                question=question,
+                order=1,
+                selected_answer=question.correct_answer,
+                is_correct=True,
+                feedback="Correct.",
+            )
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        preview_state = response.context["preview_state"]
+        first_block = preview_state["blocks"][0]
+        reminder_messages = [message for message in first_block["transcript"] if message.get("kind") == "validation_reminder"]
+        self.assertEqual(len(reminder_messages), 2)
+        self.assertIn("digital validation has been created", reminder_messages[0]["text"])
+        self.assertIn("You've completed 10 practice questions", reminder_messages[1]["text"])
+
+    def test_teacher_preview_can_launch_validation_practice(self):
+        course = self.create_course()
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="preview-validation-question",
+        )
+
+        self.client.force_login(self.teacher)
+        preview_response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+        self.assertContains(preview_response, reverse("standalone:preview_student_validate", args=[course.pk]), html=False)
+        self.assertNotContains(preview_response, "Book validation")
+        self.assertContains(preview_response, "Validate")
+
+        validation_response = self.client.get(reverse("standalone:preview_student_validate", args=[course.pk]))
+        self.assertEqual(validation_response.status_code, 200)
+        self.assertContains(validation_response, "Validation unavailable")
+        self.assertContains(validation_response, "Start practice validation")
+
+        practice_response = self.client.get(reverse("standalone:preview_validation_practice", args=[course.pk]))
+        self.assertEqual(practice_response.status_code, 200)
+        self.assertContains(practice_response, "Practice validation")
+
+    def test_teacher_preview_validate_sidebar_uses_live_preview_practice_metrics(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        practice_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview metrics question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="preview-validate-live-metrics-question",
+        )
+
+        self.client.force_login(self.teacher)
+        preview_quiz_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        served_question_id = preview_quiz_response.json()["preview"]["blocks"][0]["transcript"][-1]["question_id"]
+        self.assertEqual(served_question_id, practice_question.pk)
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": served_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        response = self.client.get(reverse("standalone:preview_student_validate", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(response.context["sidebar_state"]["course_metrics"]["overall"], 0)
+
+    def test_teacher_preview_validate_uses_chat_booking_picker_for_multiple_sessions(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        event_one = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Session one",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=1),
+            ends_at=timezone.now() + timedelta(days=1, hours=2),
+            location="Room A",
+            capacity=30,
+            freeze_at=timezone.now() + timedelta(days=1, hours=1, minutes=40),
+            question_count=10,
+            time_limit_minutes=25,
+            late_booking_cutoff_minutes=20,
+        )
+        event_two = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Session two",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=2),
+            ends_at=timezone.now() + timedelta(days=2, hours=2),
+            location="Room B",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(days=2, hours=1, minutes=40),
+            question_count=12,
+            time_limit_minutes=25,
+            late_booking_cutoff_minutes=20,
+        )
+
+        self.client.force_login(self.teacher)
+        response = self.client.get(reverse("standalone:preview_student_validate", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["sidebar_state"]["title"], "Book validation")
+        self.assertEqual(response.context["sidebar_state"]["primary_action"]["kind"], "booking_options")
+        self.assertIsNone(response.context["sidebar_state"]["secondary_action"])
+        self.assertEqual(len(response.context["sidebar_state"]["booking_sessions"]), 2)
+        self.assertContains(response, "data-preview-booking-options-trigger", html=False)
+        self.assertContains(response, f"?book_event={event_one.pk}", html=False)
+        self.assertContains(response, f"?book_event={event_two.pk}", html=False)
+
+        booked_response = self.client.get(
+            reverse("standalone:preview_student_validate", args=[course.pk]),
+            {"book_event": event_two.pk},
+            follow=True,
+        )
+
+        self.assertEqual(booked_response.status_code, 200)
+        self.assertEqual(booked_response.context["sidebar_state"]["title"], "Validation booked")
+        self.assertContains(booked_response, "Your validation session is booked and ready for you at the scheduled time.")
+
+    def test_teacher_student_preview_sidebar_shows_book_validation_button_only_when_sessions_are_bookable(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        self.client.force_login(self.teacher)
+
+        no_session_response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+        self.assertContains(no_session_response, "Practice Validation")
+        self.assertContains(no_session_response, reverse("standalone:preview_validation_practice", args=[course.pk]), html=False)
+        self.assertContains(no_session_response, "Book Validation")
+        self.assertContains(no_session_response, 'disabled aria-disabled="true"', html=False)
+        self.assertContains(no_session_response, "No validation sessions available right now")
+
+        ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Preview booking session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=1),
+            ends_at=timezone.now() + timedelta(days=1, hours=2),
+            location="Room A",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(days=1, hours=1, minutes=40),
+            question_count=10,
+            time_limit_minutes=25,
+            late_booking_cutoff_minutes=20,
+        )
+
+        bookable_response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+        self.assertContains(bookable_response, "Book Validation")
+        self.assertContains(bookable_response, "Practice Validation")
+        self.assertContains(bookable_response, reverse("standalone:preview_student_validate", args=[course.pk]), html=False)
+        self.assertContains(bookable_response, "to")
+
+    def test_teacher_student_preview_sidebar_shows_practice_validation_when_preview_booking_exists_out_of_session(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Preview booked session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=1),
+            ends_at=timezone.now() + timedelta(days=1, hours=2),
+            location="Room B",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(days=1, hours=1, minutes=40),
+            question_count=10,
+            time_limit_minutes=25,
+            late_booking_cutoff_minutes=20,
+        )
+
+        self.client.force_login(self.teacher)
+        self.client.get(reverse("standalone:preview_student_validate", args=[course.pk]), {"book_event": event.pk}, follow=True)
+        response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+
+        self.assertContains(response, "Practice Validation")
+        self.assertContains(response, reverse("standalone:preview_validation_practice", args=[course.pk]), html=False)
+        self.assertContains(response, event.starts_at.strftime("%d %b %Y, %H:%M"))
+
+    def test_teacher_student_preview_sidebar_shows_validate_when_booked_preview_session_is_live(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Live preview session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=5),
+            ends_at=timezone.now() + timedelta(hours=1),
+            location="Room C",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(minutes=40),
+            question_count=10,
+            time_limit_minutes=25,
+            late_booking_cutoff_minutes=20,
+        )
+
+        self.client.force_login(self.teacher)
+        self.client.get(reverse("standalone:preview_student_validate", args=[course.pk]), {"book_event": event.pk}, follow=True)
+        response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+
+        self.assertContains(response, "Validate")
+        self.assertContains(response, reverse("standalone:preview_student_validate", args=[course.pk]), html=False)
+        self.assertContains(response, "Session live now")
+
+    def test_teacher_preview_validate_hides_validation_panel_when_no_session_is_available(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse("standalone:preview_student_validate", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["sidebar_state"]["hide_validation_panel"])
+        self.assertNotContains(response, 'class="preview-validation-status-panel"', html=False)
+        self.assertNotContains(response, "data-preview-booking-options-trigger", html=False)
+
+    def test_student_practice_validation_shows_back_to_practice_nav(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        self.client.force_login(self.student)
+
+        response = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Back to practice")
+        self.assertContains(response, reverse("standalone:practice_quiz", args=[course.pk]), html=False)
+
+    def test_preview_practice_validation_shows_back_to_practice_nav(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Back to practice")
+        self.assertContains(response, reverse("standalone:student_preview", args=[course.pk]), html=False)
+
+    def test_preview_validation_practice_final_submission_returns_score_projection_and_review(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        practice_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview practice question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="preview-practice-question-for-validation-feedback",
+        )
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview final validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="preview-final-practice-validation-question",
+        )
+        self.client.force_login(self.teacher)
+
+        preview_quiz_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        question_id = preview_quiz_response.json()["preview"]["blocks"][0]["transcript"][-1]["question_id"]
+        self.assertEqual(question_id, practice_question.pk)
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        with patch("standalone.services.preview_validation.generate_question_pair_for_block", return_value=(None, None)):
+            page = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+        session_state = page.context["session_state"]
+        served_question_id = session_state["pending_question"]["question_id"]
+        self.assertEqual(served_question_id, question.pk)
+
+        with patch("standalone.services.preview_validation.generate_question_pair_for_block", return_value=(None, None)):
+            submit_response = self.client.post(
+                reverse("standalone:preview_validation_practice_action", args=[course.pk, "submit"]),
+                data=json.dumps({"question_id": served_question_id, "answer": "A"}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(submit_response.status_code, 200)
+        session = submit_response.json()["session"]
+        self.assertTrue(session["completed"])
+        self.assertEqual(session["score"], 100.0)
+        self.assertIn("Practice validation complete.", session["transcript"][0]["text"])
+        self.assertIn("100.0%", session["transcript"][0]["text"])
+        self.assertIn("practice validation", session["transcript"][1]["text"].lower())
+        self.assertTrue(any(message["kind"] == "question" and message.get("question_id") == question.pk for message in session["transcript"]))
+        self.assertTrue(any(message["kind"] == "feedback" and message.get("question_id") == question.pk for message in session["transcript"]))
+        self.assertContains(page, "untimed")
+
+    def test_preview_validation_practice_projection_applies_40_percent_floor(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        practice_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview practice floor question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="preview-practice-floor-question",
+        )
+        validation_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview validation floor question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="preview-validation-floor-question",
+        )
+        self.client.force_login(self.teacher)
+
+        preview_quiz_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        practice_question_id = preview_quiz_response.json()["preview"]["blocks"][0]["transcript"][-1]["question_id"]
+        self.assertEqual(practice_question_id, practice_question.pk)
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": practice_question_id, "answer": "B"}),
+            content_type="application/json",
+        )
+
+        with patch("standalone.services.preview_validation.generate_question_pair_for_block", return_value=(None, None)):
+            page = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+        served_question_id = page.context["session_state"]["pending_question"]["question_id"]
+        self.assertEqual(served_question_id, validation_question.pk)
+
+        with patch("standalone.services.preview_validation.generate_question_pair_for_block", return_value=(None, None)):
+            submit_response = self.client.post(
+                reverse("standalone:preview_validation_practice_action", args=[course.pk, "submit"]),
+                data=json.dumps({"question_id": served_question_id, "answer": "A"}),
+                content_type="application/json",
+            )
+
+        session = submit_response.json()["session"]
+        impact_text = session["transcript"][1]["text"]
+        self.assertIn("(1.5 x 80 + 100.0 x 20) / 100 = 21.2%", impact_text)
+        self.assertIn("projected overall score is lifted to **40.0%**", impact_text)
+        self.assertIn("practice validation", impact_text.lower())
+
+    def test_preview_validation_practice_waq_hides_in_progress_feedback_and_final_user_bubble(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            stem="Why does nutrient restriction help reveal growth-rate linked gene expression in yeast?",
+            correct_answer="Restricting one nutrient sets the growth rate and reveals how gene expression changes with growth rate.",
+            written_answer_keywords=["nutrient restriction", "growth rate", "gene expression"],
+            explanation="Restricting one nutrient sets the growth rate and reveals how gene expression changes with growth rate.",
+            question_hash="preview-validation-waq-hidden-feedback",
+        )
+        self.client.force_login(self.teacher)
+
+        start_response = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+        served_question_id = start_response.context["session_state"]["pending_question"]["question_id"]
+        self.assertEqual(served_question_id, question.pk)
+
+        submit_response = self.client.post(
+            reverse("standalone:preview_validation_practice_action", args=[course.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer_text": "Nutrient restriction sets the growth rate and changes gene expression."}),
+            content_type="application/json",
+        )
+
+        session = submit_response.json()["session"]
+        self.assertTrue(session["next_available"])
+        self.assertFalse(any(message["kind"] == "feedback" for message in session["transcript"]))
+        self.assertTrue(any(message["role"] == "user" and "Nutrient restriction sets the growth rate" in message["text"] for message in session["transcript"]))
+
+        final_response = self.client.post(
+            reverse("standalone:preview_validation_practice_action", args=[course.pk, "next"]),
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        final_session = final_response.json()["session"]
+        self.assertTrue(final_session["completed"])
+        self.assertFalse(any(message["role"] == "user" and message.get("question_type") == QuestionBankItem.QuestionType.WAQ for message in final_session["transcript"]))
+        review_question = next(
+            message for message in final_session["transcript"]
+            if message["kind"] == "question" and message.get("question_id") == question.pk
+        )
+        self.assertTrue(review_question["is_correct"])
+
+    def test_preview_validation_practice_randomizes_mcq_option_order(self):
+        from standalone.services.validation_flow import _shuffle_options
+
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Which option should not always appear first?",
+            correct_answer="Correct option",
+            distractors=["Distractor alpha", "Distractor beta", "Distractor gamma"],
+            explanation="Correct option.",
+            question_hash="preview-validation-option-shuffle",
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+
+        self.assertEqual(response.status_code, 200)
+        pending_question = response.context["session_state"]["pending_question"]
+        preview_state = self.client.session["standalone_preview_validation"][str(course.pk)]
+        expected_options = _shuffle_options(
+            question.all_answer_options(),
+            f"preview-validation:{course.pk}:{preview_state['started_at']}",
+            question.pk,
+        )
+        self.assertEqual(pending_question["options"], expected_options)
+        self.assertNotEqual(pending_question["options"], question.all_answer_options())
+
+    def test_preview_validation_practice_sidebar_history_reopens_completed_review(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview history question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="preview-validation-history-question",
+        )
+        self.client.force_login(self.teacher)
+
+        start_response = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+        served_question_id = start_response.context["session_state"]["pending_question"]["question_id"]
+        self.assertEqual(served_question_id, question.pk)
+
+        submit_response = self.client.post(
+            reverse("standalone:preview_validation_practice_action", args=[course.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+        self.assertTrue(submit_response.json()["session"]["completed"])
+
+        restarted_response = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+        history = restarted_response.context["sidebar_state"]["practice_validation_history"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["score"], 100.0)
+        self.assertIn("review=1", history[0]["url"])
+
+        review_response = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?review=1")
+
+        self.assertEqual(review_response.status_code, 200)
+        self.assertTrue(review_response.context["session_state"]["completed"])
+        self.assertTrue(review_response.context["sidebar_state"]["practice_validation_history"][0]["is_active"])
+        self.assertIn(
+            "Practice validation complete.",
+            review_response.context["session_state"]["transcript"][0]["text"],
+        )
+
+    def test_teacher_preview_validation_practice_restart_resets_session_state(self):
+        course = self.create_course()
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="preview-validation-restart-question",
+        )
+
+        self.client.force_login(self.teacher)
+        self.client.get(reverse("standalone:preview_validation_practice", args=[course.pk]))
+        session = self.client.session
+        preview_root = session["standalone_preview_validation"]
+        course_state = dict(preview_root[str(course.pk)])
+        question_id = course_state["question_ids"][0]
+        course_state["answers"] = {
+            str(question_id): {
+                "selected_answers": ["B"],
+                "is_correct": False,
+                "feedback": "Not quite.",
+                "answered_at": timezone.now().isoformat(),
+            }
+        }
+        preview_root[str(course.pk)] = course_state
+        session["standalone_preview_validation"] = preview_root
+        session.save()
+
+        response = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+
+        self.assertEqual(response.status_code, 200)
+        session_state = response.context["session_state"]
+        self.assertEqual(session_state["progress"]["answered_count"], 0)
+        self.assertIsNotNone(session_state["pending_question"])
+
+    def test_teacher_preview_validate_live_session_uses_shared_shell(self):
+        course = self.create_course()
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview live validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="preview-live-validation-question",
+        )
+        ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Preview live session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=2),
+            ends_at=timezone.now() + timedelta(minutes=58),
+            location="Preview Centre",
+            capacity=10,
+            freeze_at=timezone.now() + timedelta(minutes=10),
+            question_count=1,
+            time_limit_minutes=18,
+            audit_prompt_count=2,
+        )
+
+        self.client.force_login(self.teacher)
+        validation_response = self.client.get(reverse("standalone:preview_student_validate", args=[course.pk]))
+
+        self.assertEqual(validation_response.status_code, 200)
+        self.assertContains(validation_response, "Validation session")
+        self.assertContains(validation_response, "Continue practice")
+        self.assertContains(validation_response, "I have read and understood these instructions")
+        self.assertContains(validation_response, "validation-session-data")
+        self.assertNotContains(validation_response, "Time left")
+
+    def test_digital_validation_schedules_audits_and_room_display(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Digital validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="digital-validation-question",
+        )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Invigilated session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=2),
+            location="Lab 2",
+            capacity=10,
+            freeze_at=timezone.now() + timedelta(minutes=10),
+            question_count=1,
+            time_limit_minutes=18,
+            audit_prompt_count=2,
+        )
+        ValidationBooking.objects.create(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+
+        self.client.force_login(self.student)
+        start_response = self.client.get(reverse("standalone:validation_start", args=[event.pk]))
+
+        self.assertEqual(start_response.status_code, 302)
+        attempt = ValidationAttempt.objects.get(event=event, enrollment=enrollment)
+        self.assertEqual(attempt.audit_prompts.count(), 1)
+        attendance_prompt = attempt.audit_prompts.get(prompt_index=0)
+        self.assertIsNone(attendance_prompt.answered_at)
+
+        self.client.force_login(self.teacher)
+        room_display = self.client.get(reverse("standalone:validation_room_display", args=[event.pk]))
+        self.assertEqual(room_display.status_code, 200)
+        room_json = self.client.get(reverse("standalone:validation_room_display_data", args=[event.pk]))
+        self.assertEqual(room_json.status_code, 200)
+        self.assertIn("code", room_json.json()["room_code"])
+
+        self.client.force_login(self.student)
+        confirm_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "confirm"]),
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(confirm_response.status_code, 200)
+        audit_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"audit_prompt_id": attendance_prompt.pk, "answer_text": current_room_code(event)}),
+            content_type="application/json",
+        )
+        self.assertEqual(audit_response.status_code, 200)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.audit_prompts.count(), 3)
+        self.assertTrue(attempt.audit_prompts.filter(prompt_index=0, is_correct=True, answered_at__isnull=False).exists())
+
+    def test_manual_feedback_release_updates_attempt_review_visibility(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Manual release question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="manual-release-question",
+        )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Manual release session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=5),
+            location="Centre",
+            capacity=10,
+            freeze_at=timezone.now() + timedelta(minutes=30),
+            question_count=1,
+            time_limit_minutes=12,
+            feedback_release_mode=ValidationEvent.FeedbackReleaseMode.MANUAL,
+        )
+        ValidationBooking.objects.create(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+
+        self.client.force_login(self.student)
+        self.client.get(reverse("standalone:validation_start", args=[event.pk]))
+        attempt = ValidationAttempt.objects.get(event=event, enrollment=enrollment)
+        attendance_prompt = attempt.audit_prompts.get(prompt_index=0)
+        self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "confirm"]),
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"audit_prompt_id": attendance_prompt.pk, "answer_text": current_room_code(event)}),
+            content_type="application/json",
+        )
+        response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"question_id": question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        attempt.refresh_from_db()
+        self.assertIsNone(attempt.review_released_at)
+
+        self.client.force_login(self.teacher)
+        release_response = self.client.post(reverse("standalone:validation_feedback_release", args=[event.pk]))
+        self.assertEqual(release_response.status_code, 302)
+        attempt.refresh_from_db()
+        self.assertIsNotNone(attempt.review_released_at)
+
+    def test_official_validation_advances_to_next_question_without_manual_next_when_review_hidden(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="First hidden-review question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="hidden-review-first-question",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Second hidden-review question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="hidden-review-second-question",
+        )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Progressing validation",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=5),
+            location="Centre",
+            capacity=10,
+            freeze_at=timezone.now() + timedelta(minutes=30),
+            question_count=2,
+            time_limit_minutes=12,
+            feedback_release_mode=ValidationEvent.FeedbackReleaseMode.MANUAL,
+        )
+        ValidationBooking.objects.create(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+
+        self.client.force_login(self.student)
+        self.client.get(reverse("standalone:validation_start", args=[event.pk]))
+        attempt = ValidationAttempt.objects.get(event=event, enrollment=enrollment)
+
+        self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "confirm"]),
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        audit_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"audit_prompt_id": attempt.audit_prompts.get(prompt_index=0).pk, "answer_text": current_room_code(event)}),
+            content_type="application/json",
+        )
+        served_question_id = audit_response.json()["session"]["pending_question"]["question_id"]
+
+        response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        session = response.json()["session"]
+        self.assertFalse(session["next_available"])
+        self.assertIsNotNone(session["pending_question"])
+        self.assertNotEqual(session["pending_question"]["question_id"], served_question_id)
+
+    def test_official_validation_skip_advances_to_following_question(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="First official skip question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="first-official-skip-question",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Second official skip question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="second-official-skip-question",
+        )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Skip validation",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=5),
+            location="Centre",
+            capacity=10,
+            freeze_at=timezone.now() + timedelta(minutes=30),
+            question_count=2,
+            time_limit_minutes=12,
+            feedback_release_mode=ValidationEvent.FeedbackReleaseMode.MANUAL,
+        )
+        ValidationBooking.objects.create(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+
+        self.client.force_login(self.student)
+        self.client.get(reverse("standalone:validation_start", args=[event.pk]))
+        attempt = ValidationAttempt.objects.get(event=event, enrollment=enrollment)
+        self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "confirm"]),
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        audit_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"audit_prompt_id": attempt.audit_prompts.get(prompt_index=0).pk, "answer_text": current_room_code(event)}),
+            content_type="application/json",
+        )
+        served_question_id = audit_response.json()["session"]["pending_question"]["question_id"]
+        self.assertIn(served_question_id, {first_question.pk, second_question.pk})
+
+        skip_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "skip"]),
+            data=json.dumps({"question_id": served_question_id}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(skip_response.status_code, 200)
+        skip_session = skip_response.json()["session"]
+        self.assertFalse(skip_session["next_available"])
+        self.assertIsNotNone(skip_session["pending_question"])
+        self.assertNotEqual(skip_session["pending_question"]["question_id"], served_question_id)
+
+    def test_official_validation_waq_can_send_multiple_messages_before_next(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        first_waq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            stem="Why does nutrient restriction help researchers study growth-rate dependent gene expression in yeast?",
+            correct_answer="Restricting one nutrient controls growth rate and reveals how gene expression changes with growth rate.",
+            written_answer_keywords=["nutrient restriction", "growth rate", "gene expression"],
+            explanation="Restricting one nutrient controls growth rate and reveals how gene expression changes with growth rate.",
+            question_hash="official-validation-waq-repeat-send",
+        )
+        second_waq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            stem="How does restricting one nutrient help reveal growth-rate linked gene expression in yeast?",
+            correct_answer="Restricting one nutrient sets growth rate and lets researchers track gene expression changes as growth rate changes.",
+            written_answer_keywords=["nutrient restriction", "growth rate", "gene expression"],
+            explanation="Restricting one nutrient sets growth rate and lets researchers track gene expression changes as growth rate changes.",
+            question_hash="official-validation-waq-follow-up",
+        )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="WAQ validation",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=5),
+            location="Centre",
+            capacity=10,
+            freeze_at=timezone.now() + timedelta(minutes=30),
+            question_count=2,
+            time_limit_minutes=12,
+            feedback_release_mode=ValidationEvent.FeedbackReleaseMode.MANUAL,
+        )
+        ValidationBooking.objects.create(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+
+        self.client.force_login(self.student)
+        self.client.get(reverse("standalone:validation_start", args=[event.pk]))
+        attempt = ValidationAttempt.objects.get(event=event, enrollment=enrollment)
+        self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "confirm"]),
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        audit_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"audit_prompt_id": attempt.audit_prompts.get(prompt_index=0).pk, "answer_text": current_room_code(event)}),
+            content_type="application/json",
+        )
+        served_question_id = audit_response.json()["session"]["pending_question"]["question_id"]
+        self.assertIn(served_question_id, {first_waq.pk, second_waq.pk})
+
+        first_send = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer_text": "Nutrient restriction sets the growth rate."}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(first_send.status_code, 200)
+        first_session = first_send.json()["session"]
+        self.assertTrue(first_session["next_available"])
+        self.assertEqual(first_session["pending_question"]["question_id"], served_question_id)
+        self.assertTrue(first_session["pending_question"]["answered"])
+
+        second_send = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer_text": "It reveals changes in gene expression."}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(second_send.status_code, 200)
+        second_session = second_send.json()["session"]
+        self.assertTrue(second_session["next_available"])
+        self.assertEqual(second_session["pending_question"]["question_id"], served_question_id)
+        attempt.refresh_from_db()
+        answered_question = attempt.attempt_questions.get(question_id=served_question_id)
+        self.assertTrue(answered_question.is_correct)
+        self.assertIn("growth rate", answered_question.answer_text)
+        self.assertIn("gene expression", answered_question.answer_text)
+
+    def test_validation_presence_warning_and_void(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Presence question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="presence-question",
+        )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Presence session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=2),
+            location="Centre",
+            capacity=10,
+            freeze_at=timezone.now() + timedelta(minutes=20),
+            question_count=1,
+            time_limit_minutes=12,
+            audit_prompt_count=2,
+        )
+        ValidationBooking.objects.create(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+
+        self.client.force_login(self.student)
+        self.client.get(reverse("standalone:validation_start", args=[event.pk]))
+        attempt = ValidationAttempt.objects.get(event=event, enrollment=enrollment)
+
+        warning_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "presence"]),
+            data=json.dumps({"away_seconds": 5}),
+            content_type="application/json",
+        )
+        self.assertEqual(warning_response.status_code, 200)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.status, ValidationAttempt.Status.IN_PROGRESS)
+        self.assertEqual(attempt.navigation_warning_count, 1)
+
+        void_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "presence"]),
+            data=json.dumps({"away_seconds": 11}),
+            content_type="application/json",
+        )
+        self.assertEqual(void_response.status_code, 200)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.status, ValidationAttempt.Status.VOIDED)
+        self.assertIn("voided", attempt.invalidated_reason.lower())
+
+    def test_digital_validation_timer_waits_for_attendance_audit(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Attendance gate question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="attendance-gate-question",
+        )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Attendance gate session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=3),
+            location="Centre",
+            capacity=10,
+            freeze_at=timezone.now() + timedelta(minutes=20),
+            question_count=1,
+            time_limit_minutes=12,
+            audit_prompt_count=2,
+        )
+        ValidationBooking.objects.create(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+
+        self.client.force_login(self.student)
+        self.client.get(reverse("standalone:validation_start", args=[event.pk]))
+        attempt = ValidationAttempt.objects.get(event=event, enrollment=enrollment)
+
+        session_before = self.client.get(reverse("standalone:validation_attempt", args=[attempt.pk])).context["session_state"]
+        self.assertFalse(session_before["timer_running"])
+        self.assertTrue(session_before["awaiting_attendance_audit"])
+        self.assertIsNone(session_before["pending_question"])
+        self.assertIsNone(session_before["pending_audit"])
+        self.assertFalse(session_before["instructions_confirmed"])
+        self.assertEqual(session_before["time_remaining_seconds"], 0)
+
+        blocked_code_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"audit_prompt_id": attempt.audit_prompts.get(prompt_index=0).pk, "answer_text": "wrong-code"}),
+            content_type="application/json",
+        )
+        self.assertEqual(blocked_code_response.status_code, 400)
+        self.assertIn("instructions", blocked_code_response.json()["error"].lower())
+
+        confirm_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "confirm"]),
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(confirm_response.status_code, 200)
+        confirmed_session = confirm_response.json()["session"]
+        self.assertTrue(confirmed_session["instructions_confirmed"])
+        self.assertIsNotNone(confirmed_session["pending_audit"])
+
+        wrong_code_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"audit_prompt_id": attempt.audit_prompts.get(prompt_index=0).pk, "answer_text": "wrong-code"}),
+            content_type="application/json",
+        )
+        self.assertEqual(wrong_code_response.status_code, 200)
+        wrong_session = wrong_code_response.json()["session"]
+        self.assertFalse(wrong_session["timer_running"])
+        self.assertIsNone(wrong_session["pending_question"])
+        self.assertIsNotNone(wrong_session["pending_audit"])
+
+        correct_code_response = self.client.post(
+            reverse("standalone:validation_attempt_action", args=[attempt.pk, "submit"]),
+            data=json.dumps({"audit_prompt_id": attempt.audit_prompts.get(prompt_index=0).pk, "answer_text": current_room_code(event)}),
+            content_type="application/json",
+        )
+        self.assertEqual(correct_code_response.status_code, 200)
+        started_session = correct_code_response.json()["session"]
+        self.assertTrue(started_session["timer_running"])
+        self.assertFalse(started_session["awaiting_attendance_audit"])
+        self.assertIsNotNone(started_session["pending_question"])
+        self.assertEqual(started_session["pending_question"]["question_id"], question.pk)
+        self.assertEqual(started_session["time_remaining_seconds"], 0)

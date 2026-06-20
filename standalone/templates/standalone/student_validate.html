@@ -1,0 +1,187 @@
+{% extends "standalone/base.html" %}
+{% load static %}
+{% block title %}Validate | {{ course.title }}{% endblock %}
+{% block extra_head %}
+  <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}">
+{% endblock %}
+{% block app_nav_links %}
+  <a href="{% if exit_url %}{{ exit_url }}{% else %}{% url 'standalone:student_dashboard' %}{% endif %}">{{ exit_label|default:"Dashboard" }}</a>
+{% endblock %}
+{% block app_nav_menu_actions %}
+  <a class="button secondary app-nav-menu-action" href="{% if exit_url %}{{ exit_url }}{% else %}{% url 'standalone:student_dashboard' %}{% endif %}">{{ exit_label|default:"Dashboard" }}</a>
+{% endblock %}
+{% block app_shell_class %} preview-app-shell{% endblock %}
+{% block app_footer %}{% endblock %}
+{% block content %}
+<section
+  class="preview-page preview-page--validate"
+  data-student-validate
+  data-session-action-url="{{ session_action_url|default:'' }}"
+>
+  <div class="preview-launch-loader" hidden data-validation-launch-loader>
+    <div class="preview-launch-loader-card" role="status" aria-live="polite" aria-label="Preparing practice validation">
+      <div class="preview-loading-dots" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+      <strong>Preparing practice validation</strong>
+      <p>Building your question set now...</p>
+    </div>
+  </div>
+  <aside class="preview-sidebar">
+    <div class="preview-sidebar-head">
+      <h1>{{ course.title }}</h1>
+      <div class="preview-sidebar-summary" data-preview-sidebar-summary>
+        <p class="lead preview-sidebar-summary-text" data-preview-sidebar-summary-text>
+          <span class="preview-sidebar-summary-copy" data-preview-sidebar-summary-copy>{{ course.summary|default:"Chat-based practice for this course." }}</span>
+          <button type="button" class="preview-sidebar-summary-toggle" hidden data-preview-sidebar-summary-toggle>... more</button>
+        </p>
+      </div>
+      <div class="preview-sidebar-validate-cta">
+        <a class="button secondary" href="{{ practice_validation_url }}">Practice Validation</a>
+        {% if sidebar_state.primary_action.kind == "booking_options" and validation_sidebar_cta.label == "Book Validation" %}
+          <button class="button" type="button" data-preview-booking-options-trigger>{{ validation_sidebar_cta.label }}</button>
+        {% elif validation_sidebar_cta.disabled %}
+          <button class="button" type="button" disabled aria-disabled="true">{{ validation_sidebar_cta.label }}</button>
+        {% else %}
+          <a class="button" href="{{ validation_sidebar_cta.url }}">{{ validation_sidebar_cta.label }}</a>
+        {% endif %}
+        {% if validation_sidebar_cta.detail %}
+          <p class="preview-sidebar-validate-copy">{{ validation_sidebar_cta.detail }}</p>
+        {% endif %}
+      </div>
+      {% with metrics=sidebar_preview_state.course.metrics %}
+        <section class="preview-course-metrics-panel">
+          <p class="preview-sidebar-section-label">PRACTICE AVERAGES</p>
+          <div class="preview-block-metrics">
+            <div class="preview-block-metric preview-block-metric--overall">
+              <span>Overall practice</span>
+              <strong>{{ metrics.overall|floatformat:1 }}%</strong>
+            </div>
+            <div class="preview-block-metric">
+              <span>Mastery</span>
+              <strong>{{ metrics.mastery|floatformat:1 }}%</strong>
+            </div>
+            <div class="preview-block-metric">
+              <span>Coverage</span>
+              <strong>{{ metrics.coverage|floatformat:1 }}%</strong>
+            </div>
+            <div class="preview-block-metric">
+              <span>Engagement</span>
+              <strong>{{ metrics.engagement|floatformat:1 }}%</strong>
+            </div>
+            <div class="preview-block-metric">
+              <span>Target</span>
+              <strong>{{ metrics.target|floatformat:1 }}%</strong>
+            </div>
+          </div>
+        </section>
+      {% endwith %}
+    </div>
+    <div class="preview-block-switcher" aria-label="Course blocks">
+      {% for block in sidebar_preview_state.blocks %}
+        <article class="preview-block-card">
+          <div class="preview-block-card-header">
+            <div class="preview-block-card-toggle">
+              <div class="preview-block-card-title-group">
+                <div>
+                  <h3 class="preview-block-card-title">{{ block.title }}</h3>
+                </div>
+                {% if block.metrics %}
+                  <div class="preview-block-overall-button" aria-hidden="true">
+                    <span>Overall practice</span>
+                    <strong>{{ block.metrics.overall|floatformat:1 }}%</strong>
+                  </div>
+                {% endif %}
+              </div>
+              <span class="preview-block-status">{% if block.is_available %}Live{% else %}Locked{% endif %}</span>
+            </div>
+            <div class="preview-block-meta">
+              <span>{{ block.learning_objective_count }} objectives</span>
+            </div>
+          </div>
+        </article>
+      {% endfor %}
+    </div>
+  </aside>
+  <button
+    class="preview-sidebar-toggle"
+    type="button"
+    aria-label="Hide preview sidebar"
+    aria-expanded="true"
+    data-preview-sidebar-toggle
+  >
+    <span class="preview-sidebar-toggle-icon" aria-hidden="true"></span>
+  </button>
+  <button
+    class="preview-sidebar-scrim"
+    type="button"
+    hidden
+    aria-label="Hide preview sidebar"
+    data-preview-sidebar-scrim
+  ></button>
+
+  <section class="preview-chat-shell validation-chat-shell">
+    <div class="preview-chat-header validation-chat-header">
+      <div class="preview-chat-header-main">
+        <p class="preview-eyebrow">{{ session_state.eyebrow|default:"Validate" }}</p>
+        <h2>{{ session_state.title }}</h2>
+        {% if session_state.course_title and session_state.course_title != session_state.title %}
+          <p class="validation-chat-subtitle">{{ session_state.course_title }}</p>
+        {% endif %}
+      </div>
+      {% if session_state.attempt_id %}
+        <div class="validation-chat-meta">
+          <div class="validation-meta-pill validation-meta-pill--progress">
+            <span>Progress</span>
+            <strong data-validation-progress-label></strong>
+          </div>
+          {% if session_state.show_timer %}
+            <div class="validation-meta-pill validation-meta-pill--timer">
+              <span>Time left</span>
+              <strong data-validation-timer></strong>
+            </div>
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+    <div class="preview-chat-transcript validation-chat-transcript" aria-live="polite" aria-label="Validation transcript"></div>
+    <form class="preview-chat-form validation-chat-form">
+      <p class="preview-chat-status" role="status" aria-live="polite"></p>
+      <div class="preview-waq-alignment" hidden data-waq-alignment>
+        <div class="preview-waq-alignment-head">
+          <span>Answer alignment</span>
+          <div class="preview-waq-alignment-meta">
+            <span class="preview-waq-alignment-loader" hidden data-waq-alignment-loader>
+              <span class="preview-waq-alignment-loader-dots" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </span>
+              Checking...
+            </span>
+            <strong data-waq-alignment-label>Start typing</strong>
+          </div>
+        </div>
+        <div class="preview-waq-alignment-track" aria-hidden="true">
+          <span data-waq-alignment-fill></span>
+        </div>
+      </div>
+      <label class="preview-sr-only" for="validation-chat-input">Validation answer</label>
+      <div class="preview-chat-composer validation-chat-composer" hidden data-validation-answer-row>
+        <textarea id="validation-chat-input" rows="1" maxlength="500" placeholder="Write your answer..."></textarea>
+        <button class="button" type="submit" data-validation-submit>Submit answer</button>
+      </div>
+      <div class="validation-next-row" hidden data-validation-next-row>
+        <button class="button" type="button" data-validation-next>Next</button>
+      </div>
+    </form>
+  </section>
+</section>
+{{ session_state|json_script:"validation-session-data" }}
+{{ sidebar_state|json_script:"validation-sidebar-data" }}
+{% endblock %}
+{% block extra_body %}
+  <script src="{% static 'standalone/js/student-validate.js' %}"></script>
+{% endblock %}

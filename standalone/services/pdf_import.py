@@ -31,6 +31,23 @@ _CHAPTER_PATTERNS = [
     re.compile(r"^\s*(chapter|unit|part)\s+([0-9]+|[ivxlcdm]+|[a-z])(?:\s*[:.\-]\s*|\s+)?(?P<title>.*)$", re.IGNORECASE),
     re.compile(r"^\s*([0-9]{1,2})\s*[:.\-]\s+(?P<title>[A-Z][A-Za-z0-9 ,:;'\-/()]{4,120})$"),
 ]
+_NON_CHAPTER_OUTLINE_TITLES = {
+    "acknowledgements",
+    "appendices",
+    "appendix",
+    "bibliography",
+    "contents",
+    "core curriculum",
+    "electives",
+    "further resources",
+    "glossary",
+    "index",
+    "preface",
+    "references",
+    "setup",
+    "table of contents",
+}
+_NON_CHAPTER_OUTLINE_PATTERN = re.compile(r"^(part|unit|section|appendix|appendices)\b", re.IGNORECASE)
 
 
 def extract_pdf_pages(file_path: str | Path) -> list[str]:
@@ -77,18 +94,61 @@ def _outline_boundaries(reader: PdfReader) -> list[_ChapterBoundary]:
     if not raw_items:
         return []
 
-    chapter_like = [item for item in raw_items if _looks_like_chapter_heading(item[0])]
-    top_level = [item for item in raw_items if item[2] == 0]
-    source_items = chapter_like if len(chapter_like) >= 2 else top_level
+    source_items = _select_outline_items(raw_items)
     if len(source_items) < 2:
         return []
 
     return _dedupe_boundaries(
         [
             _ChapterBoundary(_clean_title(title), page_number, 90 if _looks_like_chapter_heading(title) else 75)
-            for title, page_number, _depth in sorted(source_items, key=lambda item: item[1])
+            for title, page_number, _depth in source_items
         ]
     )
+
+
+def _select_outline_items(raw_items: list[tuple[str, int, int]]) -> list[tuple[str, int, int]]:
+    by_depth: dict[int, list[tuple[str, int, int]]] = {}
+    for title, page_number, depth in sorted(raw_items, key=lambda item: (item[2], item[1], item[0].lower())):
+        by_depth.setdefault(depth, []).append((title, page_number, depth))
+
+    best_score = float("-inf")
+    best_items: list[tuple[str, int, int]] = []
+
+    for depth in sorted(by_depth):
+        cleaned_items: list[tuple[str, int, int]] = []
+        seen_pages: set[int] = set()
+        for title, page_number, _depth in sorted(by_depth[depth], key=lambda item: item[1]):
+            cleaned_title = _clean_title(title)
+            if not cleaned_title or _is_noise_heading(cleaned_title):
+                continue
+            if page_number in seen_pages:
+                continue
+            seen_pages.add(page_number)
+            cleaned_items.append((cleaned_title, page_number, depth))
+
+        if len(cleaned_items) < 2:
+            continue
+
+        gaps = [
+            cleaned_items[index + 1][1] - cleaned_items[index][1]
+            for index in range(len(cleaned_items) - 1)
+        ]
+        average_gap = (sum(gaps) / len(gaps)) if gaps else 0
+        non_chapter_count = sum(1 for title, _page_number, _depth in cleaned_items if _is_non_chapter_outline_title(title))
+        non_chapter_ratio = non_chapter_count / len(cleaned_items)
+        overcrowding_penalty = max(0, len(cleaned_items) - 40)
+        score = (
+            min(len(cleaned_items), 24)
+            + min(average_gap, 20)
+            - (depth * 4)
+            - (non_chapter_ratio * 30)
+            - overcrowding_penalty
+        )
+        if score > best_score:
+            best_score = score
+            best_items = cleaned_items
+
+    return best_items
 
 
 def _heading_boundaries(pages: list[str]) -> list[_ChapterBoundary]:
@@ -150,6 +210,11 @@ def _is_noise_heading(title: str) -> bool:
     lowered = title.lower()
     noise = {"contents", "table of contents", "index", "references", "bibliography", "glossary"}
     return lowered in noise or lowered.startswith("page ")
+
+
+def _is_non_chapter_outline_title(title: str) -> bool:
+    lowered = _clean_title(title).lower()
+    return lowered in _NON_CHAPTER_OUTLINE_TITLES or bool(_NON_CHAPTER_OUTLINE_PATTERN.match(lowered))
 
 
 def _clean_title(title: str) -> str:

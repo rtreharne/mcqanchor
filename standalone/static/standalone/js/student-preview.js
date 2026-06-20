@@ -22,6 +22,7 @@ if (previewRoot && previewDataNode) {
   const sidebarSummaryText = previewRoot.querySelector("[data-preview-sidebar-summary-text]");
   const sidebarSummaryCopy = previewRoot.querySelector("[data-preview-sidebar-summary-copy]");
   const sidebarSummaryToggle = previewRoot.querySelector("[data-preview-sidebar-summary-toggle]");
+  const launchLoader = previewRoot.querySelector("[data-preview-launch-loader]");
   const submitButton = form?.querySelector("button[type='submit']");
   const quizMenu = previewRoot.querySelector("[data-quiz-menu]");
   const quizMenuTrigger = previewRoot.querySelector("[data-quiz-menu-trigger]");
@@ -48,16 +49,97 @@ if (previewRoot && previewDataNode) {
   let waqAlignmentLoadingRequestId = 0;
   let sidebarSummaryExpanded = false;
   let sidebarSummaryFullText = "";
+  let practiceValidationNavigationTimer = 0;
   const inlineMessagesByBlock = {};
   const loadingMessagesByBlock = {};
   const optimisticUserMessagesByBlock = {};
   const maqSelectionsByQuestionId = {};
   const sidebarSelectionPreviewMs = 2000;
+  const practiceValidationLaunchDelayMs = 5000;
+  const practiceValidationMobileSidebarDelayMs = 500;
   const previewDateFormatter = new Intl.DateTimeFormat("en-GB", {
     day: "numeric",
     month: "short",
     year: "numeric",
   });
+
+  function activeBlockStorageKey() {
+    const courseId = String(previewState?.course?.id || previewRoot.dataset.courseId || "");
+    const mode = previewRoot.dataset.previewMode || "preview";
+    return courseId ? `quizanchor:${mode}:course:${courseId}:active-block` : "";
+  }
+
+  function persistActiveBlockId(blockId) {
+    const storageKey = activeBlockStorageKey();
+    if (!storageKey) {
+      return;
+    }
+    try {
+      if (blockId) {
+        window.localStorage.setItem(storageKey, String(blockId));
+      } else {
+        window.localStorage.removeItem(storageKey);
+      }
+    } catch (error) {
+      return;
+    }
+  }
+
+  function restoreActiveBlockId() {
+    const storageKey = activeBlockStorageKey();
+    if (!storageKey) {
+      return;
+    }
+    try {
+      const storedBlockId = window.localStorage.getItem(storageKey);
+      if (!storedBlockId) {
+        return;
+      }
+      const matchingBlock = (previewState.blocks || []).find((block) => String(block.id) === String(storedBlockId));
+      if (matchingBlock) {
+        activeBlockId = String(matchingBlock.id);
+        return;
+      }
+      window.localStorage.removeItem(storageKey);
+    } catch (error) {
+      return;
+    }
+  }
+
+  function showLaunchLoader() {
+    if (launchLoader) {
+      launchLoader.hidden = false;
+    }
+  }
+
+  function beginPracticeValidationLaunch(link) {
+    if (!link || practiceValidationNavigationTimer) {
+      return;
+    }
+    showLaunchLoader();
+    if (isMobileSidebar()) {
+      window.setTimeout(() => {
+        setSidebarOpen(false);
+      }, practiceValidationMobileSidebarDelayMs);
+    }
+    practiceValidationNavigationTimer = window.setTimeout(() => {
+      window.location.assign(link.href);
+    }, practiceValidationLaunchDelayMs);
+  }
+
+  function isPracticeValidationLaunchLink(link) {
+    if (!link || !link.href) {
+      return false;
+    }
+    try {
+      const url = new URL(link.href, window.location.origin);
+      const path = String(url.pathname || "");
+      const isPracticeValidationPath = path.includes("/validation-practice/") || path.includes("/student-preview/validate/practice/");
+      return isPracticeValidationPath && !url.searchParams.has("review");
+    } catch (_error) {
+      return false;
+    }
+  }
 
   function actionUrl(blockId, action) {
     return actionUrlTemplate.replace("/0/ACTION/", `/${blockId}/${action}/`);
@@ -228,6 +310,32 @@ if (previewRoot && previewDataNode) {
     setMaqSelection(questionId, [...selections, option]);
   }
 
+  function syncRenderedMaqQuestion(questionId) {
+    if (!transcript) {
+      return;
+    }
+    const selections = maqSelection(questionId);
+    transcript.querySelectorAll("[data-preview-question='true']").forEach((questionCard) => {
+      if (String(questionCard.dataset.questionId || "") !== String(questionId)) {
+        return;
+      }
+      questionCard.querySelectorAll("[data-maq-option-button='true']").forEach((optionButton) => {
+        const option = optionButton.dataset.optionValue || "";
+        const isSelected = selections.includes(option);
+        optionButton.classList.toggle("is-selected", isSelected);
+        optionButton.setAttribute("aria-pressed", isSelected ? "true" : "false");
+        const checkbox = optionButton.querySelector(".preview-answer-chip-checkbox");
+        if (checkbox) {
+          checkbox.textContent = isSelected ? "✓" : "";
+        }
+      });
+      questionCard.querySelectorAll("[data-maq-submit-button='true']").forEach((submitButton) => {
+        submitButton.dataset.hasSelection = selections.length ? "true" : "false";
+        submitButton.disabled = requestInFlight || !selections.length;
+      });
+    });
+  }
+
   function clearAnsweredQuestionSelections() {
     (previewState.blocks || []).forEach((block) => {
       (block.transcript || []).forEach((message) => {
@@ -310,6 +418,21 @@ if (previewRoot && previewDataNode) {
   sidebarSummaryToggle?.addEventListener("click", () => {
     sidebarSummaryExpanded = !sidebarSummaryExpanded;
     renderSidebarSummary();
+  });
+
+  previewRoot.addEventListener("click", (event) => {
+    const link = event.target instanceof Element ? event.target.closest("a") : null;
+    if (!link || !(link instanceof HTMLAnchorElement)) {
+      return;
+    }
+    if (event.defaultPrevented || link.target === "_blank" || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+    if (!isPracticeValidationLaunchLink(link)) {
+      return;
+    }
+    event.preventDefault();
+    beginPracticeValidationLaunch(link);
   });
 
   function toggleSidebar() {
@@ -678,7 +801,7 @@ if (previewRoot && previewDataNode) {
 
   function metricMarkup(metrics, { scope = "block", blockId = "" } = {}) {
     return `
-      ${typeof metrics.overall === "number"
+      ${scope === "course" && typeof metrics.overall === "number"
         ? metricButtonMarkup("overall", metrics.overall, { scope, blockId })
         : ""}
       ${metricButtonMarkup("mastery", metrics.mastery, { scope, blockId })}
@@ -1001,6 +1124,24 @@ if (previewRoot && previewDataNode) {
     container.appendChild(wrapper);
   }
 
+  function questionStemText(message) {
+    let stem = String(message?.text || "").trim();
+    if (!stem) {
+      return "";
+    }
+    stem = stem
+      .replace(/\s*\((?:validation\s+)?variant\s+\d+\)\??\s*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (message?.is_coding_question && message?.code_snippet) {
+      const strippedStem = stem.replace(/```[\w+-]*\n?[\s\S]*?```/g, " ").replace(/\s+/g, " ").trim();
+      if (strippedStem) {
+        stem = strippedStem;
+      }
+    }
+    return stem;
+  }
+
   function appendFurtherStudyAction(actions, message) {
     if (
       !actions
@@ -1036,17 +1177,21 @@ if (previewRoot && previewDataNode) {
       article.className = `preview-block-card${isActive ? " is-expanded is-active" : ""}${isSelectionPreview ? " is-selection-preview" : ""}`;
 
       const controlsId = `preview-block-panel-${block.id}`;
+      const header = document.createElement("div");
+      header.className = "preview-block-card-header";
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "preview-block-card-header";
+      button.className = "preview-block-card-toggle";
       button.setAttribute("aria-expanded", isActive ? "true" : "false");
       button.setAttribute("aria-controls", controlsId);
+      const overallPractice = typeof block.metrics?.overall === "number"
+        ? formatPercentage(block.metrics.overall)
+        : "0.0%";
       button.innerHTML = `
         <div class="preview-block-title-row">
           <strong>${block.title}</strong>
-          <span class="preview-block-badge${block.is_available ? "" : " is-locked"}">${block.is_available ? "Live" : "Locked"}</span>
+          <span class="preview-block-card-icon" aria-hidden="true"></span>
         </div>
-        <span class="preview-block-card-icon" aria-hidden="true"></span>
       `;
       button.addEventListener("click", () => {
         activeBlockId = String(block.id);
@@ -1057,6 +1202,20 @@ if (previewRoot && previewDataNode) {
         }
         renderPreview();
       });
+      const overallButton = document.createElement("button");
+      overallButton.type = "button";
+      overallButton.className = "preview-block-overall-button";
+      overallButton.setAttribute("aria-label", `Show how overall practice is calculated for ${block.title}`);
+      overallButton.innerHTML = `
+        <span>Overall practice</span>
+        <strong>${overallPractice}</strong>
+      `;
+      overallButton.addEventListener("click", () => {
+        activeBlockId = String(block.id);
+        renderPreview("preserve");
+        appendMetricMessage("overall", "block", block.id);
+      });
+      header.append(button, overallButton);
 
       const content = document.createElement("div");
       content.id = controlsId;
@@ -1066,7 +1225,7 @@ if (previewRoot && previewDataNode) {
         <div class="preview-block-metrics">${metricMarkup(block.metrics, { scope: "block", blockId: block.id })}</div>
       `;
 
-      article.append(button, content);
+      article.append(header, content);
       blockSwitcher.appendChild(article);
     });
     blockSwitcher.dataset.activeBlockId = String(activeBlockId);
@@ -1093,19 +1252,18 @@ if (previewRoot && previewDataNode) {
       article.dataset.questionId = String(message.question_id || "");
       article.dataset.answered = message.answered ? "true" : "false";
       article.dataset.flagged = message.flagged ? "true" : "false";
-      if (message.question_type === "maq") {
-        article.innerHTML = `
-          <div class="preview-question-callout">Select all that apply</div>
-          <p>${message.text}</p>
-        `;
+      if (message.question_type === "maq" && !message.answered && !message.flagged) {
+        const callout = document.createElement("div");
+        callout.className = "preview-question-callout";
+        callout.textContent = "Select all that apply";
+        article.appendChild(callout);
       } else if (message.question_type === "waq") {
-        article.innerHTML = `
-          <div class="preview-question-callout">Written answer</div>
-          <p>${message.text}</p>
-        `;
-      } else {
-        article.innerHTML = `<p>${message.text}</p>`;
+        const callout = document.createElement("div");
+        callout.className = "preview-question-callout";
+        callout.textContent = "Written answer";
+        article.appendChild(callout);
       }
+      appendFormattedMessageContent(article, questionStemText(message));
       appendQuestionCodeSnippet(article, message);
 
       if (message.question_type === "waq" && !message.answered && !message.flagged) {
@@ -1130,6 +1288,9 @@ if (previewRoot && previewDataNode) {
             const optionButton = document.createElement("button");
             optionButton.type = "button";
             optionButton.className = `preview-answer-chip preview-answer-chip--maq${selections.includes(option) ? " is-selected" : ""}`;
+            optionButton.dataset.maqOptionButton = "true";
+            optionButton.dataset.optionValue = option;
+            optionButton.setAttribute("aria-pressed", selections.includes(option) ? "true" : "false");
             optionButton.innerHTML = `
               <span class="preview-answer-chip-checkbox" aria-hidden="true">${selections.includes(option) ? "✓" : ""}</span>
               <span class="preview-answer-chip-label">${optionLabel(index)}</span>
@@ -1138,7 +1299,7 @@ if (previewRoot && previewDataNode) {
             optionButton.disabled = requestInFlight;
             optionButton.addEventListener("click", () => {
               toggleMaqSelection(message.question_id, option);
-              renderTranscript("preserve");
+              syncRenderedMaqQuestion(message.question_id);
             });
             optionsWrapper.appendChild(optionButton);
           });
@@ -1148,13 +1309,15 @@ if (previewRoot && previewDataNode) {
           const submitSelectionButton = document.createElement("button");
           submitSelectionButton.type = "button";
           submitSelectionButton.className = "button secondary preview-question-submit";
+          submitSelectionButton.dataset.maqSubmitButton = "true";
           submitSelectionButton.textContent = "Submit";
           submitSelectionButton.dataset.hasSelection = selections.length ? "true" : "false";
           submitSelectionButton.disabled = requestInFlight || !selections.length;
           submitSelectionButton.addEventListener("click", () => {
+            const currentSelections = maqSelection(message.question_id);
             void postPreviewAction("answer", {
               question_id: message.question_id,
-              answers: selections,
+              answers: currentSelections,
             });
           });
           submitRow.appendChild(submitSelectionButton);
@@ -1233,6 +1396,24 @@ if (previewRoot && previewDataNode) {
           <span></span>
         </div>
       `;
+      return article;
+    }
+
+    if (message.kind === "validation_reminder") {
+      article.classList.add("preview-message--validation-reminder");
+      appendFormattedMessageContent(article, message.text || "");
+
+      if (message.cta_url) {
+        const actions = document.createElement("div");
+        actions.className = "preview-message-actions";
+        const link = document.createElement("a");
+        link.className = "button secondary preview-validation-reminder-link";
+        link.href = message.cta_url;
+        link.textContent = message.cta_label || "Book validation";
+        actions.appendChild(link);
+        article.appendChild(actions);
+      }
+
       return article;
     }
 
@@ -1473,14 +1654,16 @@ if (previewRoot && previewDataNode) {
       metric_formula: "",
     };
 
-    if (scope === "course" && metricKey === "overall") {
+    if (metricKey === "overall") {
       const weights = courseMetrics?.weights || {};
-      payload.text = `Overall practice is the weighted practice score built from the average mastery, coverage, engagement, and target values across ${liveBlockLabel}.`;
+      payload.text = scope === "course"
+        ? `Overall practice is the weighted practice score built from the average mastery, coverage, engagement, and target values across ${liveBlockLabel}.`
+        : "Overall practice for this block is the weighted score built from mastery, coverage, engagement, and target.";
       payload.metric_rows = [
-        `Average mastery: ${formatPercentage(metrics.mastery)} x ${weights.mastery || 0}`,
-        `Average coverage: ${formatPercentage(metrics.coverage)} x ${weights.coverage || 0}`,
-        `Average engagement: ${formatPercentage(metrics.engagement)} x ${weights.engagement || 0}`,
-        `Average target: ${formatPercentage(metrics.target)} x ${weights.target || 0}`,
+        `${scope === "course" ? "Average mastery" : "Mastery"}: ${formatPercentage(metrics.mastery)} x ${weights.mastery || 0}`,
+        `${scope === "course" ? "Average coverage" : "Coverage"}: ${formatPercentage(metrics.coverage)} x ${weights.coverage || 0}`,
+        `${scope === "course" ? "Average engagement" : "Engagement"}: ${formatPercentage(metrics.engagement)} x ${weights.engagement || 0}`,
+        `${scope === "course" ? "Average target" : "Target"}: ${formatPercentage(metrics.target)} x ${weights.target || 0}`,
       ];
       payload.metric_formula = weights.total
         ? `(${formatMetricNumber(metrics.mastery)} x ${weights.mastery || 0} + ${formatMetricNumber(metrics.coverage)} x ${weights.coverage || 0} + ${formatMetricNumber(metrics.engagement)} x ${weights.engagement || 0} + ${formatMetricNumber(metrics.target)} x ${weights.target || 0}) / ${weights.total} = ${formatPercentage(metrics.overall)}`
@@ -1636,6 +1819,7 @@ if (previewRoot && previewDataNode) {
       return;
     }
     activeBlockId = String(block.id);
+    persistActiveBlockId(activeBlockId);
     if (activeBlockTitle) {
       activeBlockTitle.textContent = block.title;
     }
@@ -1959,6 +2143,7 @@ if (previewRoot && previewDataNode) {
     }
     applySidebarState();
   });
+  restoreActiveBlockId();
   applySidebarState();
   renderPreview();
 }

@@ -567,14 +567,35 @@ class PracticeMessage(TimeStampedModel):
 
 
 class ValidationEvent(TimeStampedModel):
+    class Mode(models.TextChoices):
+        SELF = "self", "Self-validation"
+        DIGITAL_INVIGILATION = "digital_invigilation", "Digital invigilation"
+        PAPER_INVIGILATION = "paper_invigilation", "Paper invigilation"
+
+    class FeedbackReleaseMode(models.TextChoices):
+        IMMEDIATE = "immediate", "Immediate"
+        MANUAL = "manual", "Manual release"
+
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="validation_events")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="validation_events_created")
     title = models.CharField(max_length=255)
+    mode = models.CharField(max_length=30, choices=Mode.choices, default=Mode.SELF)
     starts_at = models.DateTimeField()
+    ends_at = models.DateTimeField(null=True, blank=True)
     location = models.CharField(max_length=255)
     capacity = models.PositiveSmallIntegerField(default=30)
     freeze_at = models.DateTimeField()
+    late_booking_cutoff_minutes = models.PositiveSmallIntegerField(default=20)
     question_count = models.PositiveSmallIntegerField(default=10)
+    time_limit_minutes = models.PositiveSmallIntegerField(default=20)
+    audit_prompt_count = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(3)])
+    feedback_release_mode = models.CharField(
+        max_length=20,
+        choices=FeedbackReleaseMode.choices,
+        default=FeedbackReleaseMode.IMMEDIATE,
+    )
+    room_code_secret = models.CharField(max_length=64, blank=True)
+    blocks = models.ManyToManyField(CourseBlock, related_name="validation_events", blank=True)
 
     class Meta:
         ordering = ["starts_at"]
@@ -587,8 +608,56 @@ class ValidationEvent(TimeStampedModel):
         return self.bookings.filter(status=ValidationBooking.Status.BOOKED).count()
 
     @property
+    def has_student_submissions(self) -> bool:
+        return self.attempts.filter(attempt_questions__answered_at__isnull=False).exists()
+
+    @property
+    def can_be_deleted(self) -> bool:
+        return not self.has_student_submissions
+
+    @property
+    def spaces_left(self) -> int:
+        return max(0, int(self.capacity or 0) - self.booked_count)
+
+    @property
     def has_space(self) -> bool:
-        return self.booked_count < self.capacity
+        return self.spaces_left > 0
+
+    @property
+    def requires_booking(self) -> bool:
+        return self.mode == self.Mode.DIGITAL_INVIGILATION
+
+    @property
+    def session_end_at(self):
+        if self.ends_at is not None:
+            return self.ends_at
+        if self.freeze_at and self.freeze_at > self.starts_at:
+            return self.freeze_at
+        return self.starts_at + timedelta(minutes=max(1, int(self.time_limit_minutes or 20)))
+
+    @property
+    def booking_deadline(self):
+        if self.mode == self.Mode.DIGITAL_INVIGILATION:
+            if self.ends_at is not None:
+                return self.ends_at - timedelta(minutes=max(0, int(self.late_booking_cutoff_minutes or 0)))
+            return self.freeze_at
+        return None
+
+    def booking_is_open(self, at=None) -> bool:
+        if not self.requires_booking:
+            return False
+        current_time = at or timezone.now()
+        deadline = self.booking_deadline
+        if deadline is None:
+            return False
+        return current_time < deadline and self.has_space
+
+    def recent_booking_count(self, *, hours: int = 24) -> int:
+        window_start = timezone.now() - timedelta(hours=hours)
+        return self.bookings.filter(
+            status=ValidationBooking.Status.BOOKED,
+            updated_at__gte=window_start,
+        ).count()
 
 
 class ValidationBooking(TimeStampedModel):
@@ -624,6 +693,13 @@ class ValidationPack(TimeStampedModel):
 
 class ValidationSubmission(TimeStampedModel):
     booking = models.OneToOneField(ValidationBooking, on_delete=models.CASCADE, related_name="submission")
+    attempt = models.OneToOneField(
+        "ValidationAttempt",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="submission",
+    )
     qr_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     submitted_at = models.DateTimeField(null=True, blank=True)
     score = models.DecimalField(max_digits=5, decimal_places=2, default=0)
@@ -632,6 +708,120 @@ class ValidationSubmission(TimeStampedModel):
 
     def __str__(self) -> str:
         return f"Submission for {self.booking}"
+
+
+class ValidationAttempt(TimeStampedModel):
+    class Status(models.TextChoices):
+        IN_PROGRESS = "in_progress", "In progress"
+        COMPLETED = "completed", "Completed"
+        EXPIRED = "expired", "Expired"
+        VOIDED = "voided", "Voided"
+
+    enrollment = models.ForeignKey(Enrollment, on_delete=models.CASCADE, related_name="validation_attempts")
+    event = models.ForeignKey(ValidationEvent, on_delete=models.CASCADE, related_name="attempts")
+    booking = models.OneToOneField(
+        ValidationBooking,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attempt",
+    )
+    mode = models.CharField(max_length=30, choices=ValidationEvent.Mode.choices)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.IN_PROGRESS)
+    started_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    completed_at = models.DateTimeField(null=True, blank=True)
+    score = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    feedback_release_mode = models.CharField(
+        max_length=20,
+        choices=ValidationEvent.FeedbackReleaseMode.choices,
+        default=ValidationEvent.FeedbackReleaseMode.IMMEDIATE,
+    )
+    review_released_at = models.DateTimeField(null=True, blank=True)
+    requires_manual_review = models.BooleanField(default=False)
+    navigation_warning_count = models.PositiveSmallIntegerField(default=0)
+    invalidated_reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+        unique_together = ("enrollment", "event")
+
+    def __str__(self) -> str:
+        return f"{self.mode} validation for {self.enrollment}"
+
+    @property
+    def review_visible(self) -> bool:
+        return bool(self.review_released_at)
+
+
+class ValidationAttemptQuestion(TimeStampedModel):
+    attempt = models.ForeignKey(ValidationAttempt, on_delete=models.CASCADE, related_name="attempt_questions")
+    question = models.ForeignKey(QuestionBankItem, on_delete=models.CASCADE, related_name="validation_attempt_questions")
+    order = models.PositiveSmallIntegerField(default=1)
+    question_type = models.CharField(max_length=20, choices=QuestionBankItem.QuestionType.choices)
+    selected_answers = models.JSONField(default=list, blank=True)
+    answer_text = models.TextField(blank=True)
+    is_correct = models.BooleanField(null=True, blank=True)
+    feedback = models.TextField(blank=True)
+    answered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["order", "created_at"]
+        unique_together = (("attempt", "order"), ("attempt", "question"))
+
+    def __str__(self) -> str:
+        return f"Validation question {self.order} in {self.attempt}"
+
+
+class ValidationAttemptMessage(TimeStampedModel):
+    attempt = models.ForeignKey(ValidationAttempt, on_delete=models.CASCADE, related_name="messages")
+    question = models.ForeignKey(
+        QuestionBankItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="validation_attempt_messages",
+    )
+    attempt_question = models.ForeignKey(
+        ValidationAttemptQuestion,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="messages",
+    )
+    message_id = models.CharField(max_length=100)
+    sequence = models.PositiveIntegerField()
+    role = models.CharField(max_length=20)
+    kind = models.CharField(max_length=30)
+    text = models.TextField(blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    source_blocks = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ["attempt", "sequence", "created_at"]
+        unique_together = (("attempt", "message_id"), ("attempt", "sequence"))
+
+    def __str__(self) -> str:
+        return f"{self.kind} validation message for {self.attempt}"
+
+
+class ValidationAuditPrompt(TimeStampedModel):
+    attempt = models.ForeignKey(ValidationAttempt, on_delete=models.CASCADE, related_name="audit_prompts")
+    prompt_index = models.PositiveSmallIntegerField(default=1)
+    due_at = models.DateTimeField()
+    expected_code = models.CharField(max_length=64)
+    presented_at = models.DateTimeField(null=True, blank=True)
+    submitted_code = models.CharField(max_length=64, blank=True)
+    is_correct = models.BooleanField(null=True, blank=True)
+    answered_at = models.DateTimeField(null=True, blank=True)
+    message_id = models.CharField(max_length=100, blank=True)
+
+    class Meta:
+        ordering = ["attempt", "prompt_index", "due_at"]
+        unique_together = (("attempt", "prompt_index"),)
+
+    def __str__(self) -> str:
+        return f"Audit prompt {self.prompt_index} for {self.attempt}"
 
 
 class NotificationLog(TimeStampedModel):

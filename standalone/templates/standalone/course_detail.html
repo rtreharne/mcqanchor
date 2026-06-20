@@ -9,412 +9,681 @@
 {% block content %}
 <section class="course-workspace workspace-page">
   <div class="workspace-hero course-hero">
-    <div class="workspace-hero-copy">
-      <h1>
-        <span
-          class="inline-editable inline-editable-title"
-          data-inline-edit
-          data-inline-url="{% url 'standalone:update_course_field' course.pk 'title' %}"
-          data-inline-field="title"
-          data-inline-label="Course title"
-          data-inline-placeholder="Enter a course title"
-          tabindex="0"
-          role="button"
-        >{{ course.title }}</span>
-      </h1>
-      <p class="lead">{{ course.summary|default:"No summary yet." }}</p>
-      <div class="course-hero-meta" aria-label="Course summary">
-        <span>{{ blocks|length }} blocks</span>
-        <span>{{ approved_questions }} approved questions</span>
-        <span>{{ course_student_count }} students</span>
-      </div>
-      <div class="practice-average-panel course-practice-average-panel" aria-label="Course practice averages">
-        <div class="practice-average-grid">
-          <span class="practice-average-metric practice-average-metric--overall"><span>Overall practice</span><strong>{{ course.practice_overall_average|floatformat:1 }}%</strong></span>
-          <span class="practice-average-metric"><span>Mastery</span><strong>{{ course.practice_mastery_average|floatformat:1 }}%</strong></span>
-          <span class="practice-average-metric"><span>Coverage</span><strong>{{ course.practice_coverage_average|floatformat:1 }}%</strong></span>
-          <span class="practice-average-metric"><span>Engagement</span><strong>{{ course.practice_engagement_average|floatformat:1 }}%</strong></span>
-          <span class="practice-average-metric"><span>Target</span><strong>{{ course.practice_target_average|floatformat:1 }}%</strong></span>
+    <div class="course-hero-overview">
+      <div class="workspace-hero-copy">
+        <h1>
+          <span
+            class="inline-editable inline-editable-title"
+            data-inline-edit
+            data-inline-url="{% url 'standalone:update_course_field' course.pk 'title' %}"
+            data-inline-field="title"
+            data-inline-label="Course title"
+            data-inline-placeholder="Enter a course title"
+            tabindex="0"
+            role="button"
+          >{{ course.title }}</span>
+        </h1>
+        <p class="lead">{{ course.summary|default:"No summary yet." }}</p>
+        <div class="course-hero-meta" aria-label="Course summary">
+          <span>{{ blocks|length }} blocks</span>
+          <span>{{ approved_questions }} approved questions</span>
+          <span>{{ course_student_count }} students</span>
         </div>
       </div>
-    </div>
-    <div class="workspace-actions course-primary-actions">
-      <a class="button" href="{% url 'standalone:student_preview' course.pk %}">Student preview</a>
-      <a class="button secondary" href="{% url 'standalone:block_create' course.pk %}">Add block</a>
-      <a class="button secondary" href="{% url 'standalone:course_import_upload' course.pk %}">Import PDF textbook</a>
-      <a class="button secondary" href="{% url 'standalone:course_config' course.pk %}">Settings</a>
+      <div class="course-hero-side">
+        <div class="practice-average-panel course-practice-average-panel" aria-label="Course practice averages">
+          <p class="practice-average-label">Practice averages</p>
+          <div class="practice-average-grid">
+            <span class="practice-average-metric practice-average-metric--overall"><span>Overall practice</span><strong>{{ course.practice_overall_average|floatformat:1 }}%</strong></span>
+            <span class="practice-average-metric"><span>Mastery</span><strong>{{ course.practice_mastery_average|floatformat:1 }}%</strong></span>
+            <span class="practice-average-metric"><span>Coverage</span><strong>{{ course.practice_coverage_average|floatformat:1 }}%</strong></span>
+            <span class="practice-average-metric"><span>Engagement</span><strong>{{ course.practice_engagement_average|floatformat:1 }}%</strong></span>
+            <span class="practice-average-metric"><span>Target</span><strong>{{ course.practice_target_average|floatformat:1 }}%</strong></span>
+          </div>
+        </div>
+        <div class="workspace-actions course-primary-actions">
+          <a class="button" href="{% url 'standalone:student_preview' course.pk %}">Student preview</a>
+          <a class="button secondary" href="#course-settings-content" data-open-block-target="course-settings-content">Settings</a>
+        </div>
+      </div>
     </div>
   </div>
 
-  {% if recent_imports %}
-    <section class="course-import-status-panel" aria-labelledby="course-imports-heading">
-      <div class="section-head compact course-section-head">
+  <section class="course-settings-panel course-section-card" aria-labelledby="course-settings-heading" data-block-card>
+    <div
+      class="section-head compact course-section-head course-section-toggle"
+      data-block-toggle
+      data-block-target="course-settings-content"
+      aria-expanded="false"
+      aria-controls="course-settings-content"
+      tabindex="0"
+      role="button"
+    >
+      <div>
+        <h2 id="course-settings-heading">Course settings</h2>
+      </div>
+      <div class="workspace-actions course-section-actions">
+        <span class="block-chip">Auto-save</span>
+        <span class="block-card-icon" aria-hidden="true"></span>
+      </div>
+    </div>
+    <div id="course-settings-content" class="block-card-content course-section-content" hidden>
+      <div class="course-settings-matrix">
+        <article class="course-settings-group">
+          <div class="course-settings-group-head">
+            <h3>Access</h3>
+            <p>Control how students can join and which domains are allowed.</p>
+          </div>
+          <div class="course-settings-grid">
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.self_enrol_enabled.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'self_enrol_enabled' %}">
+              <label class="course-setting-label course-setting-label-checkbox" for="{{ course_config_form.self_enrol_enabled.id_for_label }}">
+                {{ course_config_form.self_enrol_enabled }}
+                <span>{{ course_config_form.self_enrol_enabled.label }}</span>
+              </label>
+              <p class="course-setting-help">{{ course_config_form.self_enrol_enabled.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.self_enrol_domain.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'self_enrol_domain' %}">
+              <label class="course-setting-label" for="{{ course_config_form.self_enrol_domain.id_for_label }}">{{ course_config_form.self_enrol_domain.label }}</label>
+              {{ course_config_form.self_enrol_domain }}
+              <p class="course-setting-help">{{ course_config_form.self_enrol_domain.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+          </div>
+        </article>
+
+        <article class="course-settings-group">
+          <div class="course-settings-group-head">
+            <h3>Question mix</h3>
+            <p>Set the balance of question types generated for this course.</p>
+          </div>
+          <div class="course-settings-grid">
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.distractor_count.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'distractor_count' %}">
+              <label class="course-setting-label" for="{{ course_config_form.distractor_count.id_for_label }}">{{ course_config_form.distractor_count.label }}</label>
+              {{ course_config_form.distractor_count }}
+              <p class="course-setting-help">{{ course_config_form.distractor_count.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.maq_ratio_percent.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'maq_ratio_percent' %}">
+              <label class="course-setting-label" for="{{ course_config_form.maq_ratio_percent.id_for_label }}">{{ course_config_form.maq_ratio_percent.label }}</label>
+              {{ course_config_form.maq_ratio_percent }}
+              <p class="course-setting-help">{{ course_config_form.maq_ratio_percent.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.waq_ratio_percent.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'waq_ratio_percent' %}">
+              <label class="course-setting-label" for="{{ course_config_form.waq_ratio_percent.id_for_label }}">{{ course_config_form.waq_ratio_percent.label }}</label>
+              {{ course_config_form.waq_ratio_percent }}
+              <p class="course-setting-help">{{ course_config_form.waq_ratio_percent.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.coding_question_ratio_percent.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'coding_question_ratio_percent' %}">
+              <label class="course-setting-label" for="{{ course_config_form.coding_question_ratio_percent.id_for_label }}">{{ course_config_form.coding_question_ratio_percent.label }}</label>
+              {{ course_config_form.coding_question_ratio_percent }}
+              <p class="course-setting-help">{{ course_config_form.coding_question_ratio_percent.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.advanced_question_start_percent.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'advanced_question_start_percent' %}">
+              <label class="course-setting-label" for="{{ course_config_form.advanced_question_start_percent.id_for_label }}">{{ course_config_form.advanced_question_start_percent.label }}</label>
+              {{ course_config_form.advanced_question_start_percent }}
+              <p class="course-setting-help">{{ course_config_form.advanced_question_start_percent.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+          </div>
+        </article>
+
+        <article class="course-settings-group">
+          <div class="course-settings-group-head">
+            <h3>Scoring</h3>
+            <p>Fine-tune the course-wide weighting used across practice and validation.</p>
+          </div>
+          <div class="course-settings-grid">
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.practice_weight.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'practice_weight' %}">
+              <label class="course-setting-label" for="{{ course_config_form.practice_weight.id_for_label }}">{{ course_config_form.practice_weight.label }}</label>
+              {{ course_config_form.practice_weight }}
+              <p class="course-setting-help">{{ course_config_form.practice_weight.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.validation_weight.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'validation_weight' %}">
+              <label class="course-setting-label" for="{{ course_config_form.validation_weight.id_for_label }}">{{ course_config_form.validation_weight.label }}</label>
+              {{ course_config_form.validation_weight }}
+              <p class="course-setting-help">{{ course_config_form.validation_weight.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.mastery_weight.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'mastery_weight' %}">
+              <label class="course-setting-label" for="{{ course_config_form.mastery_weight.id_for_label }}">{{ course_config_form.mastery_weight.label }}</label>
+              {{ course_config_form.mastery_weight }}
+              <p class="course-setting-help">{{ course_config_form.mastery_weight.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.coverage_weight.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'coverage_weight' %}">
+              <label class="course-setting-label" for="{{ course_config_form.coverage_weight.id_for_label }}">{{ course_config_form.coverage_weight.label }}</label>
+              {{ course_config_form.coverage_weight }}
+              <p class="course-setting-help">{{ course_config_form.coverage_weight.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.engagement_weight.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'engagement_weight' %}">
+              <label class="course-setting-label" for="{{ course_config_form.engagement_weight.id_for_label }}">{{ course_config_form.engagement_weight.label }}</label>
+              {{ course_config_form.engagement_weight }}
+              <p class="course-setting-help">{{ course_config_form.engagement_weight.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.target_weight.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'target_weight' %}">
+              <label class="course-setting-label" for="{{ course_config_form.target_weight.id_for_label }}">{{ course_config_form.target_weight.label }}</label>
+              {{ course_config_form.target_weight }}
+              <p class="course-setting-help">{{ course_config_form.target_weight.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+          </div>
+        </article>
+
+        <article class="course-settings-group">
+          <div class="course-settings-group-head">
+            <h3>Validation</h3>
+            <p>Choose how validation feedback and repeat attempts are handled.</p>
+          </div>
+          <div class="course-settings-grid">
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.revalidation_attempts.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'revalidation_attempts' %}">
+              <label class="course-setting-label" for="{{ course_config_form.revalidation_attempts.id_for_label }}">{{ course_config_form.revalidation_attempts.label }}</label>
+              {{ course_config_form.revalidation_attempts }}
+              <p class="course-setting-help">{{ course_config_form.revalidation_attempts.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.show_validation_feedback_immediately.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'show_validation_feedback_immediately' %}">
+              <label class="course-setting-label course-setting-label-checkbox" for="{{ course_config_form.show_validation_feedback_immediately.id_for_label }}">
+                {{ course_config_form.show_validation_feedback_immediately }}
+                <span>{{ course_config_form.show_validation_feedback_immediately.label }}</span>
+              </label>
+              <p class="course-setting-help">{{ course_config_form.show_validation_feedback_immediately.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="course-import-status-panel course-section-card is-expanded" aria-labelledby="course-imports-heading" data-block-card>
+    <div
+      class="section-head compact course-section-head course-section-toggle"
+      data-block-toggle
+      data-block-target="course-imports-content"
+      aria-expanded="true"
+      aria-controls="course-imports-content"
+      tabindex="0"
+      role="button"
+    >
+      <div>
+        <h2 id="course-imports-heading">PDF imports</h2>
+      </div>
+      <div class="workspace-actions course-section-actions">
+        <a class="button secondary" href="{% url 'standalone:course_import_upload' course.pk %}">Import PDF textbook</a>
+        <span class="block-card-icon" aria-hidden="true"></span>
+      </div>
+    </div>
+    <div id="course-imports-content" class="block-card-content course-section-content">
+      {% if recent_imports %}
+        <div class="course-import-status-list">
+          {% for import in recent_imports %}
+            <a class="course-import-status-row" href="{% url 'standalone:course_import_review' import.pk %}">
+              <span>
+                <strong>{{ import.original_filename }}</strong>
+                <small>{{ import.created_at|date:"j M Y H:i" }}</small>
+              </span>
+              <span class="block-chip status-chip is-{{ import.status }}">{{ import.get_status_display }}{% if import.status == 'analyzing' or import.status == 'creating' %} {{ import.progress }}%{% endif %}</span>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty-state">
+          <p>No PDF imports yet.</p>
+        </div>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="course-import-status-panel course-section-card is-expanded" aria-labelledby="course-validation-heading" data-block-card>
+    <div
+      class="section-head compact course-section-head course-section-toggle"
+      data-block-toggle
+      data-block-target="course-validation-content"
+      aria-expanded="true"
+      aria-controls="course-validation-content"
+      tabindex="0"
+      role="button"
+    >
         <div>
-          <h2 id="course-imports-heading">PDF imports</h2>
+          <h2 id="course-validation-heading">Validation</h2>
+        </div>
+        <div class="workspace-actions course-section-actions">
+          <a class="button secondary" href="{% url 'standalone:validation_event_create' course.pk %}">Create validation session</a>
+          <span class="block-card-icon" aria-hidden="true"></span>
         </div>
       </div>
+    <div id="course-validation-content" class="block-card-content course-section-content">
       <div class="course-import-status-list">
-        {% for import in recent_imports %}
-          <a class="course-import-status-row" href="{% url 'standalone:course_import_review' import.pk %}">
+        {% for event in events %}
+          <article class="course-import-status-row">
             <span>
-              <strong>{{ import.original_filename }}</strong>
-              <small>{{ import.created_at|date:"j M Y H:i" }}</small>
+              <strong>Validation session</strong>
+              <small>
+                Digital invigilation • {{ event.starts_at|date:"j M Y, H:i" }} to {{ event.session_end_at|date:"j M Y, H:i" }}
+                {% if event.location %} • {{ event.location }}{% endif %}
+                • {{ event.question_count }} questions • {{ event.time_limit_minutes }} mins
+                {% if event.requires_booking and event.booking_deadline %} • Booking closes {{ event.booking_deadline|date:"j M Y, H:i" }}{% endif %}
+                • Audit prompts {{ event.audit_prompt_count }}
+                • {{ event.booked_count }}/{{ event.capacity }} booked
+                • All released course blocks
+              </small>
             </span>
-            <span class="block-chip status-chip is-{{ import.status }}">{{ import.get_status_display }}{% if import.status == 'analyzing' or import.status == 'creating' %} {{ import.progress }}%{% endif %}</span>
-          </a>
+            <span class="workspace-actions">
+              <a class="button secondary" href="{% url 'standalone:validation_room_display' event.pk %}">Room display</a>
+              {% if event.feedback_release_mode == "manual" %}
+                <form method="post" action="{% url 'standalone:validation_feedback_release' event.pk %}">
+                  {% csrf_token %}
+                  <button class="button secondary" type="submit">Release feedback</button>
+                </form>
+              {% endif %}
+              {% if event.can_be_deleted %}
+                <form method="post" action="{% url 'standalone:validation_event_delete' event.pk %}" onsubmit="return window.confirm('Delete this validation event?');">
+                  {% csrf_token %}
+                  <button class="button secondary" type="submit">Delete</button>
+                </form>
+              {% else %}
+                <button class="button secondary" type="button" disabled title="Students have already submitted validation for this session.">Delete locked</button>
+              {% endif %}
+            </span>
+          </article>
+        {% empty %}
+          <p>No validation events yet.</p>
         {% endfor %}
       </div>
-    </section>
-  {% endif %}
+    </div>
+  </section>
 
-  <section class="course-blocks-section" aria-labelledby="course-blocks-heading">
-    <div class="section-head compact course-section-head course-blocks-head">
+  <section class="course-blocks-section course-section-card is-expanded" aria-labelledby="course-blocks-heading" data-block-card>
+    <div
+      class="section-head compact course-section-head course-blocks-head course-section-toggle"
+      data-block-toggle
+      data-block-target="course-blocks-content"
+      aria-expanded="true"
+      aria-controls="course-blocks-content"
+      tabindex="0"
+      role="button"
+    >
       <div>
         <h2 id="course-blocks-heading">Course blocks</h2>
       </div>
+      <div class="workspace-actions course-section-actions">
+        <a class="button secondary" href="{% url 'standalone:block_create' course.pk %}">Add new block</a>
+        <span class="block-card-icon" aria-hidden="true"></span>
+      </div>
     </div>
 
-    <div class="block-list course-block-list">
-      {% for block in blocks %}
-        <article class="block-card course-block-card" data-block-card>
-          <div
-            class="block-card-header course-block-card-header"
-            data-block-toggle
-            data-block-target="block-content-{{ block.pk }}"
-            aria-expanded="false"
-            aria-controls="block-content-{{ block.pk }}"
-            tabindex="0"
-            role="button"
-          >
-            <div class="course-block-title-group">
-              <span class="block-order-pill">{{ block.order }}</span>
-              <div class="course-block-title-copy">
-                <h3 class="block-card-title course-block-title">
-                  <span
-                    class="inline-editable inline-editable-title"
+    <div id="course-blocks-content" class="block-card-content course-section-content">
+      <div class="block-list course-block-list">
+        {% for block in blocks %}
+          <article class="block-card course-block-card" data-block-card>
+            <div
+              class="block-card-header course-block-card-header"
+              data-block-toggle
+              data-block-target="block-content-{{ block.pk }}"
+              aria-expanded="false"
+              aria-controls="block-content-{{ block.pk }}"
+              tabindex="0"
+              role="button"
+            >
+              <div class="course-block-title-group">
+                <span class="block-order-pill">{{ block.order }}</span>
+                <div class="course-block-title-copy">
+                  <h3 class="block-card-title course-block-title">
+                    <span
+                      class="inline-editable inline-editable-title"
+                      data-inline-edit
+                      data-inline-url="{% url 'standalone:update_block_field' block.pk 'title' %}"
+                      data-inline-field="title"
+                      data-inline-label="Block title"
+                      data-inline-placeholder="Enter a block title"
+                      tabindex="0"
+                      role="button"
+                    >{{ block.title }}</span>
+                  </h3>
+                  <div class="block-chip-row" aria-label="Block summary">
+                    <span class="block-chip">Available {{ block.available_from|date:"j M Y" }}</span>
+                    <span class="block-chip">Target {{ block.preview_target_question_count }}</span>
+                    <span class="block-chip">{{ block.objective_count }} objectives</span>
+                    <span class="block-chip">{{ block.asset_count }} uploads</span>
+                    {% if block.regeneration_status != 'idle' %}
+                      <span class="block-chip status-chip is-{{ block.regeneration_status }}">{{ block.get_regeneration_status_display }}</span>
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+
+              <div class="block-card-header-actions">
+                <div class="block-action-menu" data-block-menu>
+                  <button
+                    class="block-action-menu-trigger"
+                    type="button"
+                    aria-label="Block actions"
+                    aria-expanded="false"
+                    data-block-menu-trigger
+                  >
+                    <span aria-hidden="true">&#8942;</span>
+                  </button>
+                  <div class="block-action-menu-panel" hidden data-block-menu-panel>
+                    {% if block.regeneration_status != 'queued' and block.regeneration_status != 'running' or block.summary or block.learning_objectives.all %}
+                      <form method="post" action="{% url 'standalone:regenerate_block_content' block.pk %}" data-async-refresh data-confirm="Re-generate this block? This will replace the current description and learning objectives using every file in this block.">
+                        {% csrf_token %}
+                        <button class="block-action-menu-item" type="submit"{% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %} disabled{% endif %}>
+                          {% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %}Re-generating...{% else %}Re-generate{% endif %}
+                        </button>
+                      </form>
+                    {% endif %}
+                    <form method="post" action="{% url 'standalone:block_delete' block.pk %}" data-async-refresh data-confirm="Delete this content block? This will remove its uploads, learning objectives, and generated questions. Remaining blocks will be re-numbered.">
+                      {% csrf_token %}
+                      <button class="block-action-menu-item is-warning" type="submit">Delete block</button>
+                    </form>
+                  </div>
+                </div>
+                <span class="block-card-icon" aria-hidden="true"></span>
+              </div>
+            </div>
+
+            <div id="block-content-{{ block.pk }}" class="block-card-content course-block-content" hidden>
+              {% if block.regeneration_status != 'idle' %}
+                <div class="regeneration-status-panel{% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %} is-running{% elif block.regeneration_status == 'completed' %} is-complete{% elif block.regeneration_status == 'failed' %} is-failed{% endif %}"{% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %} data-regenerating-block="true"{% endif %}>
+                  <div class="regeneration-status-head">
+                    <strong>
+                      {% if block.regeneration_status == 'queued' %}Queued for processing
+                      {% elif block.regeneration_status == 'running' %}Processing block files
+                      {% elif block.regeneration_status == 'completed' %}Processing complete
+                      {% elif block.regeneration_status == 'failed' %}Processing failed
+                      {% endif %}
+                    </strong>
+                    <span>{{ block.regeneration_progress }}%</span>
+                  </div>
+                  <div class="regeneration-progress" aria-hidden="true">
+                    <span style="width: {{ block.regeneration_progress }}%"></span>
+                  </div>
+                  <p class="regeneration-status-copy">
+                    {% if block.regeneration_status == 'queued' %}
+                      Waiting to process this block's files and generate its description and learning objectives.
+                    {% elif block.regeneration_status == 'running' %}
+                      Processing this block's files and updating its description and learning objectives.
+                    {% elif block.regeneration_status == 'completed' %}
+                      This block's files have been processed and its summary and learning objectives have been updated.
+                    {% elif block.regeneration_status == 'failed' %}
+                      The latest processing run did not complete successfully.
+                    {% endif %}
+                  </p>
+                  {% if block.regeneration_error %}
+                    <p class="regeneration-status-error">{{ block.regeneration_error }}</p>
+                  {% endif %}
+                </div>
+              {% endif %}
+
+              <div class="block-meta-grid" aria-label="Block settings">
+                <div class="block-meta-tile">
+                  <span class="block-meta-label">Available from</span>
+                  <strong
+                    class="inline-editable inline-editable-date"
                     data-inline-edit
-                    data-inline-url="{% url 'standalone:update_block_field' block.pk 'title' %}"
-                    data-inline-field="title"
-                    data-inline-label="Block title"
-                    data-inline-placeholder="Enter a block title"
+                    data-inline-url="{% url 'standalone:update_block_field' block.pk 'available_from' %}"
+                    data-inline-field="available_from"
+                    data-inline-input-type="date"
+                    data-inline-value="{{ block.available_from|date:'Y-m-d' }}"
+                    data-inline-label="Available from"
                     tabindex="0"
                     role="button"
-                  >{{ block.title }}</span>
-                </h3>
-                <div class="block-chip-row" aria-label="Block summary">
-                  <span class="block-chip">Available {{ block.available_from|date:"j M Y" }}</span>
-                  <span class="block-chip">Target {{ block.preview_target_question_count }}</span>
-                  <span class="block-chip">{{ block.objective_count }} objectives</span>
-                  <span class="block-chip">{{ block.asset_count }} uploads</span>
-                  {% if block.regeneration_status != 'idle' %}
-                    <span class="block-chip status-chip is-{{ block.regeneration_status }}">{{ block.get_regeneration_status_display }}</span>
-                  {% endif %}
+                  >{{ block.available_from|date:"j M Y" }}</strong>
+                </div>
+                <div class="block-meta-tile">
+                  <span class="block-meta-label">Target MCQs</span>
+                  <strong
+                    class="inline-editable inline-editable-date"
+                    data-inline-edit
+                    data-inline-url="{% url 'standalone:update_block_config_field' block.pk 'target_question_count' %}"
+                    data-inline-field="target_question_count"
+                    data-inline-input-type="number"
+                    data-inline-value="{{ block.preview_target_question_count }}"
+                    data-inline-label="Target MCQs"
+                    tabindex="0"
+                    role="button"
+                  >{{ block.preview_target_question_count }}</strong>
                 </div>
               </div>
-            </div>
 
-            <div class="block-card-header-actions">
-              <div class="block-action-menu" data-block-menu>
-                <button
-                  class="block-action-menu-trigger"
-                  type="button"
-                  aria-label="Block actions"
-                  aria-expanded="false"
-                  data-block-menu-trigger
-                >
-                  <span aria-hidden="true">&#8942;</span>
-                </button>
-                <div class="block-action-menu-panel" hidden data-block-menu-panel>
-                  {% if block.regeneration_status != 'queued' and block.regeneration_status != 'running' or block.summary or block.learning_objectives.all %}
-                    <form method="post" action="{% url 'standalone:regenerate_block_content' block.pk %}" data-async-refresh data-confirm="Re-generate this block? This will replace the current description and learning objectives using every file in this block.">
-                      {% csrf_token %}
-                      <button class="block-action-menu-item" type="submit"{% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %} disabled{% endif %}>
-                        {% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %}Re-generating...{% else %}Re-generate{% endif %}
-                      </button>
-                    </form>
-                  {% endif %}
-                  <form method="post" action="{% url 'standalone:block_delete' block.pk %}" data-async-refresh data-confirm="Delete this content block? This will remove its uploads, learning objectives, and generated questions. Remaining blocks will be re-numbered.">
-                    {% csrf_token %}
-                    <button class="block-action-menu-item is-warning" type="submit"{% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %} disabled{% endif %}>Delete block</button>
-                  </form>
-                </div>
-              </div>
-              <span class="block-card-icon" aria-hidden="true"></span>
-            </div>
-          </div>
-
-          <div id="block-content-{{ block.pk }}" class="block-card-content course-block-content" hidden>
-            {% if block.regeneration_status != 'idle' %}
-              <div class="regeneration-status-panel{% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %} is-running{% elif block.regeneration_status == 'completed' %} is-complete{% elif block.regeneration_status == 'failed' %} is-failed{% endif %}"{% if block.regeneration_status == 'queued' or block.regeneration_status == 'running' %} data-regenerating-block="true"{% endif %}>
-                <div class="regeneration-status-head">
-                  <strong>
-                    {% if block.regeneration_status == 'queued' %}Queued for processing
-                    {% elif block.regeneration_status == 'running' %}Processing block files
-                    {% elif block.regeneration_status == 'completed' %}Processing complete
-                    {% elif block.regeneration_status == 'failed' %}Processing failed
-                    {% endif %}
-                  </strong>
-                  <span>{{ block.regeneration_progress }}%</span>
-                </div>
-                <div class="regeneration-progress" aria-hidden="true">
-                  <span style="width: {{ block.regeneration_progress }}%"></span>
-                </div>
-                <p class="regeneration-status-copy">
-                  {% if block.regeneration_status == 'queued' %}
-                    Waiting to process this block's files and generate its description and learning objectives.
-                  {% elif block.regeneration_status == 'running' %}
-                    Processing this block's files and updating its description and learning objectives.
-                  {% elif block.regeneration_status == 'completed' %}
-                    This block's files have been processed and its summary and learning objectives have been updated.
-                  {% elif block.regeneration_status == 'failed' %}
-                    The latest processing run did not complete successfully.
-                  {% endif %}
-                </p>
-                {% if block.regeneration_error %}
-                  <p class="regeneration-status-error">{{ block.regeneration_error }}</p>
-                {% endif %}
-              </div>
-            {% endif %}
-
-            <div class="block-meta-grid" aria-label="Block settings">
-              <div class="block-meta-tile">
-                <span class="block-meta-label">Available from</span>
-                <strong
-                  class="inline-editable inline-editable-date"
+              <section class="block-detail-section">
+                <p
+                  class="inline-editable inline-editable-summary block-description"
                   data-inline-edit
-                  data-inline-url="{% url 'standalone:update_block_field' block.pk 'available_from' %}"
-                  data-inline-field="available_from"
-                  data-inline-input-type="date"
-                  data-inline-value="{{ block.available_from|date:'Y-m-d' }}"
-                  data-inline-label="Available from"
+                  data-inline-url="{% url 'standalone:update_block_field' block.pk 'summary' %}"
+                  data-inline-field="summary"
+                  data-inline-label="Block description"
+                  data-inline-placeholder="No summary."
+                  data-inline-multiline="true"
                   tabindex="0"
                   role="button"
-                >{{ block.available_from|date:"j M Y" }}</strong>
-              </div>
-              <div class="block-meta-tile">
-                <span class="block-meta-label">Target MCQs</span>
-                <strong
-                  class="inline-editable inline-editable-date"
-                  data-inline-edit
-                  data-inline-url="{% url 'standalone:update_block_config_field' block.pk 'target_question_count' %}"
-                  data-inline-field="target_question_count"
-                  data-inline-input-type="number"
-                  data-inline-value="{{ block.preview_target_question_count }}"
-                  data-inline-label="Target MCQs"
-                  tabindex="0"
-                  role="button"
-                >{{ block.preview_target_question_count }}</strong>
-              </div>
-            </div>
-
-            <section class="block-detail-section">
-              <p
-                class="inline-editable inline-editable-summary block-description"
-                data-inline-edit
-                data-inline-url="{% url 'standalone:update_block_field' block.pk 'summary' %}"
-                data-inline-field="summary"
-                data-inline-label="Block description"
-                data-inline-placeholder="No summary."
-                data-inline-multiline="true"
-                tabindex="0"
-                role="button"
-              >{{ block.summary|default:"No summary." }}</p>
-            </section>
-
-            <div class="child-block-list course-block-subsections">
-              <section class="block-detail-section course-block-subsection" data-block-card>
-                <div
-                  class="course-block-subsection-header"
-                  data-block-toggle
-                  data-block-target="objectives-content-{{ block.pk }}"
-                  aria-expanded="false"
-                  aria-controls="objectives-content-{{ block.pk }}"
-                  tabindex="0"
-                  role="button"
-                >
-                  <div>
-                    <h4>Learning objectives</h4>
-                  </div>
-                  <div class="subsection-count">
-                    <span>{{ block.objective_count }}</span>
-                    <span class="block-card-icon" aria-hidden="true"></span>
-                  </div>
-                </div>
-
-                <div id="objectives-content-{{ block.pk }}" class="block-card-content course-block-section-content" hidden>
-                  <ul class="objective-list">
-                    {% for objective in block.learning_objectives.all %}
-                      <li>
-                        <span class="objective-code">{{ objective.code }}</span>
-                        <div class="objective-body">
-                          <span
-                            class="objective-text inline-editable"
-                            data-inline-edit
-                            data-inline-url="{% url 'standalone:update_learning_objective' objective.pk %}"
-                            data-inline-field="text"
-                            data-inline-label="Learning objective"
-                            data-inline-placeholder="Enter a learning objective"
-                            data-inline-multiline="true"
-                            tabindex="0"
-                            role="button"
-                          >{{ objective.text }}</span>
-                        </div>
-                        <div class="objective-actions">
-                          <form method="post" action="{% url 'standalone:move_learning_objective' objective.pk 'up' %}" data-async-refresh>
-                            {% csrf_token %}
-                            <button class="objective-action-button objective-action-icon" type="submit" aria-label="Move learning objective up" title="Move up">
-                              <span aria-hidden="true">&#9652;</span>
-                            </button>
-                          </form>
-                          <form method="post" action="{% url 'standalone:move_learning_objective' objective.pk 'down' %}" data-async-refresh>
-                            {% csrf_token %}
-                            <button class="objective-action-button objective-action-icon" type="submit" aria-label="Move learning objective down" title="Move down">
-                              <span aria-hidden="true">&#9662;</span>
-                            </button>
-                          </form>
-                          <form method="post" action="{% url 'standalone:delete_learning_objective' objective.pk %}" data-async-refresh data-confirm="Delete this learning objective? This will re-number the remaining objectives.">
-                            {% csrf_token %}
-                            <button class="objective-action-button objective-action-icon objective-action-delete" type="submit" aria-label="Delete learning objective" title="Delete">
-                              <span aria-hidden="true">&#10005;</span>
-                            </button>
-                          </form>
-                        </div>
-                      </li>
-                    {% empty %}
-                      <li>No objectives generated yet.</li>
-                    {% endfor %}
-                  </ul>
-                </div>
+                >{{ block.summary|default:"No summary." }}</p>
               </section>
 
-              <section class="block-detail-section course-block-subsection" data-block-card>
-                <div
-                  class="course-block-subsection-header"
-                  data-block-toggle
-                  data-block-target="assets-content-{{ block.pk }}"
-                  aria-expanded="false"
-                  aria-controls="assets-content-{{ block.pk }}"
-                  tabindex="0"
-                  role="button"
-                >
-                  <div>
-                    <h4>Uploads</h4>
+              <div class="child-block-list course-block-subsections">
+                <section class="block-detail-section course-block-subsection" data-block-card>
+                  <div
+                    class="course-block-subsection-header"
+                    data-block-toggle
+                    data-block-target="objectives-content-{{ block.pk }}"
+                    aria-expanded="false"
+                    aria-controls="objectives-content-{{ block.pk }}"
+                    tabindex="0"
+                    role="button"
+                  >
+                    <div>
+                      <h4>Learning objectives</h4>
+                    </div>
+                    <div class="subsection-count">
+                      <span>{{ block.objective_count }}</span>
+                      <span class="block-card-icon" aria-hidden="true"></span>
+                    </div>
                   </div>
-                  <div class="subsection-count">
-                    <span>{{ block.asset_count }}</span>
-                    <span class="block-card-icon" aria-hidden="true"></span>
-                  </div>
-                </div>
 
-                <div id="assets-content-{{ block.pk }}" class="block-card-content course-block-section-content" hidden>
-                  <div class="upload-list">
-                    {% if block.assets.all %}
-                      <div class="upload-table-head" aria-hidden="true">
-                        <span>File</span>
-                        <span>Status</span>
-                      </div>
-                    {% endif %}
-                    {% for asset in block.assets.all %}
-                      <div class="upload-row">
-                        <div class="upload-meta">
-                          <strong class="upload-name">{{ asset.original_filename }}</strong>
-                          {% if asset.processing_error %}
-                            <p class="upload-error">{{ asset.processing_error }}</p>
-                          {% endif %}
-                        </div>
-                        <div class="upload-row-actions">
-                          <div class="upload-status{% if asset.processing_status == 'pending' %} is-pending{% elif asset.processing_status == 'processed' %} is-processed{% elif asset.processing_status == 'failed' %} is-failed{% endif %}"{% if asset.processing_status == 'pending' %} data-processing-asset="true"{% endif %}>
-                            {% if asset.processing_status == 'pending' %}
-                              <span class="upload-status-spinner" aria-hidden="true"></span>
-                            {% endif %}
-                            <span>{% if asset.processing_status == 'pending' %}Processing...{% elif asset.processing_status == 'processed' %}Processed{% elif asset.processing_status == 'failed' %}Failed{% else %}{{ asset.processing_status }}{% endif %}</span>
+                  <div id="objectives-content-{{ block.pk }}" class="block-card-content course-block-section-content" hidden>
+                    <ul class="objective-list">
+                      {% for objective in block.learning_objectives.all %}
+                        <li>
+                          <span class="objective-code">{{ objective.code }}</span>
+                          <div class="objective-body">
+                            <span
+                              class="objective-text inline-editable"
+                              data-inline-edit
+                              data-inline-url="{% url 'standalone:update_learning_objective' objective.pk %}"
+                              data-inline-field="text"
+                              data-inline-label="Learning objective"
+                              data-inline-placeholder="Enter a learning objective"
+                              data-inline-multiline="true"
+                              tabindex="0"
+                              role="button"
+                            >{{ objective.text }}</span>
                           </div>
-                          <form method="post" action="{% url 'standalone:delete_asset' asset.pk %}" data-async-refresh data-confirm="Delete this uploaded file? Generated objectives from this file will also be removed.">
-                            {% csrf_token %}
-                            <input type="hidden" name="next" value="{% url 'standalone:course_detail' course.pk %}#assets-content-{{ block.pk }}">
-                            <button class="upload-delete-button" type="submit" aria-label="Delete uploaded file" title="Delete">
-                              <span aria-hidden="true">&#10005;</span>
-                            </button>
-                          </form>
-                        </div>
-                      </div>
-                    {% empty %}
-                      <p>No uploads yet.</p>
-                    {% endfor %}
+                          <div class="objective-actions">
+                            <form method="post" action="{% url 'standalone:move_learning_objective' objective.pk 'up' %}" data-async-refresh>
+                              {% csrf_token %}
+                              <button class="objective-action-button objective-action-icon" type="submit" aria-label="Move learning objective up" title="Move up">
+                                <span aria-hidden="true">&#9652;</span>
+                              </button>
+                            </form>
+                            <form method="post" action="{% url 'standalone:move_learning_objective' objective.pk 'down' %}" data-async-refresh>
+                              {% csrf_token %}
+                              <button class="objective-action-button objective-action-icon" type="submit" aria-label="Move learning objective down" title="Move down">
+                                <span aria-hidden="true">&#9662;</span>
+                              </button>
+                            </form>
+                            <form method="post" action="{% url 'standalone:delete_learning_objective' objective.pk %}" data-async-refresh data-confirm="Delete this learning objective? This will re-number the remaining objectives.">
+                              {% csrf_token %}
+                              <button class="objective-action-button objective-action-icon objective-action-delete" type="submit" aria-label="Delete learning objective" title="Delete">
+                                <span aria-hidden="true">&#10005;</span>
+                              </button>
+                            </form>
+                          </div>
+                        </li>
+                      {% empty %}
+                        <li>No objectives generated yet.</li>
+                      {% endfor %}
+                    </ul>
                   </div>
+                </section>
+
+                <section class="block-detail-section course-block-subsection" data-block-card>
+                  <div
+                    class="course-block-subsection-header"
+                    data-block-toggle
+                    data-block-target="assets-content-{{ block.pk }}"
+                    aria-expanded="false"
+                    aria-controls="assets-content-{{ block.pk }}"
+                    tabindex="0"
+                    role="button"
+                  >
+                    <div>
+                      <h4>Uploads</h4>
+                    </div>
+                    <div class="subsection-count">
+                      <span>{{ block.asset_count }}</span>
+                      <span class="block-card-icon" aria-hidden="true"></span>
+                    </div>
+                  </div>
+
+                  <div id="assets-content-{{ block.pk }}" class="block-card-content course-block-section-content" hidden>
+                    <div class="upload-list">
+                      {% if block.assets.all %}
+                        <div class="upload-table-head" aria-hidden="true">
+                          <span>File</span>
+                          <span>Status</span>
+                        </div>
+                      {% endif %}
+                      {% for asset in block.assets.all %}
+                        <div class="upload-row">
+                          <div class="upload-meta">
+                            <strong class="upload-name">{{ asset.original_filename }}</strong>
+                            {% if asset.processing_error %}
+                              <p class="upload-error">{{ asset.processing_error }}</p>
+                            {% endif %}
+                          </div>
+                          <div class="upload-row-actions">
+                            <div class="upload-status{% if asset.processing_status == 'pending' %} is-pending{% elif asset.processing_status == 'processed' %} is-processed{% elif asset.processing_status == 'failed' %} is-failed{% endif %}"{% if asset.processing_status == 'pending' %} data-processing-asset="true"{% endif %}>
+                              {% if asset.processing_status == 'pending' %}
+                                <span class="upload-status-spinner" aria-hidden="true"></span>
+                              {% endif %}
+                              <span>{% if asset.processing_status == 'pending' %}Processing...{% elif asset.processing_status == 'processed' %}Processed{% elif asset.processing_status == 'failed' %}Failed{% else %}{{ asset.processing_status }}{% endif %}</span>
+                            </div>
+                            <form method="post" action="{% url 'standalone:delete_asset' asset.pk %}" data-async-refresh data-confirm="Delete this uploaded file? Generated objectives from this file will also be removed.">
+                              {% csrf_token %}
+                              <input type="hidden" name="next" value="{% url 'standalone:course_detail' course.pk %}#assets-content-{{ block.pk }}">
+                              <button class="upload-delete-button" type="submit" aria-label="Delete uploaded file" title="Delete">
+                                <span aria-hidden="true">&#10005;</span>
+                              </button>
+                            </form>
+                          </div>
+                        </div>
+                      {% empty %}
+                        <p>No uploads yet.</p>
+                      {% endfor %}
+                    </div>
+                  </div>
+                </section>
+              </div>
+
+              <section class="block-detail-section block-actions-section">
+                <div>
+                  <h4>Update this block</h4>
+                </div>
+                <div class="block-inline-actions">
+                  <a class="button" href="{{ block.upload_url }}">Upload files</a>
+                  <span class="block-actions-note">Use the block menu for re-generation or deletion.</span>
                 </div>
               </section>
             </div>
-
-            <section class="block-detail-section block-actions-section">
-              <div>
-                <h4>Update this block</h4>
-              </div>
-              <div class="block-inline-actions">
-                <a class="button" href="{{ block.upload_url }}">Upload files</a>
-                <span class="block-actions-note">Use the block menu for re-generation or deletion.</span>
-              </div>
-            </section>
+          </article>
+        {% empty %}
+          <div class="empty-state">
+            <h2>Add your first block</h2>
+            <p>Blocks hold the source files, descriptions, and learning objectives used to generate practice.</p>
+            <div class="action-row">
+              <a class="button" href="{% url 'standalone:block_create' course.pk %}">Add block</a>
+            </div>
           </div>
-        </article>
-      {% empty %}
-        <div class="empty-state">
-          <h2>Add your first block</h2>
-          <p>Blocks hold the source files, descriptions, and learning objectives used to generate practice.</p>
-          <div class="action-row">
-            <a class="button" href="{% url 'standalone:block_create' course.pk %}">Add block</a>
-            <a class="button secondary" href="{% url 'standalone:course_import_upload' course.pk %}">Import PDF textbook</a>
-          </div>
-        </div>
-      {% endfor %}
+        {% endfor %}
+      </div>
     </div>
   </section>
 
-  <section class="student-access-panel" aria-labelledby="student-access-heading">
-    <div class="section-head compact course-section-head">
+  <section class="student-access-panel course-section-card" aria-labelledby="student-access-heading" data-block-card>
+    <div
+      class="section-head compact course-section-head course-section-toggle"
+      data-block-toggle
+      data-block-target="student-access-content"
+      aria-expanded="false"
+      aria-controls="student-access-content"
+      tabindex="0"
+      role="button"
+    >
       <div>
         <h2 id="student-access-heading">Enrolment routes</h2>
       </div>
-      <div class="section-actions">
+      <div class="section-actions course-section-actions">
         <a class="button secondary" href="{% url 'standalone:student_invite' course.pk %}">Invite student</a>
+        <span class="block-card-icon" aria-hidden="true"></span>
       </div>
     </div>
-    <div class="student-access-grid">
-      <article class="student-access-card">
-        <h3>Self-enrol allowlist</h3>
-        <p>Students can join from the self-enrol URL only when their exact email address is on this course's allowlist{% if course.config.self_enrol_domain %} and matches {{ course.config.self_enrol_domain }}{% endif %}.</p>
-        <div class="block-chip-row">
-          <span class="block-chip">{% if self_enrol_enabled %}Enabled{% else %}Disabled{% endif %}</span>
-          <span class="block-chip">{{ allowed_emails|length }} allowed email{{ allowed_emails|length|pluralize }}</span>
-        </div>
-        <div class="block-inline-actions">
-          <a class="button secondary" href="{% url 'standalone:allowed_email_add' course.pk %}">Add email</a>
-          {% if self_enrol_enabled %}
-            <a class="button secondary" href="{{ self_enrol_url }}">Open self-enrol URL</a>
-          {% endif %}
-        </div>
-      </article>
-      <article class="student-access-card">
-        <h3>Magic links</h3>
-        <p>Magic links do not require an exact allowlist email. They still obey the optional domain restriction, expiry time, and maximum new-enrolment count.</p>
-        <div class="block-chip-row">
-          <span class="block-chip">{{ active_magic_link_count }} active link{{ active_magic_link_count|pluralize }}</span>
-          {% if course.config.self_enrol_domain %}<span class="block-chip">Domain {{ course.config.self_enrol_domain }}</span>{% endif %}
-        </div>
-        <div class="block-inline-actions">
-          <a class="button secondary" href="{% url 'standalone:magic_link_create' course.pk %}">Create magic link</a>
-        </div>
-      </article>
+    <div id="student-access-content" class="block-card-content course-section-content" hidden>
+      <div class="student-access-grid">
+        <article class="student-access-card">
+          <h3>Self-enrol allowlist</h3>
+          <p>Students can join from the self-enrol URL only when their exact email address is on this course's allowlist{% if course.config.self_enrol_domain %} and matches {{ course.config.self_enrol_domain }}{% endif %}.</p>
+          <div class="block-chip-row">
+            <span class="block-chip">{% if self_enrol_enabled %}Enabled{% else %}Disabled{% endif %}</span>
+            <span class="block-chip">{{ allowed_emails|length }} allowed email{{ allowed_emails|length|pluralize }}</span>
+          </div>
+          <div class="block-inline-actions">
+            <a class="button secondary" href="{% url 'standalone:allowed_email_add' course.pk %}">Add email</a>
+            {% if self_enrol_enabled %}
+              <a class="button secondary" href="{{ self_enrol_url }}">Open self-enrol URL</a>
+            {% endif %}
+          </div>
+        </article>
+        <article class="student-access-card">
+          <h3>Magic links</h3>
+          <p>Magic links do not require an exact allowlist email. They still obey the optional domain restriction, expiry time, and maximum new-enrolment count.</p>
+          <div class="block-chip-row">
+            <span class="block-chip">{{ active_magic_link_count }} active link{{ active_magic_link_count|pluralize }}</span>
+            {% if course.config.self_enrol_domain %}<span class="block-chip">Domain {{ course.config.self_enrol_domain }}</span>{% endif %}
+          </div>
+          <div class="block-inline-actions">
+            <a class="button secondary" href="{% url 'standalone:magic_link_create' course.pk %}">Create magic link</a>
+          </div>
+        </article>
+      </div>
     </div>
   </section>
 
-  <section class="course-danger-panel" aria-labelledby="course-danger-heading">
-    <div class="section-head compact course-section-head">
+  <section class="course-danger-panel course-section-card" aria-labelledby="course-danger-heading" data-block-card>
+    <div
+      class="section-head compact course-section-head course-section-toggle"
+      data-block-toggle
+      data-block-target="course-danger-content"
+      aria-expanded="false"
+      aria-controls="course-danger-content"
+      tabindex="0"
+      role="button"
+    >
       <div>
         <h2 id="course-danger-heading">Danger zone</h2>
       </div>
+      <div class="course-section-actions">
+        <span class="block-card-icon" aria-hidden="true"></span>
+      </div>
     </div>
-    <div class="course-danger-card">
+    <div id="course-danger-content" class="block-card-content course-section-content" hidden>
+      <div class="course-danger-card">
       <div>
         <h3>Delete course</h3>
         <p>Deletes this course, blocks, uploads, learning objectives, generated questions, enrolments, invitations, validation events, and PDF imports.</p>
@@ -427,8 +696,10 @@
         {% csrf_token %}
         <button class="button warning" type="submit">Delete course</button>
       </form>
+      </div>
     </div>
   </section>
+  <div class="settings-update-toast" data-settings-toast hidden aria-live="polite"></div>
 </section>
 <script src="{% static 'standalone/js/course-detail.js' %}"></script>
 {% endblock %}

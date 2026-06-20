@@ -5,17 +5,20 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 from django.conf import settings
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from openai import OpenAI
 
 from standalone.models import Course, CourseBlock, LearningObjective, QuestionBankItem
 from standalone.services.questions import (
+    coding_question_matches_expected_language,
+    coding_question_quality_sort_key,
     further_study_questions_for_chat,
     further_study_questions_for_question,
     generate_question_pair_for_block,
     normalize_explanation_text,
+    preferred_coding_language_for_block,
 )
 
 
@@ -92,7 +95,11 @@ def _ensure_block_transcript(course_state: dict, block: CourseBlock) -> list[dic
                 "created_at": timezone.now().isoformat(),
                 "role": "assistant",
                 "kind": "text",
-                "text": f"Welcome to {block.title}. Tap Quiz to get a question for this block, or ask about anything in the course.",
+                "text": (
+                    f"Welcome to {block.title}. You are in practice mode. "
+                    "Tap Quiz to get a question for this block, or ask about anything in the course. "
+                    'If you wish to validate your practice averages then please click "Validate" to enter validate mode.'
+                ),
                 "source_blocks": [block.title],
             }
         )
@@ -187,6 +194,22 @@ def _question_prompt_message(course_state: dict, block: CourseBlock, question: Q
     return message
 
 
+def _move_pending_question_message_to_bottom(course_state: dict, block: CourseBlock, question: QuestionBankItem) -> bool:
+    transcript = _ensure_block_transcript(course_state, block)
+    for index in range(len(transcript) - 1, -1, -1):
+        message = transcript[index]
+        if (
+            message.get("kind") == "question"
+            and message.get("question_id") == question.pk
+            and not message.get("answered")
+            and not message.get("flagged")
+        ):
+            if index != len(transcript) - 1:
+                transcript.append(transcript.pop(index))
+            return True
+    return False
+
+
 def _normalize_requested_question_type(question_type: str | None) -> str | None:
     if question_type in {QuestionBankItem.QuestionType.MCQ, QuestionBankItem.QuestionType.MAQ, QuestionBankItem.QuestionType.WAQ}:
         return question_type
@@ -231,6 +254,9 @@ def _course_question_queryset(course: Course, block: CourseBlock, course_state: 
         block=block,
         block__available_from__lte=timezone.localdate(),
     ).exclude(pk__in=_flagged_question_ids(course_state))
+    preferred_coding_language = preferred_coding_language_for_block(block)
+    if preferred_coding_language:
+        queryset = queryset.filter(Q(is_coding_question=False) | Q(coding_language=preferred_coding_language))
     normalized_type = _normalize_requested_question_type(question_type)
     if normalized_type:
         queryset = queryset.filter(question_type=normalized_type)
@@ -280,9 +306,18 @@ def _pick_unseen_question(course: Course, block: CourseBlock, course_state: dict
         recent_question_ids,
         covered_objective_ids,
     ) = _block_question_history(queryset, course_state, block)
+    preferred_languages_by_block: dict[int, str] = {}
     candidates = []
     for question in questions:
         if _question_state(course_state, question.pk)["times_presented"] != 0:
+            continue
+        preferred_coding_language = ""
+        if question.is_coding_question:
+            preferred_coding_language = preferred_languages_by_block.get(question.block_id, "")
+            if not preferred_coding_language:
+                preferred_coding_language = preferred_coding_language_for_block(question.block)
+                preferred_languages_by_block[question.block_id] = preferred_coding_language
+        if not coding_question_matches_expected_language(question, preferred_coding_language):
             continue
         candidates.append(
             (
@@ -291,6 +326,7 @@ def _pick_unseen_question(course: Course, block: CourseBlock, course_state: dict
                 chunk_presented_counts.get(int(question.source_chunk_id or 0), 0),
                 1 if question.learning_objective_id in recent_objective_ids else 0,
                 1 if question.pk in recent_question_ids else 0,
+                *coding_question_quality_sort_key(question),
                 question.cohort_seen_count,
                 question.created_at,
                 question.pk,
@@ -312,10 +348,19 @@ def _pick_retry_question(course: Course, block: CourseBlock, course_state: dict,
         recent_question_ids,
         _covered_objective_ids,
     ) = _block_question_history(queryset, course_state, block)
+    preferred_languages_by_block: dict[int, str] = {}
     candidates = []
     for question in questions:
         state = _question_state(course_state, question.pk)
         if state["times_correct"] > 0 or state["retired_at"] or state["times_incorrect"] == 0:
+            continue
+        preferred_coding_language = ""
+        if question.is_coding_question:
+            preferred_coding_language = preferred_languages_by_block.get(question.block_id, "")
+            if not preferred_coding_language:
+                preferred_coding_language = preferred_coding_language_for_block(question.block)
+                preferred_languages_by_block[question.block_id] = preferred_coding_language
+        if not coding_question_matches_expected_language(question, preferred_coding_language):
             continue
         if completion_sequence - state["last_presented_sequence"] < PREVIEW_RETRY_COMPLETION_GAP:
             continue
@@ -325,6 +370,7 @@ def _pick_retry_question(course: Course, block: CourseBlock, course_state: dict,
                 1 if question.pk in recent_question_ids else 0,
                 objective_presented_counts.get(int(question.learning_objective_id or 0), 0),
                 chunk_presented_counts.get(int(question.source_chunk_id or 0), 0),
+                *coding_question_quality_sort_key(question),
                 state["last_presented_sequence"],
                 state["times_incorrect"],
                 question.pk,
@@ -419,6 +465,9 @@ def request_preview_quiz(request, course: Course, block: CourseBlock, requested_
     if is_new_request:
         _mark_question_presented(course_state, block, question)
         _question_prompt_message(course_state, block, question)
+    else:
+        if not _move_pending_question_message_to_bottom(course_state, block, question):
+            _question_prompt_message(course_state, block, question)
 
     request.session.modified = True
     return serialize_preview_state(request, course, active_block_id=block.pk)
@@ -737,8 +786,8 @@ def _feedback_text(question: QuestionBankItem, selected_answers, is_correct: boo
             return f"Correct. {explanation}"
         return "Correct. Nice work."
     if explanation:
-        return f"Not quite. The correct answer is {question.correct_answer}. {explanation}"
-    return f"Not quite. The correct answer is {question.correct_answer}."
+        return explanation
+    return "Not quite."
 
 
 def _feedback_with_keep_going_line(course_state: dict, feedback_text: str) -> str:
@@ -872,7 +921,7 @@ def flag_preview_question(request, course: Course, block: CourseBlock, question_
         block,
         "assistant",
         "text",
-        text="Thanks. I won't show this practice question again here, and its linked validation variant has been removed too.",
+        text="Thanks. I won't show this question again here, and its linked validation question has been removed too.",
         source_blocks=[block.title],
     )
     request.session.modified = True
@@ -1182,9 +1231,19 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
     coverage = round((covered_objective_count * 100 / total_objectives), 2) if total_objectives else 0.0
     engagement = round(min(100, on_time_count * 100 / target_question_count), 2) if today >= block.available_from else 0.0
     target = round(min(100, completed_count * 100 / target_question_count), 2)
+    overall = _weighted_practice_score(
+        block.course,
+        {
+            "mastery": mastery,
+            "coverage": coverage,
+            "engagement": engagement,
+            "target": target,
+        },
+    )
     advanced_question_start_percent = _advanced_question_start_percent(block.course)
     advanced_question_types_unlocked = _advanced_question_types_unlocked(block.course, block, course_state)
     return {
+        "overall": overall,
         "mastery": mastery,
         "coverage": coverage,
         "engagement": engagement,

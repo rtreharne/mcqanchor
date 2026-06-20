@@ -8,6 +8,7 @@ from django.contrib import messages
 from django.contrib.auth import authenticate, login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LogoutView
+from django import forms
 from django.db import close_old_connections, transaction
 from django.db.models import Avg, Count, Q
 from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonResponse
@@ -59,6 +60,7 @@ from standalone.models import (
     TeacherInvitation,
     TeacherProfile,
     User,
+    ValidationAttempt,
     ValidationBooking,
     ValidationEvent,
     ValidationPack,
@@ -81,6 +83,22 @@ from standalone.services.preview import (
     serialize_preview_state,
     submit_preview_answer,
 )
+from standalone.services.preview_validation import (
+    confirm_preview_student_validate,
+    draft_preview_student_validate_answer,
+    draft_preview_validation_answer,
+    preview_validation_history_items,
+    preview_validation_history_session,
+    reset_preview_validation_state,
+    reveal_preview_validation_next,
+    reveal_preview_student_validate_next,
+    serialize_preview_student_validate_state,
+    serialize_preview_validation_state,
+    skip_preview_student_validate_question,
+    skip_preview_validation_question,
+    submit_preview_student_validate_response,
+    submit_preview_validation_answer,
+)
 from standalone.services.questions import generate_question_banks
 from standalone.services.student_practice import (
     draft_student_practice_written_answer,
@@ -91,6 +109,29 @@ from standalone.services.student_practice import (
     submit_student_practice_answer,
 )
 from standalone.services.validation_pdf import build_validation_pack_pdf
+from standalone.services.validation_flow import (
+    ValidationFlowError,
+    confirm_official_validation_instructions,
+    current_room_code,
+    draft_official_validation_answer,
+    draft_validation_practice_answer,
+    ensure_room_code_secret,
+    get_or_create_official_attempt,
+    get_or_create_validation_practice_attempt,
+    restart_validation_practice_attempt,
+    release_event_feedback,
+    reveal_official_validation_next,
+    reveal_validation_practice_next,
+    report_validation_presence,
+    room_code_client_payload,
+    room_code_payload,
+    serialize_official_validation_session,
+    serialize_validation_practice_session,
+    skip_official_validation_question,
+    skip_validation_practice_question,
+    submit_official_validation_response,
+    submit_validation_practice_response,
+)
 from standalone.tasks import (
     analyze_course_pdf_import_task,
     create_blocks_from_course_import_task,
@@ -303,8 +344,17 @@ def teacher_dashboard(request: HttpRequest) -> HttpResponse:
     )
     course_list = list(courses)
     _attach_course_practice_averages(course_list)
+    validation_events = list(
+        ValidationEvent.objects.filter(
+            course_id__in=[course.pk for course in course_list],
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+        )
+        .select_related("course")
+        .order_by("starts_at", "created_at")
+    )
     context = {
         "courses": course_list,
+        "validation_events": validation_events,
         "dashboard_stats": {
             "course_count": len(course_list),
             "student_count": sum(course.student_count for course in course_list),
@@ -321,13 +371,48 @@ def teacher_dashboard(request: HttpRequest) -> HttpResponse:
 def student_dashboard(request: HttpRequest) -> HttpResponse:
     if not _is_student(request.user):
         raise Http404
-    enrollments = Enrollment.objects.filter(student=request.user).select_related("course", "course__config")
-    course_ids = enrollments.values_list("course_id", flat=True)
-    upcoming_events = ValidationEvent.objects.filter(course_id__in=course_ids, starts_at__gte=timezone.now()).order_by("starts_at")
+    enrollments = list(
+        Enrollment.objects.filter(student=request.user)
+        .select_related("course", "course__config")
+        .prefetch_related("validation_bookings__event")
+    )
+    course_ids = [enrollment.course_id for enrollment in enrollments]
+    now = timezone.now()
+    events = list(
+        ValidationEvent.objects.filter(course_id__in=course_ids, mode=ValidationEvent.Mode.DIGITAL_INVIGILATION)
+        .select_related("course")
+        .order_by("starts_at", "created_at")
+    )
+    attempts_by_key = {
+        (attempt.enrollment_id, attempt.event_id): attempt
+        for attempt in ValidationAttempt.objects.filter(enrollment__student=request.user).select_related("event")
+    }
+    bookings_by_key = {
+        (booking.enrollment_id, booking.event_id): booking
+        for booking in ValidationBooking.objects.filter(enrollment__student=request.user).select_related("event")
+    }
+    upcoming_sessions = []
+    for enrollment in enrollments:
+        enrollment_events = [event for event in events if event.course_id == enrollment.course_id]
+        enrollment.booked_validation_events = []
+        enrollment.bookable_validation_events = []
+        for event in enrollment_events:
+            attempt = attempts_by_key.get((enrollment.pk, event.pk))
+            booking = bookings_by_key.get((enrollment.pk, event.pk))
+            event.student_attempt = attempt
+            event.student_booking = booking
+            event.student_spaces_left = event.spaces_left
+            event.student_recent_booking_count = event.recent_booking_count(hours=24)
+            if booking and booking.status == ValidationBooking.Status.BOOKED:
+                enrollment.booked_validation_events.append(event)
+                continue
+            if event.booking_is_open(now):
+                enrollment.bookable_validation_events.append(event)
+                upcoming_sessions.append(event)
     return render(
         request,
         "standalone/student_dashboard.html",
-        {"enrollments": enrollments, "upcoming_events": upcoming_events},
+        {"enrollments": enrollments, "upcoming_events": upcoming_sessions, "now": now},
     )
 
 
@@ -424,6 +509,7 @@ def course_delete(request: HttpRequest, course_id: int) -> HttpResponse:
 
 
 def _course_detail_context(course: Course):
+    config, _ = CourseConfig.objects.get_or_create(course=course)
     blocks = list(
         course.blocks.select_related("config")
         .annotate(
@@ -448,16 +534,22 @@ def _course_detail_context(course: Course):
         return_to = f"{reverse('standalone:course_detail', args=[course.pk])}#assets-content-{block.pk}"
         block.upload_url = f"{reverse('standalone:asset_upload', args=[block.pk])}?next={quote(return_to, safe='/:?=&')}"
 
+    events = list(
+        course.validation_events.filter(mode=ValidationEvent.Mode.DIGITAL_INVIGILATION)
+        .prefetch_related("blocks")
+        .order_by("starts_at", "created_at")
+    )
     return {
         "course": course,
+        "course_config_form": CourseConfigForm(instance=config),
         "blocks": blocks,
         "course_student_count": course.enrollments.count(),
         "draft_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.DRAFT).count(),
         "approved_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.APPROVED).count(),
-        "events": course.validation_events.all(),
+        "events": events,
         "recent_imports": course.imports.order_by("-created_at")[:3],
         "allowed_emails": course.allowed_emails.all(),
-        "self_enrol_enabled": course.config.self_enrol_enabled and settings.STANDALONE_ENABLE_SELF_ENROL,
+        "self_enrol_enabled": config.self_enrol_enabled and settings.STANDALONE_ENABLE_SELF_ENROL,
         "self_enrol_url": reverse("standalone:self_enrol", args=[course.slug]),
         "active_magic_link_count": active_magic_link_count,
     }
@@ -488,6 +580,164 @@ def _normalise_course_practice_averages(course: Course) -> None:
         setattr(course, attr_name, metric_value)
         metrics[metric_name] = metric_value
     course.practice_overall_average = _weighted_practice_average(course, metrics)
+
+
+def _student_sidebar_validation_booking_url(enrollment: Enrollment) -> str:
+    now = timezone.now()
+    events = list(
+        ValidationEvent.objects.filter(course=enrollment.course, mode=ValidationEvent.Mode.DIGITAL_INVIGILATION)
+        .order_by("starts_at", "created_at")
+    )
+    attempts_by_event_id = {
+        attempt.event_id: attempt
+        for attempt in ValidationAttempt.objects.filter(enrollment=enrollment).select_related("event")
+    }
+    bookings_by_event_id = {
+        booking.event_id: booking
+        for booking in ValidationBooking.objects.filter(enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
+    }
+
+    for event in events:
+        if event.pk in bookings_by_event_id:
+            attempt = attempts_by_event_id.get(event.pk)
+            if attempt is not None:
+                return reverse("standalone:validation_attempt", args=[attempt.pk])
+            if event.starts_at <= now:
+                return reverse("standalone:validation_start", args=[event.pk])
+            return reverse("standalone:student_dashboard")
+
+    for event in events:
+        if event.booking_is_open(now):
+            return reverse("standalone:validation_book", args=[event.pk])
+
+    return reverse("standalone:student_dashboard")
+
+
+def _preview_sidebar_validation_booking_url(course: Course) -> str:
+    return f"{reverse('standalone:course_detail', args=[course.pk])}#course-validation-heading"
+
+
+def _preview_has_bookable_validation_sessions(course: Course, *, now=None) -> bool:
+    current_time = now or timezone.now()
+    return course.validation_events.filter(mode=ValidationEvent.Mode.DIGITAL_INVIGILATION).exists() and any(
+        event.booking_is_open(current_time)
+        for event in course.validation_events.filter(mode=ValidationEvent.Mode.DIGITAL_INVIGILATION).order_by("starts_at", "created_at")
+    )
+
+
+def _preview_practice_validation_sidebar_cta(request: HttpRequest, course: Course) -> dict | None:
+    now = timezone.now()
+    events = list(course.validation_events.filter(mode=ValidationEvent.Mode.DIGITAL_INVIGILATION).order_by("starts_at", "created_at"))
+    booked_event_id = _get_preview_validation_booking_event_id(request, course.pk)
+    booked_event = next((event for event in events if event.pk == booked_event_id), None)
+
+    if booked_event is not None and now >= booked_event.session_end_at:
+        _set_preview_validation_booking_event_id(request, course.pk, None)
+        booked_event = None
+
+    if booked_event is not None:
+        if booked_event.starts_at <= now < booked_event.session_end_at:
+            return {
+                "label": "Validate",
+                "url": reverse("standalone:preview_student_validate", args=[course.pk]),
+                "detail": f"Session live now • {booked_event.location}",
+            }
+        return {
+            "label": "Practice Validation",
+            "url": _preview_practice_validation_url(course.pk, restart=True),
+            "detail": f"Booked for {booked_event.starts_at:%d %b %Y, %H:%M}",
+        }
+
+    booking_sessions = _serialize_preview_booking_sessions(course, now=now)
+    if booking_sessions:
+        detail = (
+            booking_sessions[0]["datetime"]
+            if len(booking_sessions) == 1
+            else f"{len(booking_sessions)} sessions available"
+        )
+        return {
+            "label": "Book Validation",
+            "url": reverse("standalone:preview_student_validate", args=[course.pk]),
+            "detail": detail,
+        }
+    return {
+        "label": "Book Validation",
+        "url": "",
+        "detail": "No validation sessions available right now",
+        "disabled": True,
+    }
+
+
+def _student_practice_validation_sidebar_cta(enrollment: Enrollment) -> dict | None:
+    state = _student_validate_event_state(enrollment)
+    if state["state"] == "live":
+        return {
+            "label": "Validate",
+            "url": reverse("standalone:student_validate", args=[enrollment.course_id]),
+            "detail": f"Session live now • {state['event'].location}",
+        }
+    if state["state"] == "booked_future":
+        event = state["event"]
+        return {
+            "label": "Practice Validation",
+            "url": _practice_validation_url(enrollment.course_id, restart=True),
+            "detail": f"Booked for {event.starts_at:%d %b %Y, %H:%M}",
+        }
+    if state["state"] == "bookable":
+        event = state["event"]
+        return {
+            "label": "Book Validation",
+            "url": reverse("standalone:student_validate", args=[enrollment.course_id]),
+            "detail": f"{event.starts_at:%d %b %Y, %H:%M} to {event.session_end_at:%H:%M}",
+        }
+    return {
+        "label": "Book Validation",
+        "url": "",
+        "detail": "No validation sessions available right now",
+        "disabled": True,
+    }
+
+
+def _preview_validation_booking_session_key(course_id: int) -> str:
+    return f"preview_validation_booking:{course_id}"
+
+
+def _get_preview_validation_booking_event_id(request: HttpRequest, course_id: int) -> int | None:
+    try:
+        return int(request.session.get(_preview_validation_booking_session_key(course_id)) or 0) or None
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_preview_validation_booking_event_id(request: HttpRequest, course_id: int, event_id: int | None) -> None:
+    session_key = _preview_validation_booking_session_key(course_id)
+    if event_id:
+        request.session[session_key] = int(event_id)
+    else:
+        request.session.pop(session_key, None)
+    request.session.modified = True
+
+
+def _serialize_preview_booking_sessions(course: Course, *, now=None) -> list[dict]:
+    current_time = now or timezone.now()
+    base_url = reverse("standalone:preview_student_validate", args=[course.pk])
+    sessions = []
+    for event in course.validation_events.filter(mode=ValidationEvent.Mode.DIGITAL_INVIGILATION).order_by("starts_at", "created_at"):
+        if not event.booking_is_open(current_time):
+            continue
+        sessions.append(
+            {
+                "id": event.pk,
+                "title": f"{event.starts_at:%a %d %b}",
+                "datetime": f"{event.starts_at:%d %b %Y, %H:%M} to {event.session_end_at:%H:%M}",
+                "location": event.location,
+                "spaces_left": event.spaces_left,
+                "recent_booking_count": event.recent_booking_count(hours=24),
+                "question_count": event.question_count,
+                "url": f"{base_url}?book_event={event.pk}",
+            }
+        )
+    return sessions
 
 
 def _weighted_practice_average(course: Course, metrics: dict) -> float:
@@ -607,6 +857,56 @@ def update_course_field(request: HttpRequest, course_id: int, field_name: str) -
     return JsonResponse({"ok": True, "value": getattr(updated_course, field_name), "display_value": getattr(updated_course, field_name)})
 
 
+def _course_config_form_payload(config: CourseConfig, field_overrides: dict[str, object] | None = None) -> dict[str, object]:
+    field_overrides = field_overrides or {}
+    form = CourseConfigForm(instance=config)
+    payload: dict[str, object] = {}
+    for name, field in form.fields.items():
+        if name in field_overrides:
+            value = field_overrides[name]
+        else:
+            value = getattr(config, name)
+        if isinstance(field, forms.BooleanField):
+            payload[name] = "on" if value else ""
+        else:
+            payload[name] = "" if value is None else value
+    return payload
+
+
+@login_required
+def update_course_config_field(request: HttpRequest, course_id: int, field_name: str) -> JsonResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    config, _ = CourseConfig.objects.get_or_create(course=course)
+    config_form = CourseConfigForm(instance=config)
+    if field_name not in config_form.fields:
+        raise Http404
+
+    field = config_form.fields[field_name]
+    override_value: object
+    if isinstance(field, forms.BooleanField):
+        override_value = request.POST.get(field_name) in {"1", "true", "True", "on", "yes"}
+    else:
+        override_value = request.POST.get(field_name, "")
+
+    form = CourseConfigForm(_course_config_form_payload(config, {field_name: override_value}), instance=config)
+    if not form.is_valid():
+        return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
+
+    updated_config = form.save()
+    value = getattr(updated_config, field_name)
+    return JsonResponse(
+        {
+            "ok": True,
+            "value": value,
+            "raw_value": value,
+            "checked": bool(value) if isinstance(field, forms.BooleanField) else None,
+            "message": "Settings updated.",
+        }
+    )
+
+
 @login_required
 def student_preview(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
@@ -621,6 +921,9 @@ def student_preview(request: HttpRequest, course_id: int) -> HttpResponse:
             "preview_state": preview_state,
             "action_url_template": reverse("standalone:student_preview_action", args=[course.pk, 0, "ACTION"]),
             "is_student_practice": False,
+            "practice_validation_url": _preview_practice_validation_url(course.pk, restart=True),
+            "validation_entry_url": reverse("standalone:preview_student_validate", args=[course.pk]),
+            "validation_sidebar_cta": _preview_practice_validation_sidebar_cta(request, course),
         },
     )
 
@@ -758,11 +1061,14 @@ def course_config_edit(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
-    form = CourseConfigForm(request.POST or None, instance=course.config)
+    config, _ = CourseConfig.objects.get_or_create(course=course)
+    form = CourseConfigForm(request.POST or None, instance=config)
     if request.method == "POST" and form.is_valid():
         form.save()
         messages.success(request, "Course configuration updated.")
-        return redirect("standalone:course_detail", course.pk)
+        return redirect(f"{reverse('standalone:course_detail', args=[course.pk])}#course-settings-content")
+    if request.method == "GET":
+        return redirect(f"{reverse('standalone:course_detail', args=[course.pk])}#course-settings-content")
     return render(request, "standalone/form_page.html", {"title": f"Configure {course.title}", "form": form})
 
 
@@ -1043,10 +1349,6 @@ def block_delete(request: HttpRequest, block_id: int) -> HttpResponse:
         raise Http404
     block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id)
     course = _teacher_course_or_404(request.user, block.course_id)
-    if block.regeneration_status in {CourseBlock.RegenerationStatus.QUEUED, CourseBlock.RegenerationStatus.RUNNING}:
-        messages.error(request, f"Cannot delete {block.title} while re-generation is in progress.")
-        return redirect("standalone:course_detail", course.pk)
-
     block_title = block.title
     delete_block_and_resequence(block)
     messages.success(request, f"Deleted block {block_title}.")
@@ -1142,16 +1444,47 @@ def validation_event_create(request: HttpRequest, course_id: int) -> HttpRespons
     if not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
-    initial = {"freeze_at": timezone.now() + timedelta(hours=24)}
-    form = ValidationEventForm(request.POST or None, initial=initial)
+    initial = {
+        "starts_at": timezone.now() + timedelta(days=1),
+        "ends_at": timezone.now() + timedelta(days=1, hours=3),
+        "late_booking_cutoff_minutes": 20,
+        "feedback_release_mode": (
+            ValidationEvent.FeedbackReleaseMode.IMMEDIATE
+            if course.config.show_validation_feedback_immediately
+            else ValidationEvent.FeedbackReleaseMode.MANUAL
+        ),
+    }
+    form = ValidationEventForm(request.POST or None, initial=initial, course=course)
     if request.method == "POST" and form.is_valid():
         event = form.save(commit=False)
         event.course = course
         event.created_by = request.user
+        event.mode = ValidationEvent.Mode.DIGITAL_INVIGILATION
         event.save()
-        messages.success(request, "Validation event created.")
+        if event.mode == ValidationEvent.Mode.DIGITAL_INVIGILATION:
+            ensure_room_code_secret(event)
+        messages.success(request, "Validation session created.")
         return redirect("standalone:course_detail", course.pk)
-    return render(request, "standalone/form_page.html", {"title": f"Create validation event for {course.title}", "form": form})
+    return render(request, "standalone/form_page.html", {"title": f"Create validation session for {course.title}", "form": form})
+
+
+@login_required
+def validation_event_delete(request: HttpRequest, event_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    event = get_object_or_404(ValidationEvent.objects.select_related("course"), pk=event_id)
+    course = _teacher_course_or_404(request.user, event.course_id)
+    if event.has_student_submissions:
+        messages.error(request, "This validation session cannot be deleted because a student has already submitted validation.")
+        return redirect("standalone:course_detail", course.pk)
+    event.delete()
+    messages.success(request, "Deleted validation session.")
+    return redirect("standalone:course_detail", course.pk)
+
+
+def _event_start_is_available(event: ValidationEvent, now=None) -> bool:
+    current_time = now or timezone.now()
+    return event.starts_at <= current_time < event.session_end_at
 
 
 @login_required
@@ -1160,11 +1493,24 @@ def validation_book(request: HttpRequest, event_id: int) -> HttpResponse:
         raise Http404
     event = get_object_or_404(ValidationEvent.objects.select_related("course"), pk=event_id)
     enrollment = _student_enrollment_or_404(request.user, event.course_id)
-    if timezone.now() >= event.freeze_at:
-        messages.error(request, "Booking has closed for this validation session.")
+    if event.mode != ValidationEvent.Mode.DIGITAL_INVIGILATION:
+        messages.error(request, "Only digital invigilated validations can be booked.")
         return redirect("standalone:student_dashboard")
-    if not event.has_space:
-        messages.error(request, "This validation session is already full.")
+    if not event.requires_booking:
+        messages.error(request, "This validation does not require booking.")
+        return redirect("standalone:student_dashboard")
+    if not event.booking_is_open():
+        deadline = event.booking_deadline
+        if deadline and timezone.now() >= deadline:
+            messages.error(request, "Booking has closed for this validation session.")
+        elif not event.has_space:
+            messages.error(request, "This validation session is already full.")
+        else:
+            messages.error(request, "This validation is not currently open for booking.")
+        return redirect("standalone:student_dashboard")
+    deadline = event.booking_deadline
+    if deadline and timezone.now() >= deadline:
+        messages.error(request, "Booking has closed for this validation session.")
         return redirect("standalone:student_dashboard")
     booking, created = ValidationBooking.objects.get_or_create(event=event, enrollment=enrollment)
     if not created and booking.status == ValidationBooking.Status.BOOKED:
@@ -1176,7 +1522,7 @@ def validation_book(request: HttpRequest, event_id: int) -> HttpResponse:
     send_logged_email(
         recipient=request.user.email,
         subject=f"Validation booked for {event.course.title}",
-        body=f"You are booked for {event.title} on {event.starts_at:%d %b %Y %H:%M} at {event.location}.",
+        body=f"You are booked for a validation session on {event.starts_at:%d %b %Y %H:%M} at {event.location}.",
         event_type="validation_booking",
         related_object=str(booking.pk),
     )
@@ -1189,7 +1535,8 @@ def validation_cancel(request: HttpRequest, booking_id: int) -> HttpResponse:
     if request.method != "POST" or not _is_student(request.user):
         raise Http404
     booking = get_object_or_404(ValidationBooking.objects.select_related("event", "enrollment__student"), pk=booking_id, enrollment__student=request.user)
-    if timezone.now() >= booking.event.freeze_at:
+    deadline = booking.event.booking_deadline
+    if deadline and timezone.now() >= deadline:
         messages.error(request, "This booking can no longer be cancelled.")
         return redirect("standalone:student_dashboard")
     booking.status = ValidationBooking.Status.CANCELLED
@@ -1198,12 +1545,903 @@ def validation_cancel(request: HttpRequest, booking_id: int) -> HttpResponse:
     send_logged_email(
         recipient=request.user.email,
         subject=f"Validation cancelled for {booking.event.course.title}",
-        body=f"Your booking for {booking.event.title} has been cancelled.",
+        body="Your validation session booking has been cancelled.",
         event_type="validation_cancellation",
         related_object=str(booking.pk),
     )
     messages.success(request, "Validation booking cancelled.")
     return redirect("standalone:student_dashboard")
+
+
+def _practice_validation_url(course_id: int, *, restart: bool = False) -> str:
+    url = reverse("standalone:validation_practice_session", args=[course_id])
+    return f"{url}?restart=1" if restart else url
+
+
+def _preview_practice_validation_url(course_id: int, *, restart: bool = False) -> str:
+    url = reverse("standalone:preview_validation_practice", args=[course_id])
+    return f"{url}?restart=1" if restart else url
+
+
+@login_required
+def validation_practice_session(request: HttpRequest, course_id: int) -> HttpResponse:
+    if not _is_student(request.user):
+        raise Http404
+    enrollment = _student_enrollment_or_404(request.user, course_id)
+    review_attempt_id = int(request.GET.get("review") or 0)
+    try:
+        if review_attempt_id > 0:
+            attempt = get_object_or_404(
+                PracticeAttempt.objects.select_related("enrollment", "enrollment__course"),
+                pk=review_attempt_id,
+                enrollment=enrollment,
+                attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+                completed_at__isnull=False,
+            )
+        elif request.GET.get("restart") == "1":
+            attempt = restart_validation_practice_attempt(enrollment)
+        else:
+            attempt = get_or_create_validation_practice_attempt(enrollment)
+    except ValidationFlowError as error:
+        messages.error(request, str(error))
+        return redirect("standalone:student_dashboard")
+    session_state = serialize_validation_practice_session(attempt, request=request)
+    session_state["eyebrow"] = "Practice validation"
+    sidebar_state = _student_validate_sidebar_state(
+        enrollment=enrollment,
+        title="Practice validation",
+        copy="This validation rehearsal is untimed. Work through the locked set in order. Immediate feedback is hidden.",
+        primary_action={"label": "Start again", "url": _practice_validation_url(course_id, restart=True), "style": "button"},
+        secondary_action={"label": "Back to validate", "url": reverse("standalone:student_validate", args=[course_id]), "style": "secondary"},
+        active_history_id=review_attempt_id if review_attempt_id > 0 else (attempt.pk if attempt.completed_at else None),
+    )
+    return render(
+        request,
+        "standalone/student_validate.html",
+        {
+            "course": enrollment.course,
+            "session_state": session_state,
+            "sidebar_state": sidebar_state,
+            "practice_url": reverse("standalone:practice_quiz", args=[course_id]),
+            "session_action_url": reverse("standalone:validation_practice_action", args=[course_id, attempt.pk, "ACTION"]),
+            "exit_url": reverse("standalone:practice_quiz", args=[course_id]),
+            "exit_label": "Back to practice",
+        },
+    )
+
+
+@login_required
+def preview_validation_practice(request: HttpRequest, course_id: int) -> HttpResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    review_history_id = int(request.GET.get("review") or 0)
+    try:
+        if review_history_id > 0:
+            session_state = preview_validation_history_session(request, course, review_history_id)
+        else:
+            if request.GET.get("restart") == "1":
+                reset_preview_validation_state(request, course)
+            session_state = serialize_preview_validation_state(request, course)
+    except ValidationFlowError as error:
+        messages.error(request, str(error))
+        return redirect("standalone:student_preview", course.pk)
+    session_state["eyebrow"] = "Practice validation"
+    sidebar_state = _teacher_validate_sidebar_state(
+        request,
+        course,
+        title="Practice validation",
+        copy="This validation rehearsal is untimed. Work through the locked set in order. Immediate feedback is hidden.",
+        primary_action={"label": "Start again", "url": _preview_practice_validation_url(course.pk, restart=True), "style": "button"},
+        secondary_action={"label": "Back to validate", "url": reverse("standalone:preview_student_validate", args=[course.pk]), "style": "secondary"},
+        active_history_id=review_history_id,
+    )
+    return _render_teacher_preview_validate(
+        request,
+        course,
+        session_state,
+        sidebar_state,
+        exit_url=reverse("standalone:student_preview", args=[course.pk]),
+        exit_label="Back to practice",
+        session_action_url=(
+            reverse("standalone:preview_validation_practice_action", args=[course.pk, "ACTION"])
+            if review_history_id <= 0
+            else ""
+        ),
+    )
+
+
+def _teacher_validate_course_metrics(request: HttpRequest, course: Course) -> dict:
+    return dict(serialize_preview_state(request, course).get("course", {}).get("metrics", {}))
+
+
+def _teacher_validation_sidebar_preview_state(request: HttpRequest, course: Course) -> dict:
+    return serialize_preview_state(request, course)
+
+
+def _teacher_validate_sidebar_state(
+    request: HttpRequest,
+    course: Course,
+    *,
+    title: str,
+    copy: str,
+    meta_rows: list[str] | None = None,
+    primary_action: dict | None = None,
+    secondary_action: dict | None = None,
+    active_history_id: int | None = None,
+    booking_sessions: list[dict] | None = None,
+    compact_booking_only: bool = False,
+    hide_validation_panel: bool = False,
+) -> dict:
+    history = []
+    base_url = reverse("standalone:preview_validation_practice", args=[course.pk])
+    for entry in preview_validation_history_items(request, course):
+        completed_at = str(entry.get("completed_at") or "")
+        history.append(
+            {
+                "id": entry["id"],
+                "label": timezone.datetime.fromisoformat(completed_at).strftime("%d %b %Y, %H:%M")
+                if completed_at
+                else "Completed preview",
+                "score": float(entry.get("score") or 0),
+                "question_count": int(entry.get("question_count") or 0),
+                "url": f"{base_url}?review={entry['id']}",
+                "is_active": int(active_history_id or 0) == int(entry["id"]),
+            }
+        )
+    return {
+        "title": title,
+        "copy": copy,
+        "meta_rows": meta_rows or [],
+        "primary_action": primary_action,
+        "secondary_action": secondary_action,
+        "booking_sessions": booking_sessions or [],
+        "compact_booking_only": compact_booking_only,
+        "hide_validation_panel": hide_validation_panel,
+        "course_metrics": _teacher_validate_course_metrics(request, course),
+        "practice_validation_history": history,
+    }
+
+
+def _render_teacher_preview_validate(
+    request: HttpRequest,
+    course: Course,
+    session_state: dict,
+    sidebar_state: dict,
+    *,
+    session_action_url: str = "",
+    exit_url: str | None = None,
+    exit_label: str | None = None,
+):
+    return render(
+        request,
+        "standalone/student_validate.html",
+        {
+            "course": course,
+            "session_state": session_state,
+            "sidebar_state": sidebar_state,
+            "sidebar_preview_state": _teacher_validation_sidebar_preview_state(request, course),
+            "practice_validation_url": _preview_practice_validation_url(course.pk, restart=True),
+            "validation_sidebar_cta": _preview_practice_validation_sidebar_cta(request, course),
+            "session_action_url": session_action_url,
+            "exit_url": exit_url or reverse("standalone:student_preview", args=[course.pk]),
+            "exit_label": exit_label or "Exit student view",
+        },
+    )
+
+
+@login_required
+def preview_student_validate(request: HttpRequest, course_id: int) -> HttpResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    now = timezone.now()
+    preview_events = list(
+        course.validation_events.filter(mode=ValidationEvent.Mode.DIGITAL_INVIGILATION).order_by("starts_at", "created_at")
+    )
+    book_event_id = request.GET.get("book_event")
+    if book_event_id:
+        selected_event = next((event for event in preview_events if str(event.pk) == str(book_event_id)), None)
+        if selected_event is not None and selected_event.booking_is_open(now):
+            _set_preview_validation_booking_event_id(request, course.pk, selected_event.pk)
+        return redirect("standalone:preview_student_validate", course.pk)
+
+    booked_event_id = _get_preview_validation_booking_event_id(request, course.pk)
+    booked_event = next((event for event in preview_events if event.pk == booked_event_id), None)
+    if booked_event is not None and now >= booked_event.session_end_at:
+        _set_preview_validation_booking_event_id(request, course.pk, None)
+        booked_event = None
+
+    if booked_event is not None and booked_event.starts_at <= now < booked_event.session_end_at:
+        try:
+            session_state = serialize_preview_student_validate_state(request, course, booked_event)
+        except ValidationFlowError as error:
+            messages.error(request, str(error))
+            return redirect("standalone:student_preview", course.pk)
+        sidebar_state = _teacher_validate_sidebar_state(
+            request,
+            course,
+            title="Validation session",
+            copy="A validation session is live now. Complete your validation here on this device.",
+            meta_rows=[
+                f"{booked_event.starts_at:%d %b %Y, %H:%M} to {booked_event.session_end_at:%d %b %Y, %H:%M}",
+                f"Location: {booked_event.location}",
+            ],
+        )
+        return _render_teacher_preview_validate(
+            request,
+            course,
+            session_state,
+            sidebar_state,
+            session_action_url=reverse("standalone:preview_student_validate_action", args=[course.pk, "ACTION"]),
+        )
+
+    if booked_event is not None and booked_event.starts_at > now:
+        session_state = _empty_validate_session_state(
+            course,
+            title="Validate",
+            transcript=[
+                _validation_status_message(
+                    "validate-booked-future",
+                    (
+                        f"Your validation is booked for {booked_event.starts_at:%d %b %Y, %H:%M}. "
+                        "You're currently out of session. Would you like to start a practice validation until it begins?"
+                    ),
+                    actions=[{"label": "Start practice validation", "url": _preview_practice_validation_url(course.pk, restart=True), "style": "button"}],
+                )
+            ],
+        )
+        sidebar_state = _teacher_validate_sidebar_state(
+            request,
+            course,
+            title="Validation booked",
+            copy="Your validation session is booked and ready for you at the scheduled time.",
+            meta_rows=[
+                f"{booked_event.starts_at:%d %b %Y, %H:%M} to {booked_event.session_end_at:%d %b %Y, %H:%M}",
+                f"Location: {booked_event.location}",
+            ],
+        )
+        return _render_teacher_preview_validate(request, course, session_state, sidebar_state)
+
+    booking_sessions = _serialize_preview_booking_sessions(course, now=now)
+    if booking_sessions:
+        session_state = _empty_validate_session_state(
+            course,
+            title="Validate",
+            transcript=[
+                _validation_status_message(
+                    "validate-bookable",
+                    "No validation session is active right now. Would you like to start a practice validation while you wait?",
+                    actions=[{"label": "Start practice validation", "url": _preview_practice_validation_url(course.pk, restart=True), "style": "button"}],
+                )
+            ],
+        )
+        sidebar_state = _teacher_validate_sidebar_state(
+            request,
+            course,
+            title="Book validation",
+            copy=(
+                "Choose a validation session from chat when you're ready."
+                if len(booking_sessions) == 1
+                else f"{len(booking_sessions)} validation sessions are currently open for booking."
+            ),
+            meta_rows=[f"{len(booking_sessions)} session{'s' if len(booking_sessions) != 1 else ''} available"],
+            primary_action={"label": "Book validation", "style": "button", "kind": "booking_options"},
+            booking_sessions=booking_sessions,
+            compact_booking_only=True,
+        )
+        return _render_teacher_preview_validate(request, course, session_state, sidebar_state)
+
+    session_state = _empty_validate_session_state(
+        course,
+        title="Validate",
+        transcript=[
+            _validation_status_message(
+                "validate-out-of-session",
+                "There is no live validation session for this course right now. Would you like to start a practice validation?",
+                actions=[{"label": "Start practice validation", "url": _preview_practice_validation_url(course.pk, restart=True), "style": "button"}],
+            )
+        ],
+    )
+    sidebar_state = _teacher_validate_sidebar_state(
+        request,
+        course,
+        title="Validation unavailable",
+        copy="There is no bookable or live validation session for this course right now.",
+        secondary_action={"label": "Exit student view", "url": reverse("standalone:student_preview", args=[course.pk]), "style": "secondary"},
+        hide_validation_panel=True,
+    )
+    return _render_teacher_preview_validate(request, course, session_state, sidebar_state)
+
+
+@login_required
+def preview_student_validate_action(request: HttpRequest, course_id: int, action: str) -> JsonResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    now = timezone.now()
+    booked_event_id = _get_preview_validation_booking_event_id(request, course.pk)
+    event = next(
+        (
+            candidate
+            for candidate in course.validation_events.filter(mode=ValidationEvent.Mode.DIGITAL_INVIGILATION).order_by("starts_at", "created_at")
+            if candidate.pk == booked_event_id and candidate.starts_at <= now < candidate.session_end_at
+        ),
+        None,
+    )
+    if event is None:
+        return JsonResponse({"ok": False, "error": "There is no live validation session to preview right now."}, status=400)
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    try:
+        if action == "confirm":
+            payload = confirm_preview_student_validate(request, course, event)
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "next":
+            payload = reveal_preview_student_validate_next(request, course, event)
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "draft_answer":
+            payload = draft_preview_student_validate_answer(
+                request,
+                course,
+                event,
+                int(data.get("question_id") or 0),
+                str(data.get("answer_text", "")).strip(),
+            )
+            return JsonResponse({"ok": True, "alignment": payload})
+        if action == "submit":
+            payload = submit_preview_student_validate_response(
+                request,
+                course,
+                event,
+                question_id=int(data.get("question_id") or 0) or None,
+                selected_answers=data.get("answers") or ([str(data.get("answer", "")).strip()] if data.get("answer") else []),
+                answer_text=str(data.get("answer_text", "")).strip(),
+                audit_prompt_id=data.get("audit_prompt_id"),
+            )
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "skip":
+            payload = skip_preview_student_validate_question(
+                request,
+                course,
+                event,
+                question_id=int(data.get("question_id") or 0),
+            )
+            return JsonResponse({"ok": True, "session": payload})
+    except ValidationFlowError as error:
+        return JsonResponse({"ok": False, "error": str(error)}, status=400)
+    raise Http404
+
+
+@login_required
+def preview_validation_practice_action(request: HttpRequest, course_id: int, action: str) -> JsonResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    try:
+        if action == "next":
+            payload = reveal_preview_validation_next(request, course)
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "draft_answer":
+            payload = draft_preview_validation_answer(
+                request,
+                course,
+                int(data.get("question_id") or 0),
+                str(data.get("answer_text", "")).strip(),
+            )
+            return JsonResponse({"ok": True, "alignment": payload})
+        if action == "submit":
+            payload = submit_preview_validation_answer(
+                request,
+                course,
+                int(data.get("question_id") or 0),
+                data.get("answers") or ([str(data.get("answer", "")).strip()] if data.get("answer") else []),
+                answer_text=str(data.get("answer_text", "")).strip(),
+            )
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "skip":
+            payload = skip_preview_validation_question(
+                request,
+                course,
+                int(data.get("question_id") or 0),
+            )
+            return JsonResponse({"ok": True, "session": payload})
+    except ValidationFlowError as error:
+        return JsonResponse({"ok": False, "error": str(error)}, status=400)
+    raise Http404
+
+
+@login_required
+def validation_practice_action(request: HttpRequest, course_id: int, attempt_id: int, action: str) -> JsonResponse:
+    if request.method != "POST" or not _is_student(request.user):
+        raise Http404
+    enrollment = _student_enrollment_or_404(request.user, course_id)
+    attempt = get_object_or_404(
+        PracticeAttempt.objects.select_related("enrollment", "enrollment__course"),
+        pk=attempt_id,
+        enrollment=enrollment,
+        attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+    )
+    try:
+        if action == "next":
+            payload = reveal_validation_practice_next(request, attempt)
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "draft_answer":
+            data = json.loads(request.body.decode("utf-8"))
+            payload = draft_validation_practice_answer(
+                request,
+                attempt,
+                int(data.get("question_id") or 0),
+                str(data.get("answer_text", "")).strip(),
+            )
+            return JsonResponse({"ok": True, "alignment": payload})
+        if action == "submit":
+            data = json.loads(request.body.decode("utf-8"))
+            payload = submit_validation_practice_response(
+                request,
+                attempt,
+                int(data.get("question_id") or 0),
+                data.get("answers") or ([str(data.get("answer", "")).strip()] if data.get("answer") else []),
+                answer_text=str(data.get("answer_text", "")).strip(),
+            )
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "skip":
+            data = json.loads(request.body.decode("utf-8"))
+            payload = skip_validation_practice_question(
+                request,
+                attempt,
+                int(data.get("question_id") or 0),
+            )
+            return JsonResponse({"ok": True, "session": payload})
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    except ValidationFlowError as error:
+        return JsonResponse({"ok": False, "error": str(error)}, status=400)
+    raise Http404
+
+
+def _student_validate_course_metrics(enrollment: Enrollment) -> dict:
+    return dict(serialize_student_practice_state(enrollment).get("course", {}).get("metrics", {}))
+
+
+def _student_practice_validation_history(enrollment: Enrollment, *, active_attempt_id: int | None = None) -> list[dict]:
+    attempts = (
+        PracticeAttempt.objects.filter(
+            enrollment=enrollment,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+            completed_at__isnull=False,
+        )
+        .annotate(question_count=Count("attempt_questions"))
+        .order_by("-completed_at", "-started_at")[:8]
+    )
+    base_url = reverse("standalone:validation_practice_session", args=[enrollment.course_id])
+    return [
+        {
+            "id": attempt.pk,
+            "label": attempt.completed_at.strftime("%d %b %Y, %H:%M") if attempt.completed_at else "Completed attempt",
+            "score": float(attempt.score or 0),
+            "question_count": int(attempt.question_count or 0),
+            "url": f"{base_url}?review={attempt.pk}",
+            "is_active": int(active_attempt_id or 0) == attempt.pk,
+        }
+        for attempt in attempts
+    ]
+
+
+def _student_validate_sidebar_state(
+    *,
+    enrollment: Enrollment,
+    title: str,
+    copy: str,
+    meta_rows: list[str] | None = None,
+    primary_action: dict | None = None,
+    secondary_action: dict | None = None,
+    active_history_id: int | None = None,
+) -> dict:
+    return {
+        "title": title,
+        "copy": copy,
+        "meta_rows": meta_rows or [],
+        "primary_action": primary_action,
+        "secondary_action": secondary_action,
+        "course_metrics": _student_validate_course_metrics(enrollment),
+        "practice_validation_history": _student_practice_validation_history(enrollment, active_attempt_id=active_history_id),
+    }
+
+
+def _empty_validate_session_state(course: Course, *, title: str, eyebrow: str = "Validate", transcript=None) -> dict:
+    return {
+        "mode": "student_validate",
+        "attempt_id": None,
+        "title": title,
+        "course_title": course.title,
+        "eyebrow": eyebrow,
+        "transcript": list(transcript or []),
+        "pending_question": None,
+        "pending_audit": None,
+        "completed": False,
+        "review_visible": False,
+        "score": 0.0,
+        "feedback_release_mode": ValidationEvent.FeedbackReleaseMode.IMMEDIATE,
+        "time_limit_minutes": 0,
+        "expires_at": "",
+        "time_remaining_seconds": 0,
+        "timer_running": False,
+        "show_timer": False,
+        "progress": {
+            "current_index": 0,
+            "total_questions": 0,
+            "answered_count": 0,
+            "remaining_count": 0,
+        },
+        "waq_draft": {},
+        "room_code": None,
+        "room_code_client": None,
+        "selected_blocks": [],
+        "navigation_grace_seconds": 10,
+        "navigation_warning_count": 0,
+        "invalidated_reason": "",
+        "awaiting_attendance_audit": False,
+        "instructions_confirmed": False,
+        "next_available": False,
+        "show_block_switcher": False,
+    }
+
+
+def _validation_status_message(message_id: str, text: str, *, actions=None) -> dict:
+    return {
+        "id": message_id,
+        "role": "assistant",
+        "kind": "cta" if actions else "text",
+        "text": text,
+        "actions": list(actions or []),
+    }
+
+
+def _digital_validation_events(course: Course):
+    return list(course.validation_events.filter(mode=ValidationEvent.Mode.DIGITAL_INVIGILATION).order_by("starts_at", "created_at"))
+
+
+def _booked_validation_lookup(enrollment: Enrollment):
+    bookings = {
+        booking.event_id: booking
+        for booking in ValidationBooking.objects.filter(
+            enrollment=enrollment,
+            status=ValidationBooking.Status.BOOKED,
+            event__mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+        ).select_related("event")
+    }
+    attempts = {
+        attempt.event_id: attempt
+        for attempt in ValidationAttempt.objects.filter(
+            enrollment=enrollment,
+            event__mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+        ).select_related("event", "booking")
+    }
+    return bookings, attempts
+
+
+def _student_validate_event_state(enrollment: Enrollment):
+    now = timezone.now()
+    course = enrollment.course
+    events = _digital_validation_events(course)
+    bookings_by_event_id, attempts_by_event_id = _booked_validation_lookup(enrollment)
+    live_booking = None
+    future_booking = None
+    bookable_event = None
+
+    for event in events:
+        booking = bookings_by_event_id.get(event.pk)
+        if booking and event.starts_at <= now < event.session_end_at:
+            return {
+                "state": "live",
+                "event": event,
+                "booking": booking,
+                "attempt": attempts_by_event_id.get(event.pk),
+            }
+        if booking and future_booking is None and event.starts_at > now:
+            future_booking = {"event": event, "booking": booking, "attempt": attempts_by_event_id.get(event.pk)}
+        if booking is None and bookable_event is None and event.booking_is_open(now):
+            bookable_event = event
+
+    if future_booking is not None:
+        return {"state": "booked_future", **future_booking}
+    if bookable_event is not None:
+        return {"state": "bookable", "event": bookable_event, "booking": None, "attempt": None}
+    return {"state": "out_of_session", "event": None, "booking": None, "attempt": None}
+
+
+def _render_student_validate(request: HttpRequest, enrollment: Enrollment, session_state: dict, sidebar_state: dict) -> HttpResponse:
+    return render(
+        request,
+        "standalone/student_validate.html",
+        {
+            "course": enrollment.course,
+            "session_state": session_state,
+            "sidebar_state": sidebar_state,
+            "sidebar_preview_state": serialize_student_practice_state(enrollment),
+            "practice_validation_url": _practice_validation_url(enrollment.course_id, restart=True),
+            "validation_sidebar_cta": _student_practice_validation_sidebar_cta(enrollment),
+            "practice_url": reverse("standalone:practice_quiz", args=[enrollment.course_id]),
+            "session_action_url": (
+                reverse("standalone:validation_attempt_action", args=[session_state["attempt_id"], "ACTION"])
+                if session_state.get("attempt_id")
+                else ""
+            ),
+            "exit_url": reverse("standalone:student_dashboard"),
+            "exit_label": "Dashboard",
+        },
+    )
+
+
+@login_required
+def student_validate(request: HttpRequest, course_id: int) -> HttpResponse:
+    if not _is_student(request.user):
+        raise Http404
+    enrollment = _student_enrollment_or_404(request.user, course_id)
+    state = _student_validate_event_state(enrollment)
+    practice_url = reverse("standalone:practice_quiz", args=[course_id])
+
+    if state["state"] == "live":
+        event = state["event"]
+        booking = state["booking"]
+        try:
+            attempt = state["attempt"] or get_or_create_official_attempt(enrollment, event, booking=booking)
+        except ValidationFlowError as error:
+            messages.error(request, str(error))
+            return redirect("standalone:student_dashboard")
+        session_state = serialize_official_validation_session(attempt, request=request)
+        session_state["eyebrow"] = "Validate"
+        sidebar_state = _student_validate_sidebar_state(
+            enrollment=enrollment,
+            title="Validation session",
+            copy="A validation session is live now. Complete your validation here on this device.",
+            meta_rows=[
+                f"{event.starts_at:%d %b %Y, %H:%M} to {event.session_end_at:%d %b %Y, %H:%M}",
+                f"Location: {event.location}",
+            ],
+            secondary_action={"label": "Continue practice", "url": practice_url, "style": "secondary"},
+        )
+        return _render_student_validate(request, enrollment, session_state, sidebar_state)
+
+    if state["state"] == "booked_future":
+        event = state["event"]
+        session_state = _empty_validate_session_state(
+            enrollment.course,
+            title="Validate",
+            transcript=[
+                _validation_status_message(
+                    "validate-booked-future",
+                    (
+                        f"Your validation is booked for {event.starts_at:%d %b %Y, %H:%M}. "
+                        "You're currently out of session. Would you like to start a practice validation until it begins?"
+                    ),
+                    actions=[{"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "button"}],
+                )
+            ],
+        )
+        sidebar_state = _student_validate_sidebar_state(
+            enrollment=enrollment,
+            title="Validation booked",
+            copy="Your validation session is booked and ready for you at the scheduled time.",
+            meta_rows=[
+                f"{event.starts_at:%d %b %Y, %H:%M} to {event.session_end_at:%d %b %Y, %H:%M}",
+                f"Location: {event.location}",
+            ],
+            primary_action={"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "button"},
+            secondary_action={"label": "Return to practice", "url": practice_url, "style": "secondary"},
+        )
+        return _render_student_validate(request, enrollment, session_state, sidebar_state)
+
+    if state["state"] == "bookable":
+        event = state["event"]
+        session_state = _empty_validate_session_state(
+            enrollment.course,
+            title="Validate",
+            transcript=[
+                _validation_status_message(
+                    "validate-bookable",
+                    "No validation session is active right now. Would you like to start a practice validation while you wait?",
+                    actions=[{"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "button"}],
+                )
+            ],
+        )
+        sidebar_state = _student_validate_sidebar_state(
+            enrollment=enrollment,
+            title="Book validation",
+            copy="A validation session is currently open for booking.",
+            meta_rows=[
+                f"{event.starts_at:%d %b %Y, %H:%M} to {event.session_end_at:%d %b %Y, %H:%M}",
+                f"Spaces left {event.spaces_left}",
+                f"Bookings in last 24 hours {event.recent_booking_count(hours=24)}",
+            ],
+            primary_action={"label": "Book validation", "url": reverse("standalone:validation_book", args=[event.pk]), "style": "button"},
+            secondary_action={"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "secondary"},
+        )
+        return _render_student_validate(request, enrollment, session_state, sidebar_state)
+
+    session_state = _empty_validate_session_state(
+        enrollment.course,
+        title="Validate",
+        transcript=[
+            _validation_status_message(
+                "validate-out-of-session",
+                "There is no live validation session for this course right now. Would you like to start a practice validation?",
+                actions=[{"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "button"}],
+            )
+        ],
+    )
+    sidebar_state = _student_validate_sidebar_state(
+        enrollment=enrollment,
+        title="Validation unavailable",
+        copy="There is no bookable or live validation session for this course right now.",
+        primary_action={"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "button"},
+        secondary_action={"label": "Return to practice", "url": practice_url, "style": "secondary"},
+    )
+    return _render_student_validate(request, enrollment, session_state, sidebar_state)
+
+
+def _student_validation_attempt_or_404(user: User, attempt_id: int) -> ValidationAttempt:
+    return get_object_or_404(
+        ValidationAttempt.objects.select_related("event", "event__course", "enrollment", "enrollment__student"),
+        pk=attempt_id,
+        enrollment__student=user,
+    )
+
+
+@login_required
+def validation_start(request: HttpRequest, event_id: int) -> HttpResponse:
+    if not _is_student(request.user):
+        raise Http404
+    event = get_object_or_404(ValidationEvent.objects.select_related("course"), pk=event_id)
+    enrollment = _student_enrollment_or_404(request.user, event.course_id)
+    if event.mode != ValidationEvent.Mode.DIGITAL_INVIGILATION:
+        messages.error(request, "Only digital invigilated validations are available right now.")
+        return redirect("standalone:student_dashboard")
+    if timezone.now() < event.starts_at:
+        messages.info(request, "This validation is not open yet.")
+        return redirect("standalone:student_dashboard")
+    if timezone.now() >= event.session_end_at:
+        messages.info(request, "This validation session has ended.")
+        return redirect("standalone:student_dashboard")
+    booking = None
+    if event.requires_booking:
+        booking = ValidationBooking.objects.filter(
+            event=event,
+            enrollment=enrollment,
+            status=ValidationBooking.Status.BOOKED,
+        ).first()
+        if booking is None:
+            messages.error(request, "You need a booking before starting this validation.")
+            return redirect("standalone:student_dashboard")
+    try:
+        attempt = get_or_create_official_attempt(enrollment, event, booking=booking)
+    except ValidationFlowError as error:
+        messages.error(request, str(error))
+        return redirect("standalone:student_dashboard")
+    return redirect("standalone:student_validate", event.course_id)
+
+
+@login_required
+def validation_attempt(request: HttpRequest, attempt_id: int) -> HttpResponse:
+    if not _is_student(request.user):
+        raise Http404
+    attempt = _student_validation_attempt_or_404(request.user, attempt_id)
+    enrollment = attempt.enrollment
+    session_state = serialize_official_validation_session(attempt, request=request)
+    session_state["eyebrow"] = "Validate"
+    sidebar_state = _student_validate_sidebar_state(
+        enrollment=enrollment,
+        title="Validation session",
+        copy="This validation session is being completed here on this device.",
+        meta_rows=[
+            f"{attempt.event.starts_at:%d %b %Y, %H:%M} to {attempt.event.session_end_at:%d %b %Y, %H:%M}",
+            f"Location: {attempt.event.location}",
+        ],
+        secondary_action={"label": "Continue practice", "url": reverse("standalone:practice_quiz", args=[enrollment.course_id]), "style": "secondary"},
+    )
+    return _render_student_validate(request, enrollment, session_state, sidebar_state)
+
+
+@login_required
+def validation_attempt_action(request: HttpRequest, attempt_id: int, action: str) -> JsonResponse:
+    if request.method != "POST" or not _is_student(request.user):
+        raise Http404
+    attempt = _student_validation_attempt_or_404(request.user, attempt_id)
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    try:
+        if action == "confirm":
+            payload = confirm_official_validation_instructions(request, attempt)
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "next":
+            payload = reveal_official_validation_next(request, attempt)
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "draft_answer":
+            payload = draft_official_validation_answer(
+                request,
+                attempt,
+                int(data.get("question_id") or 0),
+                str(data.get("answer_text", "")).strip(),
+            )
+            return JsonResponse({"ok": True, "alignment": payload})
+        if action == "presence":
+            payload = report_validation_presence(
+                request,
+                attempt,
+                int(data.get("away_seconds") or 0),
+            )
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "submit":
+            payload = submit_official_validation_response(
+                request,
+                attempt,
+                question_id=int(data.get("question_id") or 0) or None,
+                selected_answers=data.get("answers") or ([str(data.get("answer", "")).strip()] if data.get("answer") else []),
+                answer_text=str(data.get("answer_text", "")).strip(),
+                audit_prompt_id=int(data.get("audit_prompt_id") or 0) or None,
+            )
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "skip":
+            payload = skip_official_validation_question(
+                request,
+                attempt,
+                question_id=int(data.get("question_id") or 0),
+            )
+            return JsonResponse({"ok": True, "session": payload})
+    except ValidationFlowError as error:
+        return JsonResponse({"ok": False, "error": str(error)}, status=400)
+    raise Http404
+
+
+@login_required
+def validation_room_display(request: HttpRequest, event_id: int) -> HttpResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    event = get_object_or_404(ValidationEvent.objects.select_related("course"), pk=event_id)
+    _teacher_course_or_404(request.user, event.course_id)
+    if event.mode != ValidationEvent.Mode.DIGITAL_INVIGILATION:
+        raise Http404
+    ensure_room_code_secret(event)
+    return render(
+        request,
+        "standalone/validation_room_display.html",
+        {
+            "event": event,
+            "room_code": room_code_payload(event),
+            "room_code_client": room_code_client_payload(event),
+        },
+    )
+
+
+@login_required
+def validation_room_display_data(request: HttpRequest, event_id: int) -> JsonResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    event = get_object_or_404(ValidationEvent.objects.select_related("course"), pk=event_id)
+    _teacher_course_or_404(request.user, event.course_id)
+    if event.mode != ValidationEvent.Mode.DIGITAL_INVIGILATION:
+        raise Http404
+    return JsonResponse({"ok": True, "room_code": room_code_payload(event)})
+
+
+@login_required
+def validation_feedback_release(request: HttpRequest, event_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    event = get_object_or_404(ValidationEvent.objects.select_related("course"), pk=event_id)
+    _teacher_course_or_404(request.user, event.course_id)
+    released = release_event_feedback(event)
+    messages.success(request, f"Released review for {released} validation attempt(s).")
+    return redirect("standalone:course_detail", event.course_id)
 
 
 @login_required
@@ -1212,6 +2450,9 @@ def validation_pack_pdf(request: HttpRequest, event_id: int) -> HttpResponse:
         raise Http404
     event = get_object_or_404(ValidationEvent.objects.select_related("course"), pk=event_id)
     _teacher_course_or_404(request.user, event.course_id)
+    if event.mode != ValidationEvent.Mode.PAPER_INVIGILATION:
+        messages.error(request, "PDF packs are only available for paper invigilation events.")
+        return redirect("standalone:course_detail", event.course_id)
     bookings = list(event.bookings.filter(status=ValidationBooking.Status.BOOKED).select_related("enrollment__student"))
     pack = ValidationPack.objects.create(event=event, generated_by=request.user, generated_for_booking_count=len(bookings))
     pdf_bytes = build_validation_pack_pdf(pack, bookings)
@@ -1307,7 +2548,9 @@ def _legacy_practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
 @login_required
 def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
     mode = request.GET.get("mode", PracticeAttempt.AttemptType.PRACTICE)
-    if mode == PracticeAttempt.AttemptType.VALIDATION_PRACTICE or request.method == "POST":
+    if mode == PracticeAttempt.AttemptType.VALIDATION_PRACTICE:
+        return redirect("standalone:validation_practice_session", course_id)
+    if request.method == "POST":
         return _legacy_practice_quiz(request, course_id)
     if mode != PracticeAttempt.AttemptType.PRACTICE:
         mode = PracticeAttempt.AttemptType.PRACTICE
@@ -1322,6 +2565,9 @@ def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
             "action_url_template": reverse("standalone:student_practice_action", args=[enrollment.course_id, 0, "ACTION"]),
             "is_student_practice": True,
             "mode": mode,
+            "practice_validation_url": _practice_validation_url(enrollment.course_id, restart=True),
+            "validation_entry_url": reverse("standalone:student_validate", args=[enrollment.course_id]),
+            "validation_sidebar_cta": _student_practice_validation_sidebar_cta(enrollment),
         },
     )
 

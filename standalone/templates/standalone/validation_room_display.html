@@ -1,0 +1,103 @@
+{% extends "standalone/base.html" %}
+{% block title %}Room Display | Validation Session{% endblock %}
+{% block app_nav_links %}
+  <a href="{% url 'standalone:course_detail' event.course_id %}">Back to course</a>
+{% endblock %}
+{% block app_nav_menu_actions %}
+  <a class="button secondary app-nav-menu-action" href="{% url 'standalone:course_detail' event.course_id %}">Back to course</a>
+{% endblock %}
+{% block content %}
+<section class="panel validation-room-display-panel" data-room-display>
+  <p class="eyebrow">Digital invigilation</p>
+  <h1>Validation session</h1>
+  <p class="lead">{{ event.course.title }}{% if event.location %} • {{ event.location }}{% endif %}</p>
+  <div class="validation-room-display-code">
+    <span>Current room code</span>
+    <strong data-room-code>{{ room_code.code }}</strong>
+    <small data-room-countdown>Refreshes in {{ room_code.seconds_remaining }}s</small>
+  </div>
+</section>
+{{ room_code_client|json_script:"validation-room-code-client" }}
+<script>
+  (function () {
+    const root = document.querySelector("[data-room-display]");
+    const dataNode = document.getElementById("validation-room-code-client");
+    if (!root || !dataNode || !window.crypto?.subtle) return;
+    const codeNode = root.querySelector("[data-room-code]");
+    const countdownNode = root.querySelector("[data-room-countdown]");
+    const config = JSON.parse(dataNode.textContent || "{}");
+    const adjectives = [
+      "amber", "brisk", "calm", "daring", "eager", "fizzy", "gentle", "hidden", "icy", "jolly",
+      "keen", "lively", "mellow", "nimble", "opal", "plucky", "quiet", "rapid", "silver", "tidy",
+      "upbeat", "vivid", "witty", "young", "zesty",
+    ];
+    const animals = [
+      "ant", "badger", "crane", "dolphin", "egret", "fox", "gecko", "heron", "ibis", "jackal",
+      "koala", "lemur", "newt", "otter", "panda", "quail", "rabbit", "seal", "tiger", "urchin",
+      "viper", "walrus", "yak", "zebra",
+    ];
+    let clockOffsetMs = Number(config.server_now_ms || 0) - Date.now();
+    let cachedKeyPromise = null;
+
+    function currentServerTimeMs() {
+      return Date.now() + clockOffsetMs;
+    }
+
+    function currentBucket() {
+      return Math.floor(currentServerTimeMs() / 60000);
+    }
+
+    function secondsRemaining() {
+      const milliseconds = 60000 - (currentServerTimeMs() % 60000);
+      return Math.max(0, Math.ceil(milliseconds / 1000));
+    }
+
+    function bytesToHex(bytes) {
+      return Array.from(new Uint8Array(bytes))
+        .map((value) => value.toString(16).padStart(2, "0"))
+        .join("");
+    }
+
+    async function roomCodeKey() {
+      if (!cachedKeyPromise) {
+        cachedKeyPromise = window.crypto.subtle.importKey(
+          "raw",
+          new TextEncoder().encode(String(config.seed || "")),
+          { name: "HMAC", hash: "SHA-256" },
+          false,
+          ["sign"],
+        );
+      }
+      return cachedKeyPromise;
+    }
+
+    async function deriveCode() {
+      const key = await roomCodeKey();
+      const signature = await window.crypto.subtle.sign("HMAC", key, new TextEncoder().encode(String(currentBucket())));
+      const digest = bytesToHex(signature);
+      const adjective = adjectives[Number.parseInt(digest.slice(0, 8), 16) % adjectives.length];
+      const animal = animals[Number.parseInt(digest.slice(8, 16), 16) % animals.length];
+      return `${adjective}-${animal}`;
+    }
+
+    async function refreshDisplay() {
+      if (codeNode) {
+        codeNode.textContent = await deriveCode();
+      }
+      if (countdownNode) {
+        countdownNode.textContent = `Refreshes in ${secondsRemaining()}s`;
+      }
+    }
+
+    void refreshDisplay();
+    window.setInterval(() => {
+      if (countdownNode) {
+        countdownNode.textContent = `Refreshes in ${secondsRemaining()}s`;
+      }
+      if (secondsRemaining() >= 59) {
+        void refreshDisplay();
+      }
+    }, 1000);
+  })();
+</script>
+{% endblock %}

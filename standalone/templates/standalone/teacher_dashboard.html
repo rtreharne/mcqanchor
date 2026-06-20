@@ -53,5 +53,49 @@
       {% endfor %}
     </div>
   </section>
+
+  <section class="dashboard-course-section" aria-labelledby="validation-sessions-heading">
+    <div class="section-head compact dashboard-section-head">
+      <div>
+        <h2 id="validation-sessions-heading">Validation sessions</h2>
+      </div>
+    </div>
+    <div class="course-import-status-list">
+      {% for event in validation_events %}
+        <article class="course-import-status-row">
+          <span>
+            <strong>{{ event.course.title }} · Validation session</strong>
+            <small>
+              Digital invigilation • {{ event.starts_at|date:"j M Y, H:i" }} to {{ event.session_end_at|date:"j M Y, H:i" }}
+              {% if event.location %} • {{ event.location }}{% endif %}
+              • {{ event.question_count }} questions • {{ event.time_limit_minutes }} mins
+              {% if event.requires_booking and event.booking_deadline %} • Booking closes {{ event.booking_deadline|date:"j M Y, H:i" }}{% endif %}
+              • {{ event.booked_count }}/{{ event.capacity }} booked
+            </small>
+          </span>
+          <span class="workspace-actions">
+            <a class="button secondary" href="{% url 'standalone:course_detail' event.course.pk %}">Open course</a>
+            <a class="button secondary" href="{% url 'standalone:validation_room_display' event.pk %}">Room display</a>
+            {% if event.feedback_release_mode == "manual" %}
+              <form method="post" action="{% url 'standalone:validation_feedback_release' event.pk %}">
+                {% csrf_token %}
+                <button class="button secondary" type="submit">Release feedback</button>
+              </form>
+            {% endif %}
+            {% if event.can_be_deleted %}
+              <form method="post" action="{% url 'standalone:validation_event_delete' event.pk %}" onsubmit="return window.confirm('Delete this validation event?');">
+                {% csrf_token %}
+                <button class="button secondary" type="submit">Delete</button>
+              </form>
+            {% else %}
+              <button class="button secondary" type="button" disabled title="Students have already submitted validation for this session.">Delete locked</button>
+            {% endif %}
+          </span>
+        </article>
+      {% empty %}
+        <p>No validation sessions yet.</p>
+      {% endfor %}
+    </div>
+  </section>
 </section>
 {% endblock %}

@@ -9,6 +9,19 @@ function setBlockExpanded(toggle, target, expanded) {
   toggle.closest("[data-block-card]")?.classList.toggle("is-expanded", expanded);
 }
 
+function openBlockTarget(targetId, options = {}) {
+  const shouldScroll = options.scroll !== false;
+  const toggle = document.querySelector(`[data-block-toggle][data-block-target="${targetId}"]`);
+  const target = targetId ? document.getElementById(targetId) : null;
+  if (!toggle || !target) {
+    return;
+  }
+  setBlockExpanded(toggle, target, true);
+  if (shouldScroll) {
+    target.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+}
+
 function closeBlockActionMenus(root = document) {
   root.querySelectorAll("[data-block-menu-trigger]").forEach((trigger) => {
     trigger.setAttribute("aria-expanded", "false");
@@ -82,6 +95,7 @@ let pendingAssetRefreshInFlight = false;
 let courseDetailStatusSyncInFlight = false;
 let courseDetailRefreshRequestSequence = 0;
 let courseDetailLatestRefreshRequest = 0;
+let settingsToastHideHandle = null;
 
 function beginCourseDetailRefreshRequest() {
   courseDetailRefreshRequestSequence += 1;
@@ -95,6 +109,109 @@ function isLatestCourseDetailRefreshRequest(requestId) {
 
 function hasPendingCourseDetailIndicators(root = document) {
   return Boolean(root.querySelector("[data-processing-asset='true'], [data-regenerating-block='true']"));
+}
+
+function showSettingsToast(message) {
+  const toast = document.querySelector("[data-settings-toast]");
+  if (!toast) {
+    return;
+  }
+  toast.textContent = message || "Settings updated.";
+  toast.hidden = false;
+  window.requestAnimationFrame(() => {
+    toast.classList.add("is-visible");
+  });
+  if (settingsToastHideHandle) {
+    window.clearTimeout(settingsToastHideHandle);
+  }
+  settingsToastHideHandle = window.setTimeout(() => {
+    toast.classList.remove("is-visible");
+    window.setTimeout(() => {
+      toast.hidden = true;
+    }, 180);
+  }, 1800);
+}
+
+function setCourseConfigRowState(row, state, message = "") {
+  if (!row) {
+    return;
+  }
+  row.dataset.saveState = state;
+  const status = row.querySelector("[data-course-config-status]");
+  if (!status) {
+    return;
+  }
+  if (!message) {
+    status.hidden = true;
+    status.textContent = "";
+    return;
+  }
+  status.hidden = false;
+  status.textContent = message;
+}
+
+async function saveCourseConfigInput(input) {
+  const row = input.closest("[data-course-config-row]");
+  const fieldName = row?.dataset.courseConfigField;
+  const url = row?.dataset.courseConfigUrl;
+  if (!row || !fieldName || !url) {
+    return;
+  }
+
+  if (row.dataset.saving === "true") {
+    row.dataset.pendingSave = "true";
+    return;
+  }
+
+  const body = new URLSearchParams();
+  if (input.type === "checkbox") {
+    if (input.checked) {
+      body.set(fieldName, "on");
+    }
+  } else {
+    body.set(fieldName, input.value);
+  }
+
+  row.dataset.saving = "true";
+  row.dataset.pendingSave = "false";
+  setCourseConfigRowState(row, "saving", "Saving...");
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "X-CSRFToken": getCsrfToken(),
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: body.toString(),
+      credentials: "same-origin",
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw new Error((payload.errors || ["Unable to save this setting."]).join(" "));
+    }
+    if (input.type === "checkbox" && typeof payload.checked === "boolean") {
+      input.checked = payload.checked;
+    } else if (payload.raw_value !== undefined && payload.raw_value !== null) {
+      input.value = `${payload.raw_value}`;
+    }
+    setCourseConfigRowState(row, "saved", "Saved");
+    showSettingsToast(payload.message || "Settings updated.");
+    window.setTimeout(() => {
+      if (row.dataset.saveState === "saved") {
+        setCourseConfigRowState(row, "", "");
+      }
+    }, 1200);
+  } catch (error) {
+    setCourseConfigRowState(row, "error", error.message || "Unable to save this setting.");
+  } finally {
+    row.dataset.saving = "false";
+    if (row.dataset.pendingSave === "true") {
+      row.dataset.pendingSave = "false";
+      void saveCourseConfigInput(input);
+    }
+  }
 }
 
 function schedulePendingAssetRefresh(root = document) {
@@ -502,6 +619,55 @@ function initializeCourseDetail(root = document) {
       event.preventDefault();
       event.stopPropagation();
       void submitAsyncRefreshForm(form);
+    });
+  });
+
+  root.querySelectorAll("[data-open-block-target]").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      const targetId = link.dataset.openBlockTarget;
+      if (!targetId) {
+        return;
+      }
+      event.preventDefault();
+      openBlockTarget(targetId);
+      window.history.replaceState({}, "", `#${targetId}`);
+    });
+  });
+
+  root.querySelectorAll("[data-course-config-input]").forEach((input) => {
+    let saveHandle = null;
+    const scheduleSave = () => {
+      if (saveHandle) {
+        window.clearTimeout(saveHandle);
+      }
+      saveHandle = window.setTimeout(() => {
+        void saveCourseConfigInput(input);
+      }, 500);
+    };
+
+    if (input.type === "checkbox" || input.tagName === "SELECT") {
+      input.addEventListener("change", () => {
+        void saveCourseConfigInput(input);
+      });
+      return;
+    }
+
+    input.addEventListener("input", () => {
+      scheduleSave();
+    });
+    input.addEventListener("change", () => {
+      if (saveHandle) {
+        window.clearTimeout(saveHandle);
+        saveHandle = null;
+      }
+      void saveCourseConfigInput(input);
+    });
+    input.addEventListener("blur", () => {
+      if (saveHandle) {
+        window.clearTimeout(saveHandle);
+        saveHandle = null;
+      }
+      void saveCourseConfigInput(input);
     });
   });
 

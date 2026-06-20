@@ -58,13 +58,37 @@ class TeacherActivationForm(forms.Form):
 class CourseForm(forms.ModelForm):
     class Meta:
         model = Course
-        fields = ["title", "slug", "summary", "is_active"]
+        fields = ["title"]
 
-    def clean_slug(self):
-        slug = slugify(self.cleaned_data["slug"] or self.cleaned_data["title"])
-        if not slug:
+    def clean_title(self):
+        title = (self.cleaned_data.get("title") or "").strip()
+        if not title:
             raise forms.ValidationError("Please provide a valid course title.")
+        return title
+
+    def _build_unique_slug(self, title: str) -> str:
+        base_slug = slugify(title)
+        if not base_slug:
+            raise forms.ValidationError("Please provide a valid course title.")
+
+        slug = base_slug
+        suffix = 2
+        queryset = Course.objects.all()
+        if self.instance.pk:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        while queryset.filter(slug=slug).exists():
+            slug = f"{base_slug}-{suffix}"
+            suffix += 1
         return slug
+
+    def save(self, commit=True):
+        course = super().save(commit=False)
+        course.slug = self._build_unique_slug(course.title)
+        course.summary = ""
+        course.is_active = True
+        if commit:
+            course.save()
+        return course
 
 
 class CourseTitleInlineForm(forms.ModelForm):
@@ -165,6 +189,30 @@ class CourseConfigForm(forms.ModelForm):
             "Block progress threshold before students are asked multiple-answer or written-answer questions. "
             "Use 0 to allow them from the start."
         )
+        self.fields["practice_weight"].help_text = "Weighting of practice relative to validation in the overall course score."
+        self.fields["validation_weight"].help_text = (
+            "Weighting of validation relative to practice in the overall course score."
+        )
+        self.fields["mastery_weight"].help_text = "Weighting of correctness within overall practice scoring."
+        self.fields["coverage_weight"].help_text = "Weighting of learning-objective coverage within overall practice scoring."
+        self.fields["engagement_weight"].help_text = (
+            "Weighting of on-time practice activity within overall practice scoring."
+        )
+        self.fields["target_weight"].help_text = "Weighting of progress toward the block question target."
+        self.fields["distractor_count"].help_text = "Number of distractors to include when generating single-answer questions."
+        self.fields["revalidation_attempts"].help_text = "Number of additional validation attempts permitted after the first."
+        self.fields["show_validation_feedback_immediately"].label = "Release validation feedback immediately"
+        self.fields["show_validation_feedback_immediately"].help_text = (
+            "If enabled, students can review validation feedback as soon as they submit."
+        )
+
+        for name, field in self.fields.items():
+            widget_classes = field.widget.attrs.get("class", "").split()
+            widget_classes.extend(["course-setting-input"])
+            if isinstance(field.widget, forms.CheckboxInput):
+                widget_classes.append("course-setting-input-checkbox")
+            field.widget.attrs["class"] = " ".join(dict.fromkeys(widget_classes))
+            field.widget.attrs["data-course-config-input"] = name
 
     def clean_self_enrol_domain(self):
         value = (self.cleaned_data.get("self_enrol_domain") or "").strip().lower()
@@ -436,19 +484,81 @@ class MagicLinkCreateForm(forms.ModelForm):
 class ValidationEventForm(forms.ModelForm):
     class Meta:
         model = ValidationEvent
-        fields = ["title", "starts_at", "location", "capacity", "freeze_at", "question_count"]
+        fields = [
+            "starts_at",
+            "ends_at",
+            "location",
+            "capacity",
+            "late_booking_cutoff_minutes",
+            "question_count",
+            "time_limit_minutes",
+            "audit_prompt_count",
+            "feedback_release_mode",
+        ]
         widgets = {
             "starts_at": forms.DateTimeInput(attrs={"type": "datetime-local"}),
-            "freeze_at": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            "ends_at": forms.DateTimeInput(attrs={"type": "datetime-local"}),
         }
+
+    def __init__(self, *args, course=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.course = course
+        self.fields["time_limit_minutes"].label = "Time limit (minutes)"
+        self.fields["audit_prompt_count"].label = "Digital room-code audits"
+        self.fields["audit_prompt_count"].help_text = "Choose 0, 2, or 3 room-code interruptions."
+        self.fields["feedback_release_mode"].label = "Review release"
+        self.fields["feedback_release_mode"].help_text = (
+            "Immediate shows score and review as soon as the validation completes. Manual keeps review hidden until released."
+        )
+        self.fields["question_count"].label = "Validation questions"
+        self.fields["ends_at"].label = "Session ends"
+        self.fields["ends_at"].required = True
+        self.fields["ends_at"].help_text = "Students may arrive at any point between the start and this end time. Sessions must be at least 50 minutes long."
+        self.fields["late_booking_cutoff_minutes"].label = "Stop booking this many minutes before session end"
+        self.fields["late_booking_cutoff_minutes"].required = True
+        self.fields["late_booking_cutoff_minutes"].help_text = (
+            "Students can still book while the session is running, until this buffer before the end time."
+        )
+        if course is not None:
+            self.fields["feedback_release_mode"].initial = (
+                ValidationEvent.FeedbackReleaseMode.IMMEDIATE
+                if course.config.show_validation_feedback_immediately
+                else ValidationEvent.FeedbackReleaseMode.MANUAL
+            )
+        self.initial["audit_prompt_count"] = self.initial.get("audit_prompt_count") or 2
 
     def clean(self):
         cleaned_data = super().clean()
         starts_at = cleaned_data.get("starts_at")
-        freeze_at = cleaned_data.get("freeze_at")
-        if starts_at and freeze_at and freeze_at >= starts_at:
-            raise forms.ValidationError("Freeze-out time must be before the validation start.")
+        ends_at = cleaned_data.get("ends_at")
+        late_booking_cutoff_minutes = int(cleaned_data.get("late_booking_cutoff_minutes") or 0)
+        if not ends_at:
+            raise forms.ValidationError("Please provide a session end time.")
+        if starts_at and ends_at and ends_at <= starts_at:
+            raise forms.ValidationError("Session end time must be after the validation start.")
+        if starts_at and ends_at and (ends_at - starts_at) < timedelta(minutes=50):
+            raise forms.ValidationError("Validation sessions must be at least 50 minutes long.")
+        if late_booking_cutoff_minutes < 0:
+            raise forms.ValidationError("Late-booking cutoff must be zero or more minutes.")
+        audit_prompt_count = int(cleaned_data.get("audit_prompt_count") or 0)
+        if audit_prompt_count not in {0, 2, 3}:
+            raise forms.ValidationError("Digital invigilation audit prompts must be set to 0, 2, or 3.")
+        if self.course is not None:
+            released_exists = self.course.blocks.filter(available_from__lte=timezone.localdate()).exists()
+            if not released_exists:
+                raise forms.ValidationError("Validation sessions require at least one released content block in this course.")
         return cleaned_data
+
+    def save(self, commit=True):
+        event = super().save(commit=False)
+        if not str(getattr(event, "title", "") or "").strip():
+            start_label = event.starts_at.strftime("%d %b %Y %H:%M") if event.starts_at else "TBC"
+            event.title = f"Validation session {start_label}"
+        if event.ends_at is not None:
+            event.freeze_at = event.ends_at - timedelta(minutes=max(0, int(event.late_booking_cutoff_minutes or 0)))
+        if commit:
+            event.save()
+        return event
 
 
 class UserCreationFromInviteMixin:

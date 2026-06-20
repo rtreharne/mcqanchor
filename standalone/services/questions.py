@@ -1,6 +1,5 @@
 import hashlib
 import json
-import random
 import re
 from collections import defaultdict
 
@@ -86,6 +85,22 @@ CODING_LANGUAGES = {
     "css",
 }
 
+CODING_LANGUAGE_LABELS = {
+    "python": "Python",
+    "r": "R",
+    "java": "Java",
+    "matlab": "MATLAB",
+    "javascript": "JavaScript",
+    "typescript": "TypeScript",
+    "sql": "SQL",
+    "shell": "Shell",
+    "c": "C",
+    "cpp": "C++",
+    "csharp": "C#",
+    "html": "HTML",
+    "css": "CSS",
+}
+
 LANGUAGE_ALIASES = {
     "py": "python",
     "python3": "python",
@@ -125,6 +140,67 @@ EXTENSION_LANGUAGE_HINTS = {
     ".cs": "csharp",
     ".html": "html",
     ".css": "css",
+}
+
+LANGUAGES_WITH_FUNCTION_FRIENDLY_EXAMPLES = {
+    "python",
+    "r",
+    "java",
+    "matlab",
+    "javascript",
+    "typescript",
+    "shell",
+    "c",
+    "cpp",
+    "csharp",
+}
+
+CODING_TRIVIAL_STEM_PATTERNS = (
+    r"\bwhat is the value of\b",
+    r"\bwhat value (?:is|will be|would be|gets?)\b",
+    r"\bwhat does [a-z_][a-z0-9_]* equal\b",
+    r"\bwhat is stored in [a-z_][a-z0-9_]*\b",
+    r"\bafter (?:the )?code (?:runs|executes), what is\b",
+    r"\bafter running (?:the )?code, what is\b",
+    r"\bmanually calculate\b",
+)
+
+CODING_INTERPRETIVE_TERMS = (
+    "behav",
+    "explain",
+    "issue",
+    "bug",
+    "fix",
+    "control flow",
+    "state",
+    "scope",
+    "structure",
+    "return",
+    "output",
+    "side effect",
+    "mutat",
+    "identify",
+    "reason",
+    "compare",
+    "type",
+    "subsetting",
+    "indexing",
+)
+
+CODING_LANGUAGE_REFERENCE_PATTERNS = {
+    "python": (r"\bpython(?:3)?\b",),
+    "r": (r"(?<![A-Za-z0-9_])R(?![A-Za-z0-9_])", r"\brscript\b"),
+    "java": (r"\bjava\b",),
+    "matlab": (r"\bmatlab\b",),
+    "javascript": (r"\bjavascript\b", r"\bnode(?:\.js)?\b"),
+    "typescript": (r"\btypescript\b",),
+    "sql": (r"\bsql\b",),
+    "shell": (r"\bshell\b", r"\bbash\b", r"\bzsh\b"),
+    "c": (r"(?<![A-Za-z0-9_])C(?![A-Za-z0-9_+#])",),
+    "cpp": (r"\bc\+\+\b", r"\bcpp\b"),
+    "csharp": (r"\bc#\b", r"\bcsharp\b", r"\bc sharp\b"),
+    "html": (r"\bhtml\b",),
+    "css": (r"\bcss\b",),
 }
 
 
@@ -178,6 +254,175 @@ def _language_from_text(text: str) -> str:
         return ""
     scores.sort(key=lambda item: (-item[0], item[1]))
     return scores[0][1]
+
+
+def _coding_language_label(language: str) -> str:
+    normalized = _normalize_coding_language(language)
+    return CODING_LANGUAGE_LABELS.get(normalized, normalized.upper() if normalized else "code")
+
+
+def _coding_line_count(snippet: str) -> int:
+    return len([line for line in str(snippet or "").splitlines() if line.strip()])
+
+
+def _snippet_has_function(language: str, snippet: str) -> bool:
+    normalized = _normalize_coding_language(language)
+    text = str(snippet or "")
+    patterns = {
+        "python": r"^\s*def\s+\w+\s*\(",
+        "r": r"(?:^\s*\w+\s*<-\s*function\s*\(|^\s*function\s*\()",
+        "java": r"\b(?:public|private|protected)?\s*(?:static\s+)?[\w<>\[\]]+\s+\w+\s*\(",
+        "matlab": r"^\s*function\b",
+        "javascript": r"\bfunction\s+\w+\s*\(|\bconst\s+\w+\s*=\s*\([^)]*\)\s*=>",
+        "typescript": r"\bfunction\s+\w+\s*\(|\bconst\s+\w+\s*:\s*[^=]+=\s*\([^)]*\)\s*=>",
+        "shell": r"^\s*(?:function\s+)?\w+\s*\(\)\s*\{",
+        "c": r"\b(?:void|int|double|float|char)\s+\w+\s*\(",
+        "cpp": r"\b(?:void|int|double|float|char|std::\w+)\s+\w+\s*\(",
+        "csharp": r"\b(?:public|private|protected)?\s*(?:static\s+)?[\w<>\[\]]+\s+\w+\s*\(",
+    }
+    pattern = patterns.get(normalized)
+    return bool(pattern and re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE))
+
+
+def _coding_focus_phrase(language: str, snippet: str) -> str:
+    lowered = str(snippet or "").lower()
+    label = _coding_language_label(language)
+    if language == "r" and ("tibble" in lowered or "data.frame" in lowered):
+        return "how the code creates, subsets, or prints tabular data"
+    if language == "sql":
+        return "how the query combines filtering, grouping, and selected columns"
+    if language in {"html", "css"}:
+        return "how the structure and rules shown in the example interact"
+    if _snippet_has_function(language, snippet):
+        return f"how the {label} function logic and call site work together"
+    if re.search(r"\b(for|while|repeat)\b", lowered):
+        return "how state changes across the loop"
+    if re.search(r"\b(if|else|elif|switch|case)\b", lowered):
+        return "how the branch logic changes the result"
+    if re.search(r"\[[^\]]+\]|\[\s*,|\[\s*\"|\$|\[\[", snippet):
+        return f"how {label} indexing or subsetting affects the result"
+    return "how the code structure determines the final behaviour"
+
+
+def _fallback_coding_answer_focus(language: str, snippet: str, objective_text: str = "") -> list[str]:
+    label = _coding_language_label(language)
+    lowered = str(snippet or "").lower()
+    objective_focus = re.sub(
+        r"^(?:explain|describe|identify|discuss|outline|summaris(?:e|z)e|analyse|analyze)\s+",
+        "",
+        str(objective_text or "").strip(),
+        flags=re.IGNORECASE,
+    ).rstrip(".")
+    answers: list[str] = []
+    if _snippet_has_function(language, snippet):
+        answers.append("The example defines helper logic and then uses the function's return value later in the code.")
+        answers.append("To interpret the result correctly, you need to follow the data from the call site back through the function body.")
+    if language == "r" and ("tibble" in lowered or "data.frame" in lowered):
+        answers.append("The key idea is how the chosen tabular structure changes access, printing, or subsetting behaviour.")
+    if re.search(r"\b(for|while|repeat)\b", lowered):
+        answers.append("The final behaviour depends on how values are updated across iterations, not on a single arithmetic step.")
+    if re.search(r"\b(if|else|elif|switch|case)\b", lowered):
+        answers.append("The result depends on which branch is taken and what that branch returns or changes.")
+    if re.search(r"\[[^\]]+\]|\[\s*,|\[\s*\"|\$|\[\[", snippet):
+        answers.append(f"Understanding {label} indexing or subsetting rules is essential to explaining the result.")
+    if objective_focus:
+        answers.append(f"The key concept being tested is {objective_focus}.")
+    answers.append("The important reasoning is about code structure, flow of data, and API semantics rather than hand-calculating a single variable.")
+
+    normalized: list[str] = []
+    for answer in answers:
+        cleaned = re.sub(r"\s+", " ", str(answer or "")).strip()
+        if cleaned and cleaned not in normalized:
+            normalized.append(cleaned)
+    return normalized
+
+
+def _fallback_coding_distractors(language: str, snippet: str) -> list[str]:
+    label = _coding_language_label(language)
+    distractors = [
+        "The example can only be interpreted by guessing hidden context that is not present in the snippet.",
+        "The later lines do not depend on the earlier logic, so code structure is irrelevant here.",
+        "The key behaviour comes from an external file or network service rather than the code shown.",
+        f"The example works the same way no matter how {label} handles functions, indexing, or returned values.",
+        "Reading the code line by line is enough; there is no need to reason about control flow or data movement.",
+    ]
+    if language == "r" and ("tibble" in str(snippet or "").lower() or "data.frame" in str(snippet or "").lower()):
+        distractors.append("The choice of tabular structure does not affect how columns are returned or displayed.")
+    return distractors
+
+
+def _mentioned_coding_languages(text: str) -> set[str]:
+    mentioned: set[str] = set()
+    for language, patterns in CODING_LANGUAGE_REFERENCE_PATTERNS.items():
+        flags = re.MULTILINE if language == "r" else re.IGNORECASE | re.MULTILINE
+        for pattern in patterns:
+            if re.search(pattern, str(text or ""), flags=flags):
+                mentioned.add(language)
+                break
+    return mentioned
+
+
+def _payload_mentions_unexpected_coding_language(payload: dict, expected_language: str) -> bool:
+    normalized_expected = _normalize_coding_language(expected_language)
+    if not normalized_expected:
+        return False
+    texts: list[str] = [
+        str(payload.get("stem", "")).strip(),
+        str(payload.get("explanation", "")).strip(),
+        str(payload.get("correct_answer", "")).strip(),
+    ]
+    texts.extend(str(item).strip() for item in payload.get("correct_answers", []) if str(item).strip())
+    texts.extend(str(item).strip() for item in payload.get("distractors", []) if str(item).strip())
+    texts.extend(str(item).strip() for item in payload.get("further_study_questions", []) if str(item).strip())
+    mentioned = _mentioned_coding_languages("\n".join(texts))
+    return any(language != normalized_expected for language in mentioned)
+
+
+def _is_low_value_coding_stem(stem: str, code_snippet: str) -> bool:
+    lowered = re.sub(r"\s+", " ", str(stem or "").strip().lower())
+    if not lowered:
+        return True
+    if any(re.search(pattern, lowered) for pattern in CODING_TRIVIAL_STEM_PATTERNS):
+        return True
+    if _coding_line_count(code_snippet) <= 4 and re.search(r"\b(?:print|output|return|returned|returns?)\b", lowered):
+        interpretive = any(term in lowered for term in CODING_INTERPRETIVE_TERMS)
+        if not interpretive:
+            return True
+    return False
+
+
+def coding_question_matches_expected_language(question: QuestionBankItem, expected_language: str = "") -> bool:
+    if not getattr(question, "is_coding_question", False):
+        return True
+    normalized_expected = _normalize_coding_language(expected_language or getattr(question, "coding_language", ""))
+    question_language = _normalize_coding_language(getattr(question, "coding_language", ""))
+    if normalized_expected and question_language and question_language != normalized_expected:
+        return False
+    combined = "\n".join(
+        [
+            str(getattr(question, "stem", "")).strip(),
+            str(getattr(question, "explanation", "")).strip(),
+            str(getattr(question, "correct_answer", "")).strip(),
+            *[str(answer).strip() for answer in getattr(question, "additional_correct_answers", [])],
+            *[str(option).strip() for option in getattr(question, "distractors", [])],
+            *[str(prompt).strip() for prompt in getattr(question, "further_study_questions", [])],
+        ]
+    )
+    mentioned = _mentioned_coding_languages(combined)
+    return not any(language != normalized_expected for language in mentioned if normalized_expected)
+
+
+def coding_question_quality_sort_key(question: QuestionBankItem) -> tuple[int, int, int]:
+    if not getattr(question, "is_coding_question", False):
+        return (0, 0, 0)
+    language = _normalize_coding_language(getattr(question, "coding_language", ""))
+    code_snippet = str(getattr(question, "code_snippet", "") or "")
+    line_count = _coding_line_count(code_snippet)
+    return (
+        1 if _is_low_value_coding_stem(getattr(question, "stem", ""), code_snippet) else 0,
+        1 if language in LANGUAGES_WITH_FUNCTION_FRIENDLY_EXAMPLES and line_count < 5 and not _snippet_has_function(language, code_snippet) else 0,
+        -min(line_count, 24),
+    )
 
 
 def _extract_fenced_code(text: str) -> tuple[str, str]:
@@ -599,19 +844,21 @@ def _fallback_coding_question_payload(
     if not language or not snippet:
         raise ValueError("Coding fallback requires a detected language and snippet.")
 
-    first_line = next((line.strip() for line in snippet.splitlines() if line.strip()), "the code")
-    answer_focus = (objective.text[:120].strip() if objective else f"The snippet demonstrates {language} control flow or syntax.")
-    kind = QuestionBankItem.CodingQuestionKind.COMPREHENSION
+    label = _coding_language_label(language)
+    focus_phrase = _coding_focus_phrase(language, snippet)
+    answer_focuses = _fallback_coding_answer_focus(language, snippet, objective.text if objective else "")
+    primary_answer = answer_focuses[0]
+    kind = QuestionBankItem.CodingQuestionKind.DEBUG if "bug" in focus_phrase or "issue" in focus_phrase else QuestionBankItem.CodingQuestionKind.COMPREHENSION
     if question_type == QuestionBankItem.QuestionType.WAQ:
-        stem = f"How would you explain what this {language} snippet does?"
+        stem = f"How would you explain {focus_phrase} in this {label} example?"
         return {
             "question_type": question_type,
             "stem": stem,
-            "correct_answers": [answer_focus],
-            "written_answer_keywords": _fallback_written_answer_keywords(answer_focus, snippet, language),
-            "further_study_questions": fallback_further_study_questions(stem=stem, objective_text=answer_focus, chunk_text=chunk.text),
+            "correct_answers": [primary_answer],
+            "written_answer_keywords": _fallback_written_answer_keywords(primary_answer, focus_phrase, snippet, language),
+            "further_study_questions": fallback_further_study_questions(stem=stem, objective_text=primary_answer, chunk_text=chunk.text),
             "distractors": [],
-            "explanation": "The answer should describe the snippet's behavior and the programming concept being tested.",
+            "explanation": "A strong answer should explain the main code path and the programming detail that controls the observed behaviour.",
             "difficulty": "core",
             "is_coding_question": True,
             "coding_language": language,
@@ -619,24 +866,27 @@ def _fallback_coding_question_payload(
             "code_snippet": snippet,
         }
 
-    stem = f"Which statement best describes what this {language} snippet is doing?"
-    correct_answers = [answer_focus]
+    stem = f"Which statement best explains {focus_phrase} in this {label} example?"
+    correct_answers = [primary_answer]
     if question_type == QuestionBankItem.QuestionType.MAQ:
-        correct_answers.append(f"The snippet includes `{first_line[:70]}` as part of the logic being tested.")
+        for candidate in answer_focuses[1:]:
+            if candidate not in correct_answers:
+                correct_answers.append(candidate)
+            if len(correct_answers) >= 2:
+                break
     distractors = [
-        "It is unrelated to the programming concept being tested.",
-        "It can only be understood by running an external service.",
-        "It ignores the control flow or syntax shown in the snippet.",
-        "It changes behavior randomly each time it is read.",
+        distractor
+        for distractor in _fallback_coding_distractors(language, snippet)
+        if distractor not in correct_answers
     ][:distractor_count]
     return {
         "question_type": question_type,
-        "stem": stem if question_type != QuestionBankItem.QuestionType.MAQ else f"Which statements accurately describe this {language} snippet?",
+        "stem": stem if question_type != QuestionBankItem.QuestionType.MAQ else f"Which statements accurately describe {focus_phrase} in this {label} example?",
         "correct_answers": correct_answers,
         "distractors": distractors,
         "written_answer_keywords": [],
-        "further_study_questions": fallback_further_study_questions(stem=stem, objective_text=answer_focus, chunk_text=chunk.text),
-        "explanation": "The correct answer reflects the snippet's behavior and the programming concept being tested.",
+        "further_study_questions": fallback_further_study_questions(stem=stem, objective_text=primary_answer, chunk_text=chunk.text),
+        "explanation": "The correct answer depends on interpreting the code structure, data flow, and language semantics shown in the example.",
         "difficulty": "core",
         "is_coding_question": True,
         "coding_language": language,
@@ -756,6 +1006,7 @@ def _openai_coding_question_payload(
     objective_text = objective.text if objective else "programming understanding"
     language = coding_signal["language"]
     snippet = coding_signal["snippet"]
+    language_label = _coding_language_label(language)
     is_maq = question_type == QuestionBankItem.QuestionType.MAQ
     is_waq = question_type == QuestionBankItem.QuestionType.WAQ
     avoidance_prompt = ""
@@ -771,15 +1022,22 @@ Rules:
 - set is_coding_question to true
 - set coding_language to "{language}"
 - set coding_question_kind to "comprehension" or "debug"
-- include code_snippet as a short standalone {language} code block
-- code_snippet must be based on the supplied snippet and must not require external files, services, network calls, or hidden context
-- ask about code behavior, output, control flow, syntax, state changes, the likely bug, or the best fix
+- keep the question entirely in {language_label}; do not mention or use any other programming language
+- include code_snippet as a self-contained {language_label} example of roughly 6 to 16 meaningful lines unless the source snippet is naturally shorter and cannot be expanded without inventing unrelated logic
+- when natural for {language_label}, prefer a named function or helper plus a call site or usage example; for SQL/HTML/CSS prefer a richer multi-clause or multi-rule example instead of a toy one-liner
+- code_snippet must be based on the supplied snippet and must not require external files, services, network calls, packages beyond those already shown, or hidden context
+- do not include fenced code blocks or repeated code_snippet text inside stem
+- ask about code behaviour, data flow, return values, control flow, structure, language semantics, the likely bug, or the best fix
+- prefer interpretation, issue-spotting, or reasoning questions over raw output tracing
+- do not ask students to manually compute the value of a single variable or perform repetitive arithmetic tracing
+- avoid toy one-liners and avoid stems that only ask "what is the value of x" or similar
 - do not ask what the source text, notes, material, or content covers/provides/discusses
 - no numerical calculation questions unless the calculation is incidental to understanding code behavior
 - {"return strict JSON with keys: question_type, stem, correct_answers, written_answer_keywords, further_study_questions, explanation, difficulty, is_coding_question, coding_language, coding_question_kind, code_snippet" if is_waq else "return strict JSON with keys: question_type, stem, correct_answers, distractors, further_study_questions, explanation, difficulty, is_coding_question, coding_language, coding_question_kind, code_snippet"}
 - {"correct_answers must contain exactly 1 item" if is_waq or not is_maq else "correct_answers must contain at least 2 items"}
 - {"written_answer_keywords must be an array of 3 to 6 short concept phrases or key terms needed for a strong answer" if is_waq else f"use exactly {distractor_count} distractors"}
 - {"do not return distractors for a written-answer question" if is_waq else "distractors must be plausible and distinct from the correct answer(s)"}
+- {"the written-answer prompt should ask the student to interpret the code or identify the key issue in their own words" if is_waq else "the answer choices should test misconceptions about scope, indexing, mutation, return values, control flow, or API semantics where appropriate"}
 - further_study_questions must be an array of exactly 3 concise student-facing follow-up questions{avoidance_prompt}
 
 Learning objective:
@@ -1004,7 +1262,61 @@ def _coding_chunks(chunks: list[ContentChunk]) -> list[tuple[ContentChunk, dict[
     return detected
 
 
-def _normalize_generated_payload(payload: dict, question_type: str, distractor_count: int) -> dict:
+def preferred_coding_language_for_block(
+    block: CourseBlock,
+    candidate_chunks: list[ContentChunk] | None = None,
+    coding_signals: dict[int, dict[str, str]] | None = None,
+) -> str:
+    if candidate_chunks is None:
+        candidate_chunks = list(
+            ContentChunk.objects.filter(block=block, asset__include_in_generation=True)
+            .select_related("asset")
+            .order_by("asset__created_at", "ordinal", "pk")
+        )
+
+    language_counts: dict[str, int] = defaultdict(int)
+    first_seen_order: dict[str, int] = {}
+    if coding_signals is None:
+        coding_signals = {chunk.pk: signal for chunk, signal in _coding_chunks(candidate_chunks)}
+
+    for index, chunk in enumerate(candidate_chunks):
+        signal = coding_signals.get(chunk.pk)
+        language = signal.get("language", "") if signal else ""
+        if not language:
+            continue
+        language_counts[language] += 1
+        first_seen_order.setdefault(language, index)
+
+    if language_counts:
+        ranked = sorted(
+            language_counts.items(),
+            key=lambda item: (-item[1], first_seen_order.get(item[0], 10**6), item[0]),
+        )
+        return ranked[0][0]
+
+    existing_counts = (
+        QuestionBankItem.objects.filter(
+            block=block,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            is_coding_question=True,
+        )
+        .exclude(coding_language="")
+        .values("coding_language")
+        .annotate(total=Count("id"))
+        .order_by("-total", "coding_language")
+    )
+    first_row = next(iter(existing_counts), None)
+    return str(first_row["coding_language"]) if first_row else ""
+
+
+def _normalize_generated_payload(
+    payload: dict,
+    question_type: str,
+    distractor_count: int,
+    *,
+    expected_coding_language: str = "",
+) -> dict:
     normalized_type = question_type
 
     correct_answers = _normalize_answer_list(payload.get("correct_answers"))
@@ -1049,17 +1361,25 @@ def _normalize_generated_payload(payload: dict, question_type: str, distractor_c
     if is_coding_question:
         if not code_snippet or len(code_snippet) < 8:
             raise ValueError("Coding question payload must include a meaningful code snippet.")
+        stem = re.sub(r"```[\w+-]*\n?[\s\S]*?```", " ", stem).strip()
+        stem = re.sub(r"\s+", " ", stem)
+        if expected_coding_language:
+            coding_language = expected_coding_language
         if not coding_language:
             detected_language = _language_from_text(code_snippet)
             if detected_language:
                 coding_language = detected_language
         if coding_language not in CODING_LANGUAGES:
             raise ValueError("Coding question payload must include a supported coding language.")
+        if _payload_mentions_unexpected_coding_language(payload, coding_language):
+            raise ValueError("Coding question payload mentions an unexpected programming language.")
         if coding_question_kind not in {
             QuestionBankItem.CodingQuestionKind.COMPREHENSION,
             QuestionBankItem.CodingQuestionKind.DEBUG,
         }:
             coding_question_kind = QuestionBankItem.CodingQuestionKind.COMPREHENSION
+        if _is_low_value_coding_stem(stem, code_snippet):
+            raise ValueError("Coding question stem is too trivial.")
     else:
         coding_language = ""
         coding_question_kind = ""
@@ -1090,8 +1410,14 @@ def _create_question_pair(
     question_type: str,
     payload: dict,
     existing_hashes: set[str],
+    expected_coding_language: str = "",
 ):
-    normalized_payload = _normalize_generated_payload(payload, question_type, course.config.distractor_count)
+    normalized_payload = _normalize_generated_payload(
+        payload,
+        question_type,
+        course.config.distractor_count,
+        expected_coding_language=expected_coding_language,
+    )
     stem = _normalize_question_stem(normalized_payload["stem"])
     if any(char.isdigit() for char in stem) and any(token in stem.lower() for token in ("calculate", "solve", "compute")):
         return None, None
@@ -1137,7 +1463,7 @@ def _create_question_pair(
         source_chunk=chunk,
         bank_type=QuestionBankItem.BankType.VALIDATION,
         status=QuestionBankItem.Status.APPROVED,
-        stem=f"{stem.rstrip('?')} (validation variant {random.randint(1000, 9999)})?",
+        stem=stem,
         question_type=practice.question_type,
         correct_answer=practice.correct_answer,
         additional_correct_answers=practice.additional_correct_answers,
@@ -1189,6 +1515,13 @@ def generate_question_pair_for_block(
         return None, None
 
     coding_signals = {chunk.pk: signal for chunk, signal in _coding_chunks(candidate_chunks)}
+    preferred_coding_language = preferred_coding_language_for_block(block, candidate_chunks, coding_signals)
+    if preferred_coding_language:
+        coding_signals = {
+            chunk_id: signal
+            for chunk_id, signal in coding_signals.items()
+            if signal.get("language") == preferred_coding_language
+        }
     coding_generation_due = _coding_question_generation_due(course) and bool(coding_signals)
     total_chunks_by_block: dict[int, int] = defaultdict(int)
     chunk_index_by_block: dict[int, int] = defaultdict(int)
@@ -1273,11 +1606,12 @@ def generate_question_pair_for_block(
                         _normalize_generated_payload(payload, question_type, course.config.distractor_count)
                 except (ValueError, json.JSONDecodeError, KeyError, TypeError):
                     if coding_signal:
-                        payload = _fallback_question_payload(
+                        payload = _fallback_coding_question_payload(
                             chunk,
                             objective,
                             course.config.distractor_count,
                             question_type,
+                            coding_signal,
                             question_variant_index=question_variant_index,
                         )
                     else:
@@ -1296,6 +1630,7 @@ def generate_question_pair_for_block(
                 question_type=question_type,
                 payload=payload,
                 existing_hashes=existing_hashes,
+                expected_coding_language=(coding_signal.get("language", "") if coding_signal else ""),
             )
             if practice is not None and validation is not None:
                 return practice, validation
@@ -1357,13 +1692,23 @@ def generate_question_pair_for_block(
                 if coding_signal:
                     _normalize_generated_payload(payload, question_type, course.config.distractor_count)
             except (ValueError, json.JSONDecodeError, KeyError, TypeError):
-                payload = _fallback_question_payload(
-                    chunk,
-                    objective,
-                    course.config.distractor_count,
-                    question_type,
-                    question_variant_index=question_variant_index,
-                )
+                if coding_signal:
+                    payload = _fallback_coding_question_payload(
+                        chunk,
+                        objective,
+                        course.config.distractor_count,
+                        question_type,
+                        coding_signal,
+                        question_variant_index=question_variant_index,
+                    )
+                else:
+                    payload = _fallback_question_payload(
+                        chunk,
+                        objective,
+                        course.config.distractor_count,
+                        question_type,
+                        question_variant_index=question_variant_index,
+                    )
         practice, validation = _create_question_pair(
             course=course,
             block=block,
@@ -1372,6 +1717,7 @@ def generate_question_pair_for_block(
             question_type=question_type,
             payload=payload,
             existing_hashes=existing_hashes,
+            expected_coding_language=(coding_signal.get("language", "") if coding_signal else ""),
         )
         if practice is not None and validation is not None:
             return practice, validation
@@ -1406,6 +1752,9 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
             total_chunks_by_block[chunk.block_id],
         )
         coding_signal = _coding_signal_for_chunk(chunk) if _coding_question_generation_due(course) else {"language": "", "snippet": ""}
+        preferred_coding_language = preferred_coding_language_for_block(chunk.block, [chunk], {chunk.pk: coding_signal} if coding_signal["language"] else {})
+        if preferred_coding_language and coding_signal["language"] and coding_signal["language"] != preferred_coding_language:
+            coding_signal = {"language": "", "snippet": ""}
         if coding_signal["language"] and coding_signal["snippet"]:
             payload = _fallback_coding_question_payload(chunk, objective, course.config.distractor_count, question_type, coding_signal)
         else:
@@ -1421,7 +1770,10 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
                 if coding_signal["language"] and coding_signal["snippet"]:
                     _normalize_generated_payload(payload, question_type, course.config.distractor_count)
             except (ValueError, json.JSONDecodeError, KeyError, TypeError):
-                payload = _fallback_question_payload(chunk, objective, course.config.distractor_count, question_type)
+                if coding_signal["language"] and coding_signal["snippet"]:
+                    payload = _fallback_coding_question_payload(chunk, objective, course.config.distractor_count, question_type, coding_signal)
+                else:
+                    payload = _fallback_question_payload(chunk, objective, course.config.distractor_count, question_type)
         practice, validation = _create_question_pair(
             course=course,
             block=chunk.block,
@@ -1430,6 +1782,7 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
             question_type=question_type,
             payload=payload,
             existing_hashes=existing_hashes,
+            expected_coding_language=(coding_signal.get("language", "") if coding_signal else ""),
         )
         if practice is not None and validation is not None:
             question_count += 2
