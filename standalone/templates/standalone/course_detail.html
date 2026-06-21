@@ -104,6 +104,12 @@
               <p class="course-setting-help">{{ course_config_form.distractor_count.help_text }}</p>
               <p class="course-setting-status" data-course-config-status hidden></p>
             </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.numeric_ratio_percent.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'numeric_ratio_percent' %}">
+              <label class="course-setting-label" for="{{ course_config_form.numeric_ratio_percent.id_for_label }}">{{ course_config_form.numeric_ratio_percent.label }}</label>
+              {{ course_config_form.numeric_ratio_percent }}
+              <p class="course-setting-help">{{ course_config_form.numeric_ratio_percent.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
             <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.maq_ratio_percent.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'maq_ratio_percent' %}">
               <label class="course-setting-label" for="{{ course_config_form.maq_ratio_percent.id_for_label }}">{{ course_config_form.maq_ratio_percent.label }}</label>
               {{ course_config_form.maq_ratio_percent }}

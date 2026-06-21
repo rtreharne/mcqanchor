@@ -172,6 +172,10 @@ class CourseConfigForm(forms.ModelForm):
         self.fields["self_enrol_domain"].help_text = (
             "Optional. Enter a domain such as example.ac.uk. It applies to both self-enrol allowlist signups and magic links."
         )
+        self.fields["numeric_ratio_percent"].label = "Numeric question ratio (%)"
+        self.fields["numeric_ratio_percent"].help_text = (
+            "Target percentage of newly generated questions that should be numeric single-answer items with locally validated calculations."
+        )
         self.fields["maq_ratio_percent"].label = "Multiple-answer question ratio (%)"
         self.fields["maq_ratio_percent"].help_text = (
             "Target percentage of newly generated questions that should allow multiple correct answers."

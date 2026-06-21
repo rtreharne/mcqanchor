@@ -62,6 +62,33 @@ if (previewRoot && previewDataNode) {
     month: "short",
     year: "numeric",
   });
+  const richText = window.StandaloneRichText || {
+    appendFormattedMessageContent(container, text) {
+      if (!container) {
+        return;
+      }
+      const paragraph = document.createElement("p");
+      paragraph.textContent = String(text || "");
+      container.appendChild(paragraph);
+    },
+    appendInlineText(target, text) {
+      if (target) {
+        target.textContent = String(text || "");
+      }
+    },
+    buildTextPanel(headingText, bodyText, extraClass = "") {
+      const panel = document.createElement("div");
+      panel.className = `preview-written-answer-panel${extraClass ? ` ${extraClass}` : ""}`;
+      const heading = document.createElement("span");
+      heading.className = "preview-written-answer-heading";
+      heading.textContent = headingText;
+      const paragraph = document.createElement("p");
+      paragraph.textContent = String(bodyText || "");
+      panel.append(heading, paragraph);
+      return panel;
+    },
+    renderMath() {},
+  };
 
   function activeBlockStorageKey() {
     const courseId = String(previewState?.course?.id || previewRoot.dataset.courseId || "");
@@ -832,6 +859,23 @@ if (previewRoot && previewDataNode) {
     return String.fromCharCode(65 + index);
   }
 
+  function questionTypeLabel(message) {
+    if (message?.question_type_label) {
+      return String(message.question_type_label);
+    }
+    switch (String(message?.question_type || "")) {
+      case "num":
+        return "Numerical MCQ";
+      case "maq":
+        return "Multiple-answer MCQ";
+      case "waq":
+        return "Written answer";
+      case "mcq":
+      default:
+        return "Standard MCQ";
+    }
+  }
+
   function formatSelectedAnswers(options, selectedAnswers, flagged = false) {
     const normalizedAnswers = Array.isArray(selectedAnswers) ? selectedAnswers : [];
     const selectedText = normalizedAnswers.map((answer) => {
@@ -875,12 +919,23 @@ if (previewRoot && previewDataNode) {
       const state = reviewedOptionState(option, selectedAnswers, correctAnswers);
       const optionRow = document.createElement("div");
       optionRow.className = `preview-answer-chip preview-answer-chip--review${state.modifier ? ` ${state.modifier}` : ""}`;
-      optionRow.innerHTML = `
-        <span class="preview-answer-chip-indicator" aria-hidden="true">${state.indicator}</span>
-        <span class="preview-answer-chip-label">${optionLabel(index)}</span>
-        <span class="preview-answer-chip-text">${option}</span>
-        ${state.badge ? `<span class="preview-answer-chip-badge">${state.badge}</span>` : ""}
-      `;
+      const indicator = document.createElement("span");
+      indicator.className = "preview-answer-chip-indicator";
+      indicator.setAttribute("aria-hidden", "true");
+      indicator.textContent = state.indicator;
+      const label = document.createElement("span");
+      label.className = "preview-answer-chip-label";
+      label.textContent = optionLabel(index);
+      const text = document.createElement("span");
+      text.className = "preview-answer-chip-text";
+      richText.appendInlineText(text, option);
+      optionRow.append(indicator, label, text);
+      if (state.badge) {
+        const badge = document.createElement("span");
+        badge.className = "preview-answer-chip-badge";
+        badge.textContent = state.badge;
+        optionRow.appendChild(badge);
+      }
       optionsWrapper.appendChild(optionRow);
     });
 
@@ -897,14 +952,7 @@ if (previewRoot && previewDataNode) {
   function renderWrittenAnswerReview(message) {
     const review = document.createElement("div");
     review.className = "preview-written-answer-review";
-
-    const submitted = document.createElement("div");
-    submitted.className = "preview-written-answer-panel";
-    submitted.innerHTML = `
-      <span class="preview-written-answer-heading">Your answer</span>
-      <p>${message.submitted_text || "No answer submitted."}</p>
-    `;
-    review.appendChild(submitted);
+    review.appendChild(richText.buildTextPanel("Your answer", message.submitted_text || "No answer submitted."));
 
     const meter = document.createElement("div");
     meter.className = `preview-written-answer-alignment is-${message.alignment_state || "drafting"}`;
@@ -920,183 +968,14 @@ if (previewRoot && previewDataNode) {
     review.appendChild(meter);
 
     if (message.model_answer_revealed && message.model_answer) {
-      const modelAnswer = document.createElement("div");
-      modelAnswer.className = "preview-written-answer-panel is-model-answer";
-      modelAnswer.innerHTML = `
-        <span class="preview-written-answer-heading">Model answer</span>
-        <p>${message.model_answer}</p>
-      `;
-      review.appendChild(modelAnswer);
+      review.appendChild(richText.buildTextPanel("Model answer", message.model_answer, "is-model-answer"));
     }
 
     return review;
   }
 
   function appendFormattedMessageContent(container, text) {
-    if (!container) {
-      return;
-    }
-
-    const source = String(text || "");
-    const fencePattern = /```([\w+-]+)?\n?([\s\S]*?)```/g;
-    const unorderedListPattern = /^\s*[-*]\s+/;
-    const orderedListPattern = /^\s*\d+\.\s+/;
-    let lastIndex = 0;
-    let hasContent = false;
-
-    function appendInlineMarkdown(target, inlineText) {
-      const sourceText = String(inlineText || "");
-      const tokenPattern = /`[^`\n]+`|\*\*[^*][\s\S]*?\*\*|__[^_][\s\S]*?__|\*[^*\n][\s\S]*?\*|_[^_\n][\s\S]*?_/g;
-      let inlineLastIndex = 0;
-
-      function appendToken(targetNode, tokenText) {
-        if (!tokenText) {
-          return;
-        }
-        if (tokenText.startsWith("`") && tokenText.endsWith("`")) {
-          const code = document.createElement("code");
-          code.className = "preview-message-inline-code";
-          code.textContent = tokenText.slice(1, -1);
-          targetNode.appendChild(code);
-          return;
-        }
-        if (
-          (tokenText.startsWith("**") && tokenText.endsWith("**"))
-          || (tokenText.startsWith("__") && tokenText.endsWith("__"))
-        ) {
-          const strong = document.createElement("strong");
-          appendInlineMarkdown(strong, tokenText.slice(2, -2));
-          targetNode.appendChild(strong);
-          return;
-        }
-        if (
-          (tokenText.startsWith("*") && tokenText.endsWith("*"))
-          || (tokenText.startsWith("_") && tokenText.endsWith("_"))
-        ) {
-          const emphasis = document.createElement("em");
-          appendInlineMarkdown(emphasis, tokenText.slice(1, -1));
-          targetNode.appendChild(emphasis);
-          return;
-        }
-        targetNode.appendChild(document.createTextNode(tokenText));
-      }
-
-      sourceText.replace(tokenPattern, (match, offset) => {
-        const plainText = sourceText.slice(inlineLastIndex, offset);
-        if (plainText) {
-          target.appendChild(document.createTextNode(plainText));
-        }
-        appendToken(target, match);
-        inlineLastIndex = offset + match.length;
-        return match;
-      });
-
-      const trailingText = sourceText.slice(inlineLastIndex);
-      if (trailingText) {
-        target.appendChild(document.createTextNode(trailingText));
-      }
-    }
-
-    function parseListItems(lines, markerPattern) {
-      const items = [];
-      let currentItem = "";
-      for (const line of lines) {
-        if (!line.trim()) {
-          if (currentItem) {
-            currentItem += "\n";
-          }
-          continue;
-        }
-        if (markerPattern.test(line)) {
-          if (currentItem.trim()) {
-            items.push(currentItem.trim());
-          }
-          currentItem = line.replace(markerPattern, "").trim();
-          continue;
-        }
-        if (/^\s+/.test(line) && currentItem) {
-          currentItem = `${currentItem}\n${line.trim()}`;
-          continue;
-        }
-        return [];
-      }
-      if (currentItem.trim()) {
-        items.push(currentItem.trim());
-      }
-      return items;
-    }
-
-    function appendTextBlock(blockText) {
-      const lines = blockText.split("\n");
-      const nonEmptyLines = lines.filter((line) => line.trim());
-      if (!nonEmptyLines.length) {
-        return;
-      }
-
-      const firstLine = nonEmptyLines[0];
-      const isUnorderedList = unorderedListPattern.test(firstLine);
-      const isOrderedList = !isUnorderedList && orderedListPattern.test(firstLine);
-      const listItems = isUnorderedList
-        ? parseListItems(lines, unorderedListPattern)
-        : (isOrderedList ? parseListItems(lines, orderedListPattern) : []);
-
-      if (listItems.length) {
-        const list = document.createElement(isOrderedList ? "ol" : "ul");
-        list.className = "preview-message-list";
-        listItems.forEach((itemText) => {
-          const item = document.createElement("li");
-          item.className = "preview-message-list-item";
-          appendInlineMarkdown(item, itemText);
-          list.appendChild(item);
-        });
-        container.appendChild(list);
-        hasContent = true;
-        return;
-      }
-
-      const paragraph = document.createElement("p");
-      paragraph.className = "preview-message-paragraph";
-      appendInlineMarkdown(paragraph, blockText);
-      container.appendChild(paragraph);
-      hasContent = true;
-    }
-
-    function appendTextSegment(segment) {
-      const normalized = String(segment || "").replace(/^\n+|\n+$/g, "");
-      if (!normalized) {
-        return;
-      }
-      normalized.split(/\n{2,}/).forEach((blockText) => {
-        appendTextBlock(blockText);
-      });
-    }
-
-    source.replace(fencePattern, (match, language, code, offset) => {
-      appendTextSegment(source.slice(lastIndex, offset));
-
-      const pre = document.createElement("pre");
-      pre.className = "preview-message-code-block";
-      if (language) {
-        pre.dataset.language = String(language).trim().toLowerCase();
-      }
-      const codeElement = document.createElement("code");
-      codeElement.className = "preview-message-code";
-      codeElement.textContent = String(code || "").replace(/^\n+|\n+$/g, "");
-      pre.appendChild(codeElement);
-      container.appendChild(pre);
-      hasContent = true;
-      lastIndex = offset + match.length;
-      return match;
-    });
-
-    appendTextSegment(source.slice(lastIndex));
-
-    if (!hasContent) {
-      const paragraph = document.createElement("p");
-      paragraph.className = "preview-message-paragraph";
-      appendInlineMarkdown(paragraph, source);
-      container.appendChild(paragraph);
-    }
+    richText.appendFormattedMessageContent(container, text);
   }
 
   function appendQuestionCodeSnippet(container, message) {
@@ -1252,17 +1131,10 @@ if (previewRoot && previewDataNode) {
       article.dataset.questionId = String(message.question_id || "");
       article.dataset.answered = message.answered ? "true" : "false";
       article.dataset.flagged = message.flagged ? "true" : "false";
-      if (message.question_type === "maq" && !message.answered && !message.flagged) {
-        const callout = document.createElement("div");
-        callout.className = "preview-question-callout";
-        callout.textContent = "Select all that apply";
-        article.appendChild(callout);
-      } else if (message.question_type === "waq") {
-        const callout = document.createElement("div");
-        callout.className = "preview-question-callout";
-        callout.textContent = "Written answer";
-        article.appendChild(callout);
-      }
+      const callout = document.createElement("div");
+      callout.className = "preview-question-callout";
+      callout.textContent = questionTypeLabel(message);
+      article.appendChild(callout);
       appendFormattedMessageContent(article, questionStemText(message));
       appendQuestionCodeSnippet(article, message);
 
@@ -1294,8 +1166,9 @@ if (previewRoot && previewDataNode) {
             optionButton.innerHTML = `
               <span class="preview-answer-chip-checkbox" aria-hidden="true">${selections.includes(option) ? "✓" : ""}</span>
               <span class="preview-answer-chip-label">${optionLabel(index)}</span>
-              <span>${option}</span>
+              <span class="preview-answer-chip-text"></span>
             `;
+            richText.appendInlineText(optionButton.querySelector(".preview-answer-chip-text"), option);
             optionButton.disabled = requestInFlight;
             optionButton.addEventListener("click", () => {
               toggleMaqSelection(message.question_id, option);
@@ -1329,8 +1202,9 @@ if (previewRoot && previewDataNode) {
             optionButton.className = "preview-answer-chip";
             optionButton.innerHTML = `
               <span class="preview-answer-chip-label">${optionLabel(index)}</span>
-              <span>${option}</span>
+              <span class="preview-answer-chip-text"></span>
             `;
+            richText.appendInlineText(optionButton.querySelector(".preview-answer-chip-text"), option);
             optionButton.disabled = requestInFlight;
             optionButton.addEventListener("click", () => {
               void postPreviewAction("answer", {
@@ -1384,6 +1258,7 @@ if (previewRoot && previewDataNode) {
       });
       actions.appendChild(flagButton);
       article.appendChild(actions);
+      richText.renderMath(article);
       return article;
     }
 
@@ -1527,6 +1402,8 @@ if (previewRoot && previewDataNode) {
         article.appendChild(actions);
       }
     }
+
+    richText.renderMath(article);
 
     return article;
   }

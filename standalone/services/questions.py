@@ -9,21 +9,41 @@ from django.utils import timezone
 from openai import OpenAI
 
 from standalone.models import ContentChunk, Course, CourseBlock, LearningObjective, QuestionBankItem
+from standalone.services.numeric_questions import (
+    NumericQuestionRequestError,
+    NumericQuestionValidationError,
+    build_numeric_question_payload,
+    chunk_has_numeric_signal,
+)
+
+
+class QuestionGenerationError(ValueError):
+    pass
 
 
 OBJECTIVE_MATCH_STOPWORDS = {
     "about",
     "across",
     "between",
+    "block",
     "compare",
+    "course",
     "describe",
     "discuss",
     "explain",
+    "general",
     "identify",
+    "ideas",
     "into",
     "into",
+    "key",
+    "overview",
+    "topic",
+    "topics",
     "using",
     "understand",
+    "understanding",
+    "week",
     "with",
     "from",
     "that",
@@ -34,8 +54,9 @@ OBJECTIVE_MATCH_STOPWORDS = {
 }
 
 QUESTION_TYPE_GENERATION_PRIORITY = {
-    QuestionBankItem.QuestionType.MAQ: 0,
-    QuestionBankItem.QuestionType.WAQ: 1,
+    QuestionBankItem.QuestionType.NUM: 0,
+    QuestionBankItem.QuestionType.MAQ: 1,
+    QuestionBankItem.QuestionType.WAQ: 2,
 }
 
 WAQ_FALLBACK_STEM_TEMPLATES = (
@@ -68,6 +89,11 @@ STUDY_FOCUS_ACTION_VERBS = (
     "connect",
     "infer",
 )
+
+
+def _trace_generation(event: str, **context) -> None:
+    payload = {"event": event, **context}
+    print(f"[question-generation] {json.dumps(payload, default=str, ensure_ascii=False)}", flush=True)
 
 CODING_LANGUAGES = {
     "python",
@@ -761,7 +787,44 @@ def _fallback_question_payload(
     *,
     question_variant_index: int = 0,
 ) -> dict:
+    def sanitize_focus_phrase(text: str) -> str:
+        cleaned = re.sub(
+            r"\b(?:figure|fig\.?|table|diagram|graph|worked\s+example|example|chapter|module|section|page|paragraph|extract|excerpt|week|lesson|unit)\s*[a-z0-9.-]*\b",
+            " ",
+            text or "",
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^(?:"
+            + "|".join(sorted({verb for verb in STUDY_FOCUS_ACTION_VERBS if verb}, key=len, reverse=True))
+            + r")\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(?:this|the|a|an)\s+(?:text|source\s+text|textbook|book|chapter|passage|notes|material|materials|content|document)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"[^a-zA-Z\s-]", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
+        cleaned = re.sub(r"\b(?:in|of|on|for|to|with|about|from|into|across|between)\b\s*$", "", cleaned, flags=re.IGNORECASE).strip(" -")
+        return cleaned[:120]
+
     summary = chunk.text.split(".")[0][:180].strip() or "this topic"
+    summary_for_stem = sanitize_focus_phrase(objective.text if objective else "")
+    if not summary_for_stem:
+        summary_for_stem = sanitize_focus_phrase(
+            re.sub(r"\b(?:shows?|shown|described|covered|mentioned|discussed|explained|presented|provided)\b", " ", summary, flags=re.IGNORECASE)
+        )
+    if any(char.isdigit() for char in summary) and any(
+        token in summary.lower()
+        for token in ("calculate", "solve", "compute", "determine", "estimate")
+    ):
+        summary_for_stem = sanitize_focus_phrase(objective.text if objective else "") or "the relationship described in this scenario"
+    summary_for_stem = summary_for_stem or "this topic"
     correct_answer = (objective.text[:90].strip() if objective else summary) or "this topic"
     source_sentences = [
         sentence.strip(" .")
@@ -808,18 +871,18 @@ def _fallback_question_payload(
     return {
         "question_type": question_type,
         "stem": (
-            f"Which statements best explain {summary.lower()}?"
+            f"Which statements best explain {summary_for_stem.lower()}?"
             if question_type == QuestionBankItem.QuestionType.MAQ
-            else f"Which statement best explains {summary.lower()}?"
+            else f"Which statement best explains {summary_for_stem.lower()}?"
         ),
         "correct_answers": correct_answers,
         "distractors": distractors,
         "written_answer_keywords": [],
         "further_study_questions": fallback_further_study_questions(
             stem=(
-                f"Which statements best explain {summary.lower()}?"
+                f"Which statements best explain {summary_for_stem.lower()}?"
                 if question_type == QuestionBankItem.QuestionType.MAQ
-                else f"Which statement best explains {summary.lower()}?"
+                else f"Which statement best explains {summary_for_stem.lower()}?"
             ),
             objective_text=(objective.text if objective else ""),
             chunk_text=chunk.text,
@@ -895,17 +958,134 @@ def _fallback_coding_question_payload(
     }
 
 
+def _numeric_question_payload(
+    chunk: ContentChunk,
+    objective: LearningObjective | None,
+    distractor_count: int,
+    *,
+    avoid_question_angles: list[str] | None = None,
+) -> dict:
+    objective_text = objective.text if objective else ""
+    signal_text = f"{objective_text}\n{chunk.text}"
+    if not chunk_has_numeric_signal(signal_text):
+        raise NumericQuestionValidationError(
+            "This block does not contain enough quantitative signal for a numerical MCQ."
+        )
+    objective_text = objective_text or "this block"
+    result = build_numeric_question_payload(
+        chunk.text,
+        objective_text,
+        distractor_count,
+        avoid_question_angles=avoid_question_angles,
+    )
+    _trace_generation(
+        "numeric_candidate_validated",
+        question_type=QuestionBankItem.display_label_for_question_type(QuestionBankItem.QuestionType.NUM),
+        objective=objective_text,
+        chunk_id=chunk.pk,
+        stem=result.payload.get("stem", ""),
+        correct_answer=(result.payload.get("correct_answers") or [""])[0],
+    )
+    return result.payload
+
+
+def _payload_for_generation_attempt(
+    chunk: ContentChunk,
+    objective: LearningObjective | None,
+    distractor_count: int,
+    question_type: str,
+    *,
+    coding_signal: dict[str, str] | None = None,
+    avoid_question_angles: list[str] | None = None,
+    question_variant_index: int = 0,
+) -> tuple[dict, str, str]:
+    if question_type == QuestionBankItem.QuestionType.NUM:
+        payload = _numeric_question_payload(
+            chunk,
+            objective,
+            distractor_count,
+            avoid_question_angles=avoid_question_angles,
+        )
+        return payload, QuestionBankItem.QuestionType.NUM, ""
+
+    if coding_signal:
+        payload = _fallback_coding_question_payload(
+            chunk,
+            objective,
+            distractor_count,
+            question_type,
+            coding_signal,
+            question_variant_index=question_variant_index,
+        )
+        if settings.OPENAI_API_KEY:
+            try:
+                payload = _openai_coding_question_payload(
+                    chunk,
+                    objective,
+                    distractor_count,
+                    question_type,
+                    coding_signal,
+                    avoid_question_angles=avoid_question_angles,
+                )
+                if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
+                    raise ValueError("Question stem depends on source/meta phrasing.")
+                _normalize_generated_payload(payload, question_type, distractor_count)
+            except (ValueError, json.JSONDecodeError, KeyError, TypeError):
+                payload = _fallback_coding_question_payload(
+                    chunk,
+                    objective,
+                    distractor_count,
+                    question_type,
+                    coding_signal,
+                    question_variant_index=question_variant_index,
+                )
+        return payload, question_type, coding_signal.get("language", "")
+
+    payload = _fallback_question_payload(
+        chunk,
+        objective,
+        distractor_count,
+        question_type,
+        question_variant_index=question_variant_index,
+    )
+    if settings.OPENAI_API_KEY:
+        try:
+            payload = _openai_question_payload(
+                chunk,
+                objective,
+                distractor_count,
+                question_type,
+                avoid_question_angles=avoid_question_angles,
+            )
+            if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
+                raise ValueError("Question stem depends on source/meta phrasing.")
+        except (ValueError, json.JSONDecodeError, KeyError, TypeError):
+            payload = _fallback_question_payload(
+                chunk,
+                objective,
+                distractor_count,
+                question_type,
+                question_variant_index=question_variant_index,
+            )
+    return payload, question_type, ""
+
+
 def _is_source_dependent_question_stem(stem: str) -> bool:
     lowered = re.sub(r"\s+", " ", str(stem or "").strip().lower())
     if not lowered:
         return False
     source_terms = r"(?:source\s+text|textbook|book|chapter|passage|notes|material|materials|content|block|uploaded\s+document|document)"
+    source_artifacts = r"(?:figure|fig\.?|table|diagram|graph|worked\s+example|example|chapter|module|section|page|paragraph|extract|excerpt)"
     patterns = (
         rf"\b(?:according to|based on|from|in)\s+(?:the\s+)?{source_terms}\b",
         rf"\b(?:the\s+)?{source_terms}\s+(?:covers?|covered|provides?|states?|describes?|discusses?|mentions?|explains?|focuses\s+on)\b",
         rf"\b(?:main|key|primary|central)\s+topics?\s+(?:covered|discussed|provided|mentioned)\b",
         rf"\bwhat\s+is\s+one\s+of\s+(?:the\s+)?(?:main|key|primary|central)\s+topics?\b",
         rf"\bwhich\s+(?:topic|statement|idea)\s+is\s+(?:covered|mentioned|discussed|provided)\b",
+        rf"\b(?:this|the)\s+{source_artifacts}\b",
+        rf"\b{source_artifacts}\s+\d+[a-z]?\b",
+        rf"\b(?:shown|described|presented|given)\s+in\s+(?:this|the)\s+{source_artifacts}\b",
+        rf"\b(?:text|passage|chapter|figure|table|worked\s+example)\s+above\b",
     )
     return any(re.search(pattern, lowered) for pattern in patterns)
 
@@ -933,7 +1113,7 @@ def _normalize_question_stem(stem: str) -> str:
     )
     if cleaned.lower().startswith("why "):
         return f"Why {cleaned[4:].rstrip('?.')}?"
-    return cleaned.rstrip("?") + "?"
+    return cleaned.rstrip("?.") + "?"
 
 
 def _openai_question_payload(
@@ -958,11 +1138,14 @@ Create one educator-facing {"written-answer" if is_waq else ("multiple-answer" i
 
 Rules:
 - no numerical calculation questions
-- keep it answerable from the source text below
+- use the source text only as background context
+- keep it answerable from the concepts supported by the source text below
 - write the question as a standalone quiz item, independent of the source text or textbook
 - do not ask what the source text, textbook, chapter, notes, material, or content covers/provides/discusses
 - avoid lead-ins like "According to these notes", "Based on the passage", "In the textbook", or "From the content"
 - never use stems like "What is one of the main topics covered..." or "Which topic is covered..."
+- do not mention figures, worked examples, tables, diagrams, chapter numbers, page numbers, section labels, quoted local wording, or any document-position reference
+- rewrite document-specific wording into a domain concept question
 - when the best stem is a why-question, start it directly with "Why ..."
 - set question_type to "{question_type}"
 - correct_answers must be an array of strings
@@ -1031,7 +1214,9 @@ Rules:
 - prefer interpretation, issue-spotting, or reasoning questions over raw output tracing
 - do not ask students to manually compute the value of a single variable or perform repetitive arithmetic tracing
 - avoid toy one-liners and avoid stems that only ask "what is the value of x" or similar
+- use the source text only as background context
 - do not ask what the source text, notes, material, or content covers/provides/discusses
+- do not mention figures, worked examples, tables, diagrams, chapter numbers, page numbers, section labels, quoted local wording, or any document-position reference
 - no numerical calculation questions unless the calculation is incidental to understanding code behavior
 - {"return strict JSON with keys: question_type, stem, correct_answers, written_answer_keywords, further_study_questions, explanation, difficulty, is_coding_question, coding_language, coding_question_kind, code_snippet" if is_waq else "return strict JSON with keys: question_type, stem, correct_answers, distractors, further_study_questions, explanation, difficulty, is_coding_question, coding_language, coding_question_kind, code_snippet"}
 - {"correct_answers must contain exactly 1 item" if is_waq or not is_maq else "correct_answers must contain at least 2 items"}
@@ -1132,13 +1317,17 @@ def _rank_candidate_chunks_for_objective(
     question_type_objective_chunk_counts = question_type_objective_chunk_counts or {}
     for chunk in candidate_chunks:
         overlap = len(_keyword_set(chunk.text) & target_keywords)
+        diversify_question_type = question_type in {
+            QuestionBankItem.QuestionType.NUM,
+            QuestionBankItem.QuestionType.WAQ,
+        }
         ranked_chunks.append(
             (
                 question_type_objective_chunk_counts.get((objective.pk, chunk.pk), 0)
-                if question_type == QuestionBankItem.QuestionType.WAQ
+                if diversify_question_type
                 else 0,
                 question_type_chunk_counts.get(chunk.pk, 0)
-                if question_type == QuestionBankItem.QuestionType.WAQ
+                if diversify_question_type
                 else 0,
                 0 if overlap > 0 else 1,
                 chunk.practice_question_count,
@@ -1183,6 +1372,62 @@ def _question_type_distribution_for_block(
     return objective_counts, chunk_counts, objective_chunk_counts
 
 
+def _numeric_formula_focus_from_metadata(metadata: dict | None) -> str:
+    snapshot = metadata.get("output_snapshot") if isinstance(metadata, dict) else None
+    if not isinstance(snapshot, dict):
+        return ""
+    formula = re.sub(r"\s+", " ", str(snapshot.get("formula_tex", "")).strip())
+    formula = formula.replace("\\\\", "\\")
+    formula = formula.replace("{{", "{").replace("}}", "}")
+    return formula
+
+
+def _numeric_question_repeats_recent_angle(
+    *,
+    block: CourseBlock,
+    objective: LearningObjective | None,
+    stem: str,
+    correct_answer: str,
+    numeric_metadata: dict | None,
+    limit: int = 4,
+) -> bool:
+    if not isinstance(numeric_metadata, dict):
+        return False
+
+    new_formula = _numeric_formula_focus_from_metadata(numeric_metadata)
+    new_tokens = _keyword_set(stem)
+    new_unit = correct_answer.split()[-1].lower() if correct_answer.strip() else ""
+    queryset = QuestionBankItem.objects.filter(
+        course=block.course,
+        block=block,
+        bank_type=QuestionBankItem.BankType.PRACTICE,
+        status=QuestionBankItem.Status.APPROVED,
+        question_type=QuestionBankItem.QuestionType.NUM,
+    )
+    recent_questions = []
+    if objective is not None:
+        recent_questions.extend(list(queryset.filter(learning_objective=objective).order_by("-created_at", "-pk")[:limit]))
+    if len(recent_questions) < limit:
+        recent_ids = {question.pk for question in recent_questions}
+        recent_questions.extend(
+            list(queryset.exclude(pk__in=recent_ids).order_by("-created_at", "-pk")[: max(0, limit - len(recent_questions))])
+        )
+
+    for question in recent_questions:
+        existing_formula = _numeric_formula_focus_from_metadata(question.numeric_metadata)
+        if new_formula and existing_formula and new_formula == existing_formula:
+            return True
+        existing_tokens = _keyword_set(question.stem)
+        union_size = len(new_tokens | existing_tokens)
+        if union_size == 0:
+            continue
+        token_similarity = len(new_tokens & existing_tokens) / union_size
+        existing_unit = question.correct_answer.split()[-1].lower() if question.correct_answer.strip() else ""
+        if token_similarity >= 0.5 and new_unit and new_unit == existing_unit:
+            return True
+    return False
+
+
 def _recent_question_avoidance_notes(
     block: CourseBlock,
     question_type: str,
@@ -1205,13 +1450,45 @@ def _recent_question_avoidance_notes(
         recent_questions.extend(
             list(queryset.exclude(pk__in=recent_ids).order_by("-created_at", "-pk")[: max(0, limit - len(recent_questions))])
         )
-    return [
-        f'- "{question.stem}" with answer focus "{question.correct_answer[:120]}"'
-        for question in recent_questions
-    ]
+    notes = []
+    for question in recent_questions:
+        note = f'- "{question.stem}" with answer focus "{question.correct_answer[:120]}"'
+        if question.question_type == QuestionBankItem.QuestionType.NUM:
+            formula_focus = _numeric_formula_focus_from_metadata(question.numeric_metadata)
+            if formula_focus:
+                note += f' and formula focus "{formula_focus[:120]}"'
+        notes.append(note)
+    return notes
 
 
 def _preferred_generated_question_type(course: Course) -> str:
+    practice_questions = course.question_bank_items.filter(
+        bank_type=QuestionBankItem.BankType.PRACTICE,
+        status=QuestionBankItem.Status.APPROVED,
+    )
+    practice_total = practice_questions.count()
+    candidates = []
+    for candidate_type, target_ratio in (
+        (QuestionBankItem.QuestionType.NUM, course.config.numeric_ratio_percent),
+        (QuestionBankItem.QuestionType.MAQ, course.config.maq_ratio_percent),
+        (QuestionBankItem.QuestionType.WAQ, course.config.waq_ratio_percent),
+    ):
+        if target_ratio <= 0:
+            continue
+        current_total = practice_questions.filter(question_type=candidate_type).count()
+        current_ratio = (current_total * 100 / practice_total) if practice_total else 0.0
+        gap = target_ratio - current_ratio
+        if gap > 0:
+            candidates.append((gap, target_ratio, QUESTION_TYPE_GENERATION_PRIORITY[candidate_type], candidate_type))
+
+    if candidates:
+        candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        return candidates[0][3]
+
+    return QuestionBankItem.QuestionType.MCQ
+
+
+def _preferred_standard_generated_question_type(course: Course) -> str:
     practice_questions = course.question_bank_items.filter(
         bank_type=QuestionBankItem.BankType.PRACTICE,
         status=QuestionBankItem.Status.APPROVED,
@@ -1333,6 +1610,7 @@ def _normalize_generated_payload(
     stem = str(payload.get("stem", "")).strip()
     explanation = str(payload.get("explanation", "")).strip()
     difficulty = str(payload.get("difficulty", "core")).strip() or "core"
+    numeric_metadata = payload.get("numeric_metadata") if isinstance(payload.get("numeric_metadata"), dict) else {}
     is_coding_question = bool(payload.get("is_coding_question"))
     coding_language = _normalize_coding_language(str(payload.get("coding_language", "")))
     coding_question_kind = str(payload.get("coding_question_kind", "")).strip().lower()
@@ -1343,14 +1621,21 @@ def _normalize_generated_payload(
             raise ValueError("WAQ payload must contain exactly one correct answer.")
         distractors = []
         written_answer_keywords = written_answer_keywords or _fallback_written_answer_keywords(correct_answers[0], stem)
-    elif normalized_type == QuestionBankItem.QuestionType.MCQ:
+    elif normalized_type in {QuestionBankItem.QuestionType.MCQ, QuestionBankItem.QuestionType.NUM}:
         if len(correct_answers) != 1:
-            raise ValueError("MCQ payload must contain exactly one correct answer.")
+            raise ValueError(f"{normalized_type.upper()} payload must contain exactly one correct answer.")
         written_answer_keywords = []
     else:
         if len(correct_answers) < 2:
             raise ValueError("MAQ payload must contain at least two correct answers.")
         written_answer_keywords = []
+
+    if normalized_type == QuestionBankItem.QuestionType.NUM:
+        if len(distractors) != distractor_count:
+            raise ValueError("NUM payload must contain the configured number of distractors.")
+        is_coding_question = False
+    else:
+        numeric_metadata = {}
 
     further_study_questions = further_study_questions or fallback_further_study_questions(
         stem=stem,
@@ -1394,6 +1679,7 @@ def _normalize_generated_payload(
         "further_study_questions": further_study_questions,
         "explanation": explanation,
         "difficulty": difficulty,
+        "numeric_metadata": numeric_metadata,
         "is_coding_question": is_coding_question,
         "coding_language": coding_language,
         "coding_question_kind": coding_question_kind,
@@ -1419,11 +1705,17 @@ def _create_question_pair(
         expected_coding_language=expected_coding_language,
     )
     stem = _normalize_question_stem(normalized_payload["stem"])
-    if any(char.isdigit() for char in stem) and any(token in stem.lower() for token in ("calculate", "solve", "compute")):
+    if (
+        normalized_payload["question_type"] != QuestionBankItem.QuestionType.NUM
+        and any(char.isdigit() for char in stem)
+        and any(token in stem.lower() for token in ("calculate", "solve", "compute"))
+    ):
         return None, None
 
     item_hash = hashlib.sha256(stem.lower().encode("utf-8")).hexdigest()
     if item_hash in existing_hashes:
+        if normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM:
+            raise NumericQuestionValidationError("OpenAI generated a repeated numerical MCQ that already exists for this course.")
         for variant_number in range(2, 6):
             candidate_stem = f"{stem.rstrip('?')} (variant {variant_number})?"
             candidate_hash = hashlib.sha256(candidate_stem.lower().encode("utf-8")).hexdigest()
@@ -1433,6 +1725,15 @@ def _create_question_pair(
                 break
         else:
             return None, None
+
+    if normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM and _numeric_question_repeats_recent_angle(
+        block=block,
+        objective=objective,
+        stem=stem,
+        correct_answer=normalized_payload["correct_answers"][0],
+        numeric_metadata=normalized_payload["numeric_metadata"],
+    ):
+        raise NumericQuestionValidationError("OpenAI generated a repeated numerical MCQ angle too similar to recent questions in this block.")
 
     practice = QuestionBankItem.objects.create(
         course=course,
@@ -1448,13 +1749,32 @@ def _create_question_pair(
         written_answer_keywords=normalized_payload["written_answer_keywords"],
         further_study_questions=normalized_payload["further_study_questions"],
         distractors=normalized_payload["distractors"],
-        explanation=normalize_explanation_text(normalized_payload["explanation"]),
+        explanation=(
+            normalized_payload["explanation"]
+            if normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM
+            else normalize_explanation_text(normalized_payload["explanation"])
+        ),
         difficulty=normalized_payload["difficulty"],
         question_hash=item_hash,
+        is_numerical=normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM,
+        numeric_metadata=normalized_payload["numeric_metadata"],
         is_coding_question=normalized_payload["is_coding_question"],
         coding_language=normalized_payload["coding_language"],
         coding_question_kind=normalized_payload["coding_question_kind"],
         code_snippet=normalized_payload["code_snippet"],
+    )
+    _trace_generation(
+        "question_persisted",
+        requested_type=QuestionBankItem.display_label_for_question_type(question_type),
+        persisted_type=practice.question_type_label(),
+        block=block.title,
+        block_id=block.pk,
+        chunk_id=(chunk.pk if chunk else None),
+        objective=(objective.text if objective else ""),
+        stem=practice.stem,
+        correct_answer=practice.correct_answer,
+        distractors=practice.distractors,
+        is_coding_question=practice.is_coding_question,
     )
     validation = QuestionBankItem.objects.create(
         course=course,
@@ -1473,6 +1793,8 @@ def _create_question_pair(
         explanation=practice.explanation,
         difficulty=practice.difficulty,
         question_hash=hashlib.sha256(f"{item_hash}:validation".encode("utf-8")).hexdigest(),
+        is_numerical=practice.is_numerical,
+        numeric_metadata=practice.numeric_metadata,
         is_coding_question=practice.is_coding_question,
         coding_language=practice.coding_language,
         coding_question_kind=practice.coding_question_kind,
@@ -1491,6 +1813,7 @@ def generate_question_pair_for_block(
     existing_hashes: set[str] | None = None,
     preferred_objective_ids: list[int] | None = None,
     question_type: str | None = None,
+    raise_generation_errors: bool = False,
 ):
     course = block.course
     existing_hashes = existing_hashes or set(course.question_bank_items.values_list("question_hash", flat=True))
@@ -1527,8 +1850,15 @@ def generate_question_pair_for_block(
     chunk_index_by_block: dict[int, int] = defaultdict(int)
     question_type = (
         question_type
-        if question_type in {QuestionBankItem.QuestionType.MCQ, QuestionBankItem.QuestionType.MAQ, QuestionBankItem.QuestionType.WAQ}
+        if question_type in {QuestionBankItem.QuestionType.MCQ, QuestionBankItem.QuestionType.NUM, QuestionBankItem.QuestionType.MAQ, QuestionBankItem.QuestionType.WAQ}
         else _preferred_generated_question_type(course)
+    )
+    last_generation_error = ""
+    _trace_generation(
+        "question_generation_requested",
+        requested_type=QuestionBankItem.display_label_for_question_type(question_type),
+        block=block.title,
+        block_id=block.pk,
     )
     question_type_objective_counts, question_type_chunk_counts, question_type_objective_chunk_counts = _question_type_distribution_for_block(
         block,
@@ -1538,7 +1868,7 @@ def generate_question_pair_for_block(
         total_chunks_by_block[chunk.block_id] += 1
 
     ordered_objectives = _ordered_generation_objectives(block, objectives_by_block, preferred_objective_ids)
-    if question_type == QuestionBankItem.QuestionType.WAQ:
+    if question_type in {QuestionBankItem.QuestionType.NUM, QuestionBankItem.QuestionType.WAQ}:
         ordered_objectives = sorted(
             ordered_objectives,
             key=lambda objective: question_type_objective_counts.get(objective.pk, 0),
@@ -1555,7 +1885,15 @@ def generate_question_pair_for_block(
             question_type_chunk_counts=question_type_chunk_counts,
             question_type_objective_chunk_counts=question_type_objective_chunk_counts,
         )
-        if coding_generation_due:
+        if question_type == QuestionBankItem.QuestionType.NUM:
+            target_keywords = objective_keywords.get(objective.pk, set())
+            ranked_chunks = [
+                chunk
+                for chunk in ranked_chunks
+                if ((not target_keywords) or (_keyword_set(chunk.text) & target_keywords))
+                and chunk_has_numeric_signal(f"{objective.text}\n{chunk.text}")
+            ]
+        if coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM:
             ranked_chunks = [chunk for chunk in ranked_chunks if chunk.pk in coding_signals] or ranked_chunks
         for chunk in ranked_chunks:
             attempted_chunk_ids.add(chunk.pk)
@@ -1563,77 +1901,62 @@ def generate_question_pair_for_block(
                 (objective.pk, chunk.pk),
                 0,
             )
-            coding_signal = coding_signals.get(chunk.pk) if coding_generation_due else None
-            if coding_signal:
-                payload = _fallback_coding_question_payload(
+            coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
+            try:
+                payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
                     chunk,
                     objective,
                     course.config.distractor_count,
                     question_type,
-                    coding_signal,
+                    coding_signal=coding_signal,
+                    avoid_question_angles=avoid_question_angles,
                     question_variant_index=question_variant_index,
                 )
-            else:
-                payload = _fallback_question_payload(
-                    chunk,
-                    objective,
-                    course.config.distractor_count,
-                    question_type,
-                    question_variant_index=question_variant_index,
+                practice, validation = _create_question_pair(
+                    course=course,
+                    block=block,
+                    chunk=chunk,
+                    objective=objective,
+                    question_type=effective_question_type,
+                    payload=payload,
+                    existing_hashes=existing_hashes,
+                    expected_coding_language=expected_coding_language,
                 )
-            if settings.OPENAI_API_KEY:
-                try:
-                    if coding_signal:
-                        payload = _openai_coding_question_payload(
-                            chunk,
-                            objective,
-                            course.config.distractor_count,
-                            question_type,
-                            coding_signal,
-                            avoid_question_angles=avoid_question_angles,
-                        )
-                    else:
-                        payload = _openai_question_payload(
-                            chunk,
-                            objective,
-                            course.config.distractor_count,
-                            question_type,
-                            avoid_question_angles=avoid_question_angles,
-                        )
-                    if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
-                        raise ValueError("Question stem depends on source/meta phrasing.")
-                    if coding_signal:
-                        _normalize_generated_payload(payload, question_type, course.config.distractor_count)
-                except (ValueError, json.JSONDecodeError, KeyError, TypeError):
-                    if coding_signal:
-                        payload = _fallback_coding_question_payload(
-                            chunk,
-                            objective,
-                            course.config.distractor_count,
-                            question_type,
-                            coding_signal,
-                            question_variant_index=question_variant_index,
-                        )
-                    else:
-                        payload = _fallback_question_payload(
-                            chunk,
-                            objective,
-                            course.config.distractor_count,
-                            question_type,
-                            question_variant_index=question_variant_index,
-                        )
-            practice, validation = _create_question_pair(
-                course=course,
-                block=block,
-                chunk=chunk,
-                objective=objective,
-                question_type=question_type,
-                payload=payload,
-                existing_hashes=existing_hashes,
-                expected_coding_language=(coding_signal.get("language", "") if coding_signal else ""),
-            )
+            except NumericQuestionRequestError as exc:
+                last_generation_error = str(exc)
+                _trace_generation(
+                    "numeric_request_failed",
+                    error=last_generation_error,
+                    objective=(objective.text if objective else ""),
+                    chunk_id=chunk.pk,
+                )
+                if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
+                    raise QuestionGenerationError(
+                        f"Could not generate a numerical MCQ for this block. {last_generation_error}"
+                    ) from exc
+                return None, None
+            except NumericQuestionValidationError as exc:
+                last_generation_error = str(exc)
+                _trace_generation(
+                    "numeric_validation_failed",
+                    error=last_generation_error,
+                    objective=(objective.text if objective else ""),
+                    chunk_id=chunk.pk,
+                )
+                if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
+                    raise QuestionGenerationError(
+                        f"Could not generate a numerical MCQ for this block. {last_generation_error}"
+                    ) from exc
+                return None, None
             if practice is not None and validation is not None:
                 return practice, validation
+            if question_type == QuestionBankItem.QuestionType.NUM:
+                last_generation_error = "The generated numerical MCQ duplicated an existing question."
+                if raise_generation_errors:
+                    raise QuestionGenerationError(
+                        f"Could not generate a numerical MCQ for this block. {last_generation_error}"
+                    )
+                return None, None
 
     for chunk in candidate_chunks:
         if chunk.pk in attempted_chunk_ids:
@@ -1646,82 +1969,81 @@ def generate_question_pair_for_block(
             chunk_index_by_block[chunk.block_id] - 1,
             total_chunks_by_block[chunk.block_id],
         )
+        if question_type == QuestionBankItem.QuestionType.NUM and (
+            objective is None
+            or (
+                objective_keywords.get(objective.pk, set())
+                and not (_keyword_set(chunk.text) & objective_keywords.get(objective.pk, set()))
+            )
+            or not chunk_has_numeric_signal(f"{objective.text}\n{chunk.text}")
+        ):
+            continue
         question_variant_index = question_type_objective_counts.get(int(objective.pk) if objective else 0, 0) + question_type_objective_chunk_counts.get(
             ((objective.pk if objective else None), chunk.pk),
             0,
         )
-        coding_signal = coding_signals.get(chunk.pk) if coding_generation_due else None
-        if coding_signal:
-            payload = _fallback_coding_question_payload(
+        coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
+        try:
+            payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
                 chunk,
                 objective,
                 course.config.distractor_count,
                 question_type,
-                coding_signal,
+                coding_signal=coding_signal,
+                avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
                 question_variant_index=question_variant_index,
             )
-        else:
-            payload = _fallback_question_payload(
-                chunk,
-                objective,
-                course.config.distractor_count,
-                question_type,
-                question_variant_index=question_variant_index,
+            practice, validation = _create_question_pair(
+                course=course,
+                block=block,
+                chunk=chunk,
+                objective=objective,
+                question_type=effective_question_type,
+                payload=payload,
+                existing_hashes=existing_hashes,
+                expected_coding_language=expected_coding_language,
             )
-        if settings.OPENAI_API_KEY:
-            try:
-                if coding_signal:
-                    payload = _openai_coding_question_payload(
-                        chunk,
-                        objective,
-                        course.config.distractor_count,
-                        question_type,
-                        coding_signal,
-                        avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
-                    )
-                else:
-                    payload = _openai_question_payload(
-                        chunk,
-                        objective,
-                        course.config.distractor_count,
-                        question_type,
-                        avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
-                    )
-                if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
-                    raise ValueError("Question stem depends on source/meta phrasing.")
-                if coding_signal:
-                    _normalize_generated_payload(payload, question_type, course.config.distractor_count)
-            except (ValueError, json.JSONDecodeError, KeyError, TypeError):
-                if coding_signal:
-                    payload = _fallback_coding_question_payload(
-                        chunk,
-                        objective,
-                        course.config.distractor_count,
-                        question_type,
-                        coding_signal,
-                        question_variant_index=question_variant_index,
-                    )
-                else:
-                    payload = _fallback_question_payload(
-                        chunk,
-                        objective,
-                        course.config.distractor_count,
-                        question_type,
-                        question_variant_index=question_variant_index,
-                    )
-        practice, validation = _create_question_pair(
-            course=course,
-            block=block,
-            chunk=chunk,
-            objective=objective,
-            question_type=question_type,
-            payload=payload,
-            existing_hashes=existing_hashes,
-            expected_coding_language=(coding_signal.get("language", "") if coding_signal else ""),
-        )
+        except NumericQuestionRequestError as exc:
+            last_generation_error = str(exc)
+            _trace_generation(
+                "numeric_request_failed",
+                error=last_generation_error,
+                objective=(objective.text if objective else ""),
+                chunk_id=chunk.pk,
+            )
+            if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
+                raise QuestionGenerationError(
+                    f"Could not generate a numerical MCQ for this block. {last_generation_error}"
+                ) from exc
+            return None, None
+        except NumericQuestionValidationError as exc:
+            last_generation_error = str(exc)
+            _trace_generation(
+                "numeric_validation_failed",
+                error=last_generation_error,
+                objective=(objective.text if objective else ""),
+                chunk_id=chunk.pk,
+            )
+            if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
+                raise QuestionGenerationError(
+                    f"Could not generate a numerical MCQ for this block. {last_generation_error}"
+                ) from exc
+            return None, None
         if practice is not None and validation is not None:
             return practice, validation
+        if question_type == QuestionBankItem.QuestionType.NUM:
+            last_generation_error = "The generated numerical MCQ duplicated an existing question."
+            if raise_generation_errors:
+                raise QuestionGenerationError(
+                    f"Could not generate a numerical MCQ for this block. {last_generation_error}"
+                )
+            return None, None
 
+    if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
+        detail = f" {last_generation_error}" if last_generation_error else ""
+        raise QuestionGenerationError(
+            f"Could not generate a numerical MCQ for this block.{detail}"
+        )
     return None, None
 
 
@@ -1751,38 +2073,26 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
             chunk_index_by_block[chunk.block_id] - 1,
             total_chunks_by_block[chunk.block_id],
         )
-        coding_signal = _coding_signal_for_chunk(chunk) if _coding_question_generation_due(course) else {"language": "", "snippet": ""}
+        coding_signal = _coding_signal_for_chunk(chunk) if (_coding_question_generation_due(course) and question_type != QuestionBankItem.QuestionType.NUM) else {"language": "", "snippet": ""}
         preferred_coding_language = preferred_coding_language_for_block(chunk.block, [chunk], {chunk.pk: coding_signal} if coding_signal["language"] else {})
         if preferred_coding_language and coding_signal["language"] and coding_signal["language"] != preferred_coding_language:
             coding_signal = {"language": "", "snippet": ""}
-        if coding_signal["language"] and coding_signal["snippet"]:
-            payload = _fallback_coding_question_payload(chunk, objective, course.config.distractor_count, question_type, coding_signal)
-        else:
-            payload = _fallback_question_payload(chunk, objective, course.config.distractor_count, question_type)
-        if settings.OPENAI_API_KEY:
-            try:
-                if coding_signal["language"] and coding_signal["snippet"]:
-                    payload = _openai_coding_question_payload(chunk, objective, course.config.distractor_count, question_type, coding_signal)
-                else:
-                    payload = _openai_question_payload(chunk, objective, course.config.distractor_count, question_type)
-                if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
-                    raise ValueError("Question stem depends on source/meta phrasing.")
-                if coding_signal["language"] and coding_signal["snippet"]:
-                    _normalize_generated_payload(payload, question_type, course.config.distractor_count)
-            except (ValueError, json.JSONDecodeError, KeyError, TypeError):
-                if coding_signal["language"] and coding_signal["snippet"]:
-                    payload = _fallback_coding_question_payload(chunk, objective, course.config.distractor_count, question_type, coding_signal)
-                else:
-                    payload = _fallback_question_payload(chunk, objective, course.config.distractor_count, question_type)
+        payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
+            chunk,
+            objective,
+            course.config.distractor_count,
+            question_type,
+            coding_signal=(coding_signal if coding_signal["language"] and coding_signal["snippet"] else None),
+        )
         practice, validation = _create_question_pair(
             course=course,
             block=chunk.block,
             chunk=chunk,
             objective=objective,
-            question_type=question_type,
+            question_type=effective_question_type,
             payload=payload,
             existing_hashes=existing_hashes,
-            expected_coding_language=(coding_signal.get("language", "") if coding_signal else ""),
+            expected_coding_language=expected_coding_language,
         )
         if practice is not None and validation is not None:
             question_count += 2

@@ -3,6 +3,7 @@
 {% block title %}Practice | {{ course.title }}{% endblock %}
 {% block extra_head %}
   <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}">
+  <link rel="stylesheet" href="{% static 'standalone/vendor/katex/dist/katex.min.css' %}">
 {% endblock %}
 {% block app_nav_links %}
   {% if validation_entry_url %}
@@ -144,6 +145,10 @@
                 <span class="preview-quiz-menu-item-title">MCQ</span>
                 <span class="preview-quiz-menu-item-copy">Single answer</span>
               </button>
+              <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="num">
+                <span class="preview-quiz-menu-item-title">Numeric</span>
+                <span class="preview-quiz-menu-item-copy">Calculated answer</span>
+              </button>
               <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="maq">
                 <span class="preview-quiz-menu-item-title">MAQ</span>
                 <span class="preview-quiz-menu-item-copy">Multiple answers</span>
@@ -162,5 +167,8 @@
 {{ preview_state|json_script:"student-preview-data" }}
 {% endblock %}
 {% block extra_body %}
+  <script src="{% static 'standalone/vendor/katex/dist/katex.min.js' %}"></script>
+  <script src="{% static 'standalone/vendor/katex/dist/contrib/auto-render.min.js' %}"></script>
+  <script src="{% static 'standalone/js/math-render.js' %}"></script>
   <script src="{% static 'standalone/js/student-preview.js' %}"></script>
 {% endblock %}

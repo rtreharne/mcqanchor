@@ -1,5 +1,8 @@
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +51,13 @@ _NON_CHAPTER_OUTLINE_TITLES = {
     "table of contents",
 }
 _NON_CHAPTER_OUTLINE_PATTERN = re.compile(r"^(part|unit|section|appendix|appendices)\b", re.IGNORECASE)
+_TOC_HEADER_PATTERN = re.compile(r"\b(?P<kind>chapter|module)\s*[.:]?\s*(?P<number>\d{1,3})", re.IGNORECASE)
+_OCR_PROBE_PAGE_COUNT = 40
+_END_BOUNDARY_TITLE = "__END_OF_CHAPTERS__"
+
+
+class PdfOcrUnavailableError(RuntimeError):
+    pass
 
 
 def extract_pdf_pages(file_path: str | Path) -> list[str]:
@@ -55,10 +65,36 @@ def extract_pdf_pages(file_path: str | Path) -> list[str]:
     return [normalize_text(page.extract_text() or "") for page in reader.pages]
 
 
+def extract_pdf_page_range(file_path: str | Path, start_page: int, end_page: int) -> str:
+    """Extract a page range, using OCR only when the PDF has no usable text layer."""
+    reader = PdfReader(str(file_path))
+    page_count = len(reader.pages)
+    start_page = max(1, start_page)
+    end_page = min(page_count, end_page)
+    if start_page > end_page:
+        return ""
+
+    pages = [normalize_text(reader.pages[index - 1].extract_text() or "") for index in range(start_page, end_page + 1)]
+    if _has_readable_text(pages):
+        return normalize_text("\n\n".join(pages))
+
+    ocr_pages = _ocr_pdf_pages(file_path, range(start_page, end_page + 1))
+    return normalize_text("\n\n".join(ocr_pages.get(page_number, "") for page_number in range(start_page, end_page + 1)))
+
+
 def analyze_pdf_chapters(file_path: str | Path) -> list[PdfChapterCandidate]:
     pages = extract_pdf_pages(file_path)
     if not pages:
         return []
+
+    if not _has_readable_text(pages):
+        probe_end = min(len(pages), _OCR_PROBE_PAGE_COUNT)
+        probe_pages = _ocr_pdf_pages(file_path, range(1, probe_end + 1), dpi=135)
+        boundaries = _toc_boundaries_from_ocr(probe_pages, len(pages)) or _heading_boundaries_from_page_map(probe_pages)
+        if not boundaries:
+            return []
+        chapters = _empty_chapters_from_boundaries(boundaries, len(pages))
+        return _cleanup_with_openai(chapters) if settings.OPENAI_API_KEY else chapters
 
     reader = PdfReader(str(file_path))
     boundaries = _outline_boundaries(reader) or _heading_boundaries(pages)
@@ -67,6 +103,241 @@ def analyze_pdf_chapters(file_path: str | Path) -> list[PdfChapterCandidate]:
 
     chapters = _boundaries_to_chapters(boundaries, pages)
     return _cleanup_with_openai(chapters) if settings.OPENAI_API_KEY else chapters
+
+
+def _has_readable_text(pages: list[str]) -> bool:
+    sample = "".join(page for page in pages[:50] if page)
+    return len(re.sub(r"\s+", "", sample)) >= 20
+
+
+def _ocr_pdf_pages(
+    file_path: str | Path,
+    page_numbers: range | list[int],
+    *,
+    dpi: int = 160,
+) -> dict[int, str]:
+    if not shutil.which("pdftoppm") or not shutil.which("tesseract"):
+        raise PdfOcrUnavailableError(
+            "This is a scanned PDF and requires the Poppler and Tesseract OCR system packages."
+        )
+
+    extracted: dict[int, str] = {}
+    with tempfile.TemporaryDirectory(prefix="mcqanchor-ocr-") as temp_dir:
+        image_path = Path(temp_dir) / "page.jpg"
+        output_prefix = str(image_path.with_suffix(""))
+        for page_number in page_numbers:
+            render = subprocess.run(
+                [
+                    "pdftoppm",
+                    "-f",
+                    str(page_number),
+                    "-l",
+                    str(page_number),
+                    "-singlefile",
+                    "-r",
+                    str(dpi),
+                    "-jpeg",
+                    "-jpegopt",
+                    "quality=82",
+                    str(file_path),
+                    output_prefix,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if render.returncode != 0:
+                raise RuntimeError(f"Could not render PDF page {page_number} for OCR: {render.stderr.strip()}")
+            ocr = subprocess.run(
+                ["tesseract", str(image_path), "stdout", "--psm", "6"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            image_path.unlink(missing_ok=True)
+            if ocr.returncode != 0:
+                raise RuntimeError(f"Could not OCR PDF page {page_number}: {ocr.stderr.strip()}")
+            extracted[page_number] = normalize_text(ocr.stdout)
+    return extracted
+
+
+def _toc_boundaries_from_ocr(page_map: dict[int, str], page_count: int) -> list[_ChapterBoundary]:
+    contents_pages = {
+        page_number
+        for page_number, text in page_map.items()
+        if re.search(r"\bcontents\b", text[:800], flags=re.IGNORECASE)
+        or len(_TOC_HEADER_PATTERN.findall(text)) >= 2
+        or re.search(r"^\s*(?:unifying concepts|appendices)\b", text, flags=re.IGNORECASE | re.MULTILINE)
+    }
+    if not contents_pages:
+        return []
+
+    entries: list[tuple[str, int, str, int]] = []
+    for page_number in sorted(contents_pages):
+        entries.extend(_parse_toc_entries(page_map[page_number]))
+
+    chapter_entries = [entry for entry in entries if entry[0] == "chapter"]
+    if len(chapter_entries) < 2:
+        return []
+
+    chapter_entries = sorted(chapter_entries, key=lambda entry: entry[3])
+    deduped_entries: list[tuple[str, int, str, int]] = []
+    seen_printed_pages: set[int] = set()
+    for entry in chapter_entries:
+        if entry[3] in seen_printed_pages:
+            continue
+        seen_printed_pages.add(entry[3])
+        deduped_entries.append(entry)
+    chapter_entries = deduped_entries
+
+    # A long textbook contents list is strongly sequential. This repairs common
+    # OCR substitutions such as "Chapter 38" for "Chapter 16" without guessing
+    # titles or page positions.
+    if len(chapter_entries) >= 10:
+        first_number = chapter_entries[0][1]
+        chapter_entries = [
+            (kind, first_number + index, title, printed_page)
+            for index, (kind, _number, title, printed_page) in enumerate(chapter_entries)
+        ]
+
+    offset = _infer_printed_page_offset(chapter_entries, page_map, contents_pages)
+    if offset is None:
+        return []
+
+    boundaries = []
+    for _kind, number, title, printed_page in chapter_entries:
+        pdf_page = printed_page + offset
+        if not 1 <= pdf_page <= page_count:
+            continue
+        display_title = f"Chapter {number}"
+        if title:
+            display_title = f"{display_title}: {title}"
+        boundaries.append(_ChapterBoundary(display_title, pdf_page, 82))
+
+    terminal_pages: list[int] = []
+    for page_number in contents_pages:
+        for match in re.finditer(
+            r"^\s*(?:unifying concepts|appendices)\b.*?\s(?P<page>\d{2,4})\s*$",
+            page_map[page_number],
+            flags=re.IGNORECASE | re.MULTILINE,
+        ):
+            terminal_pages.append(int(match.group("page")))
+    if terminal_pages:
+        terminal_pdf_page = min(terminal_pages) + offset
+        if boundaries and boundaries[-1].start_page < terminal_pdf_page <= page_count:
+            boundaries.append(_ChapterBoundary(_END_BOUNDARY_TITLE, terminal_pdf_page, 0))
+    return _dedupe_boundaries(boundaries)
+
+
+def _parse_toc_entries(text: str) -> list[tuple[str, int, str, int]]:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
+    entries: list[tuple[str, int, str, int]] = []
+    for line_index, line in enumerate(lines):
+        headers = list(_TOC_HEADER_PATTERN.finditer(line))
+        for header_index, header in enumerate(headers):
+            segment_end = headers[header_index + 1].start() if header_index + 1 < len(headers) else len(line)
+            rest = line[header.end() : segment_end].strip(" .:-?")
+            kind = header.group("kind").lower()
+            number = int(header.group("number"))
+
+            page_match = None
+            for candidate in re.finditer(r"(?<![.\d])(?P<page>\d{1,4})(?![.\d])", rest):
+                if int(candidate.group("page")) >= number:
+                    page_match = candidate
+                    break
+
+            if page_match and int(page_match.group("page")) > number:
+                title = rest[: page_match.start()].strip(" .:-")
+                entries.append((kind, number, title, int(page_match.group("page"))))
+                continue
+
+            if kind != "chapter":
+                continue
+
+            # If the chapter header's page number was unreadable, use the first
+            # numbered subsection immediately below it (for example 16.1 ... 302).
+            following = " ".join(lines[line_index + 1 : line_index + 4])
+            section_matches = list(
+                re.finditer(
+                    r"(?P<section>\d{1,3})[.]\d{1,2}\b.*?\s(?P<page>\d{2,4})(?=\s|$)",
+                    following,
+                )
+            )
+            if section_matches:
+                section_match = min(
+                    section_matches,
+                    key=lambda match: abs(int(match.group("section")) - number),
+                )
+                section_number = int(section_match.group("section"))
+                title = rest[: page_match.start()].strip(" .:-") if page_match else rest
+                entries.append((kind, section_number, title, int(section_match.group("page"))))
+    return entries
+
+
+def _infer_printed_page_offset(
+    entries: list[tuple[str, int, str, int]],
+    page_map: dict[int, str],
+    contents_pages: set[int],
+) -> int | None:
+    scores: dict[int, int] = {}
+    for kind, number, title, printed_page in entries:
+        search_terms = [term.lower() for term in re.findall(r"[A-Za-z]{4,}", title) if term.lower() not in {"chapter", "module"}]
+        for pdf_page, text in page_map.items():
+            if pdf_page in contents_pages:
+                continue
+            lowered = text.lower()
+            offset = pdf_page - printed_page
+            if offset < 0:
+                continue
+            heading_area = lowered[:300]
+            if kind == "chapter" and re.search(rf"\b{number}[.]1\b", heading_area):
+                scores[offset] = scores.get(offset, 0) + 5
+            if not search_terms:
+                continue
+            required = min(2, len(search_terms))
+            if sum(term in lowered for term in search_terms) < required:
+                continue
+            if kind == "module" and not re.search(rf"\bmodule\s*{number}\b", lowered):
+                continue
+            if kind == "chapter":
+                if sum(term in heading_area for term in search_terms) < required:
+                    continue
+                if not re.search(rf"(?:\bchapter\s*)?\b{number}\b", heading_area):
+                    continue
+            scores[offset] = scores.get(offset, 0) + (3 if kind == "module" else 1)
+
+    if not scores:
+        return None
+    return max(scores, key=lambda candidate: (scores[candidate], -abs(candidate)))
+
+
+def _heading_boundaries_from_page_map(page_map: dict[int, str]) -> list[_ChapterBoundary]:
+    if not page_map:
+        return []
+    last_page = max(page_map)
+    pages = [page_map.get(page_number, "") for page_number in range(1, last_page + 1)]
+    return _heading_boundaries(pages)
+
+
+def _empty_chapters_from_boundaries(
+    boundaries: list[_ChapterBoundary], page_count: int
+) -> list[PdfChapterCandidate]:
+    chapters: list[PdfChapterCandidate] = []
+    valid = [boundary for boundary in boundaries if 1 <= boundary.start_page <= page_count]
+    for index, boundary in enumerate(valid):
+        next_start = valid[index + 1].start_page if index + 1 < len(valid) else page_count + 1
+        if boundary.title == _END_BOUNDARY_TITLE:
+            continue
+        chapters.append(
+            PdfChapterCandidate(
+                title=boundary.title,
+                start_page=boundary.start_page,
+                end_page=max(boundary.start_page, min(page_count, next_start - 1)),
+                confidence=boundary.confidence,
+                extracted_text="",
+            )
+        )
+    return chapters
 
 
 def _outline_boundaries(reader: PdfReader) -> list[_ChapterBoundary]:

@@ -10,6 +10,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
+from openai import OpenAIError
 from unittest.mock import patch
 
 from standalone.forms import CourseForm, ValidationEventForm
@@ -41,10 +42,12 @@ from standalone.models import (
 )
 from standalone.tasks import run_block_creation_processing, run_block_regeneration, run_course_import_block_creation
 from standalone.services.content import chunk_text, summarize_block_content
-from standalone.services.pdf_import import analyze_pdf_chapters, _select_outline_items
+from standalone.services.pdf_import import analyze_pdf_chapters, _select_outline_items, _toc_boundaries_from_ocr
 from standalone.services.preview import PREVIEW_SESSION_KEY
+from standalone.services.numeric_questions import NumericQuestionValidationError, _evaluate_expression
 from standalone.services.validation_flow import _pick_locked_questions, current_room_code
 from standalone.services.questions import (
+    QuestionGenerationError,
     _normalize_generated_payload,
     coding_signal_for_text,
     fallback_further_study_questions,
@@ -397,6 +400,21 @@ class StandaloneFlowTests(TestCase):
             ],
         )
 
+    def test_pdf_import_detects_scanned_book_chapters_from_ocr_contents(self):
+        page_map = {
+            6: "Contents\nModule 1 Development of practical skills in physics 2\nModule 2 Foundations of physics 6\nChapter 2 8\nChapter 3 Motion 22\nChapter 4 Forces in action 46",
+            15: "MODULE 1\nDevelopment of practical skills in physics",
+            19: "MODULE 2\nFoundations of physics",
+            34: "3 3.1 Distance and speed\nSpecification reference: 3.1.1",
+        }
+
+        boundaries = _toc_boundaries_from_ocr(page_map, page_count=660)
+
+        self.assertEqual(
+            [(boundary.title, boundary.start_page) for boundary in boundaries],
+            [("Chapter 2", 20), ("Chapter 3: Motion", 34), ("Chapter 4: Forces in action", 58)],
+        )
+
     def test_coding_signal_detects_common_languages(self):
         cases = [
             ("python", "```python\ndef total(values):\n    return sum(values)\n```", ".txt"),
@@ -462,6 +480,7 @@ class StandaloneFlowTests(TestCase):
                 "engagement_weight": 20,
                 "target_weight": 10,
                 "distractor_count": 3,
+                "numeric_ratio_percent": 25,
                 "maq_ratio_percent": 35,
                 "waq_ratio_percent": 15,
                 "coding_question_ratio_percent": 50,
@@ -473,6 +492,7 @@ class StandaloneFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         course.config.refresh_from_db()
+        self.assertEqual(course.config.numeric_ratio_percent, 25)
         self.assertEqual(course.config.maq_ratio_percent, 35)
         self.assertEqual(course.config.waq_ratio_percent, 15)
         self.assertEqual(course.config.coding_question_ratio_percent, 50)
@@ -492,6 +512,16 @@ class StandaloneFlowTests(TestCase):
         course.config.refresh_from_db()
         self.assertEqual(course.config.self_enrol_domain, "example.ac.uk")
 
+        numeric_response = self.client.post(
+            reverse("standalone:update_course_config_field", args=[course.pk, "numeric_ratio_percent"]),
+            {"numeric_ratio_percent": "30"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(numeric_response.status_code, 200)
+        course.config.refresh_from_db()
+        self.assertEqual(course.config.numeric_ratio_percent, 30)
+
         checkbox_response = self.client.post(
             reverse("standalone:update_course_config_field", args=[course.pk, "show_validation_feedback_immediately"]),
             {},
@@ -501,6 +531,36 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(checkbox_response.status_code, 200)
         course.config.refresh_from_db()
         self.assertFalse(course.config.show_validation_feedback_immediately)
+
+    def test_question_bank_item_numeric_type_enforces_is_numerical(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+
+        numeric_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Calculate the speed for a body travelling 20 m in 4 s.",
+            question_type=QuestionBankItem.QuestionType.NUM,
+            correct_answer="5 m/s",
+            distractors=["4 m/s", "16 m/s", "10 m/s"],
+            explanation="Use \\(v = d/t\\).",
+            question_hash="numeric-enforces-flag",
+            is_numerical=False,
+            numeric_metadata={"script_version": "v1"},
+        )
+
+        self.assertTrue(numeric_question.is_numerical)
+
+        numeric_question.question_type = QuestionBankItem.QuestionType.MCQ
+        numeric_question.save()
+        numeric_question.refresh_from_db()
+
+        self.assertFalse(numeric_question.is_numerical)
+        self.assertEqual(numeric_question.numeric_metadata, {})
 
     def test_teacher_can_delete_course_from_detail_page(self):
         course = self.create_course()
@@ -2609,6 +2669,264 @@ print(result)""",
         self.assertEqual(validation.question_type, QuestionBankItem.QuestionType.WAQ)
         self.assertEqual(validation.written_answer_keywords, practice.written_answer_keywords)
 
+    def test_numeric_expression_rejects_executable_python(self):
+        with self.assertRaises(NumericQuestionValidationError):
+            _evaluate_expression("__import__('os').system('id')", {"charge": 1.0})
+
+    def test_numeric_expression_records_surplus_variables_without_rejecting_question(self):
+        value, _tree, used_variables = _evaluate_expression(
+            "force / charge",
+            {"force": 8.6e-7, "charge": 5e-4, "velocity": 2.0, "viscosity": 1.8e-5},
+        )
+
+        self.assertAlmostEqual(value, 0.00172)
+        self.assertEqual(used_variables, {"force", "charge"})
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_generate_question_pair_creates_numeric_when_numeric_gap_is_largest(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, asset, _, chunk = self.create_preview_content_block(course)
+        chunk.text = "Calculate the speed when a body travels 20 m in 4 s."
+        chunk.save(update_fields=["text"])
+
+        openai_payload = {
+            "question_type": "num",
+            "stem_template": "An object travels {distance} m in {time} s. Calculate its speed.",
+            "variables": [
+                {"name": "distance", "value": 20, "unit": "m"},
+                {"name": "time", "value": 4, "unit": "s"},
+            ],
+            "calculation_expression": "distance / time",
+            "answer_unit": "m/s",
+            "significant_figures": 2,
+            "explanation": "Speed is distance divided by elapsed time.",
+            "difficulty": "core",
+            "further_study_questions": [
+                "How does changing time affect speed?",
+                "When should average speed be used?",
+                "How can speed be represented graphically?",
+            ],
+        }
+
+        class DummyResponse:
+            output_text = json.dumps(openai_payload)
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            practice, validation = generate_question_pair_for_block(block)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(practice.question_type, QuestionBankItem.QuestionType.NUM)
+        self.assertTrue(practice.is_numerical)
+        self.assertIn("Worked solution:", practice.explanation)
+        self.assertIn("\\[", practice.explanation)
+        self.assertEqual(validation.question_type, QuestionBankItem.QuestionType.NUM)
+        self.assertEqual(validation.numeric_metadata["script_version"], "expression-v2")
+        self.assertTrue(validation.numeric_metadata["validation"]["expression_evaluated_locally"])
+        self.assertTrue(validation.is_numerical)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_numeric_openai_request_uses_structured_json_schema(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, _asset, _objective, chunk = self.create_preview_content_block(course)
+        chunk.text = "Calculate the speed when a body travels 20 m in 4 s."
+        chunk.save(update_fields=["text"])
+
+        captured_kwargs = {}
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": "num",
+                    "stem_template": "An object travels {distance} m in {time} s. Calculate its speed.",
+                    "variables": [
+                        {"name": "distance", "value": 20, "unit": "m"},
+                        {"name": "time", "value": 4, "unit": "s"},
+                    ],
+                    "calculation_expression": "distance / time",
+                    "answer_unit": "m/s",
+                    "significant_figures": 2,
+                    "explanation": "Speed is distance divided by elapsed time.",
+                    "difficulty": "core",
+                    "further_study_questions": [
+                        "How does changing time affect speed?",
+                        "When should average speed be used?",
+                        "How can speed be represented graphically?",
+                    ],
+                }
+            )
+
+        def fake_create(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return DummyResponse()
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = fake_create
+            practice, validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(captured_kwargs["text"]["format"]["type"], "json_schema")
+        self.assertTrue(captured_kwargs["text"]["format"]["strict"])
+        self.assertNotIn("verbosity", captured_kwargs["text"])
+        self.assertEqual(
+            captured_kwargs["text"]["format"]["schema"]["required"],
+            [
+                "question_type",
+                "stem_template",
+                "variables",
+                "calculation_expression",
+                "answer_unit",
+                "significant_figures",
+                "explanation",
+                "difficulty",
+                "further_study_questions",
+            ],
+        )
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_generate_question_pair_rejects_repeated_numeric_angle(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        objective.text = "Calculate speed from distance and time in motion problems"
+        objective.save(update_fields=["text"])
+        chunk.text = "Use distance and time to calculate speed in motion problems."
+        chunk.save(update_fields=["text"])
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="An object travels 20 m in 4 s. Calculate its speed.",
+            question_type=QuestionBankItem.QuestionType.NUM,
+            correct_answer="5 m/s",
+            distractors=["4 m/s", "16 m/s", "10 m/s"],
+            explanation="Use \\(v = d/t\\).",
+            question_hash="existing-numeric-speed-angle",
+            is_numerical=True,
+            numeric_metadata={
+                "output_snapshot": {
+                    "formula_tex": r"v = \frac{d}{t}",
+                }
+            },
+        )
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": "num",
+                    "stem_template": "A cyclist travels {distance} m in {time} s. Calculate the average speed.",
+                    "variables": [
+                        {"name": "distance", "value": 24, "unit": "m"},
+                        {"name": "time", "value": 4, "unit": "s"},
+                    ],
+                    "calculation_expression": "distance / time",
+                    "answer_unit": "m/s",
+                    "significant_figures": 2,
+                    "explanation": "Average speed is distance divided by elapsed time.",
+                    "difficulty": "core",
+                    "further_study_questions": [
+                        "How does changing time affect speed?",
+                        "When should average speed be used?",
+                        "How can speed be represented graphically?",
+                    ],
+                }
+            )
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            practice, validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM)
+
+        self.assertIsNone(practice)
+        self.assertIsNone(validation)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_generate_question_pair_returns_none_when_numeric_openai_json_is_malformed(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, asset, _, chunk = self.create_preview_content_block(course)
+        chunk.text = "Calculate the speed when a body travels 20 m in 4 s."
+        chunk.save(update_fields=["text"])
+
+        class DummyResponse:
+            output_text = """```json
+{"question_type":"num","generator_script":"def build_question(seed, inputs):\n    return {\"worked_solution_tex\": \"\\invalid\"}"}
+```"""
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            practice, validation = generate_question_pair_for_block(block)
+
+        self.assertIsNone(practice)
+        self.assertIsNone(validation)
+        self.assertEqual(mock_client.return_value.responses.create.call_count, 1)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_generate_question_pair_returns_none_without_openai_for_numeric(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, asset, _, chunk = self.create_preview_content_block(course)
+        chunk.text = "Calculate the speed when a body travels 20 m in 4 s."
+        chunk.save(update_fields=["text"])
+
+        practice, validation = generate_question_pair_for_block(block)
+
+        self.assertIsNone(practice)
+        self.assertIsNone(validation)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_generate_question_pair_raises_generation_error_without_openai_when_requested(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, asset, objective, chunk = self.create_preview_content_block(course, title="Oscillations")
+        objective.text = "Calculate the maximum speed and acceleration of oscillators and evaluate conditions causing loss of contact in vibrating systems"
+        objective.save(update_fields=["text"])
+        chunk.text = "Oscillations involve amplitude, frequency, resonance, and loss of contact in vibrating systems."
+        chunk.save(update_fields=["text"])
+
+        with self.assertRaises(QuestionGenerationError):
+            generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM, raise_generation_errors=True)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_generated_question_stem_is_independent_of_stored_text(self):
+        course = self.create_course()
+        block, _, _, chunk = self.create_preview_content_block(course)
+        chunk.text = "Worked example: figure 3 in chapter 2 shows an arrangement used to accelerate electrons."
+        chunk.save(update_fields=["text"])
+
+        practice, validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MCQ)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(practice.question_type, QuestionBankItem.QuestionType.MCQ)
+        self.assertNotIn("worked example", practice.stem.lower())
+        self.assertNotIn("figure", practice.stem.lower())
+        self.assertNotIn("chapter", practice.stem.lower())
+
     def test_generate_question_pair_includes_further_study_questions(self):
         course = self.create_course()
         block, _, _, _ = self.create_preview_content_block(course)
@@ -3240,6 +3558,120 @@ print(result)""",
         self.assertEqual(question_messages[-1]["question_id"], forced_maq.pk)
         self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MAQ)
 
+    def test_student_preview_forced_numeric_question_type_prefers_matching_bank_item(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Single answer question?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows directly from this block.",
+            question_hash="forced-mcq-preview-num",
+        )
+        forced_num = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Calculate the speed for a body travelling 20 m in 4 s.",
+            question_type=QuestionBankItem.QuestionType.NUM,
+            correct_answer="5 m/s",
+            distractors=["4 m/s", "16 m/s", "10 m/s"],
+            explanation="Use \\(v = d/t\\).",
+            question_hash="forced-num-preview",
+            is_numerical=True,
+            numeric_metadata={"script_version": "v1"},
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.NUM}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        block_payload = next(item for item in preview["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_id"], forced_num.pk)
+        self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.NUM)
+        self.assertTrue(question_messages[-1]["is_numerical"])
+        self.assertEqual(question_messages[-1]["question_type_label"], "Numerical MCQ")
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_student_preview_forced_numeric_question_type_shows_error_without_openai(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        block, _, objective, chunk = self.create_preview_content_block(course, title="Oscillations")
+        objective.text = "Calculate the maximum speed and acceleration of oscillators and evaluate conditions causing loss of contact in vibrating systems"
+        objective.save(update_fields=["text"])
+        chunk.text = "Oscillations involve amplitude, frequency, resonance, and loss of contact in vibrating systems."
+        chunk.save(update_fields=["text"])
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.NUM}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        block_payload = next(item for item in preview["blocks"] if item["id"] == block.pk)
+        text_messages = [message for message in block_payload["transcript"] if message["kind"] == "text"]
+        self.assertIn("Could not generate a numerical MCQ", text_messages[-1]["text"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_student_preview_forced_numeric_question_type_shows_error_when_openai_request_fails(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(
+            update_fields=[
+                "advanced_question_start_percent",
+                "numeric_ratio_percent",
+                "maq_ratio_percent",
+                "waq_ratio_percent",
+                "updated_at",
+            ]
+        )
+        block, _, objective, chunk = self.create_preview_content_block(course, title="Electric Fields")
+        objective.text = "Calculate electric field strength and force for charges in uniform electric fields"
+        objective.save(update_fields=["text"])
+        chunk.text = "Electric field strength, force, charge, and potential difference are related quantitatively."
+        chunk.save(update_fields=["text"])
+        self.client.force_login(self.teacher)
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = OpenAIError("invalid_json_schema")
+            response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+                data=json.dumps({"question_type": QuestionBankItem.QuestionType.NUM}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_client.return_value.responses.create.call_count, 1)
+        preview = response.json()["preview"]
+        block_payload = next(item for item in preview["blocks"] if item["id"] == block.pk)
+        text_messages = [message for message in block_payload["transcript"] if message["kind"] == "text"]
+        self.assertIn("Could not generate a numerical MCQ", text_messages[-1]["text"])
+
     def test_student_preview_forced_advanced_types_use_mcq_until_threshold_met(self):
         course = self.create_course()
         maq_block, _, maq_objective, maq_chunk = self.create_preview_content_block(course, title="Week 1", order=1)
@@ -3326,6 +3758,40 @@ print(result)""",
                 self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MCQ)
                 self.assertFalse(block_payload["metrics"]["advanced_question_types_unlocked"])
                 self.assertEqual(block_payload["metrics"]["advanced_question_start_percent"], 50)
+
+    def test_student_preview_forced_numeric_type_is_not_locked_by_advanced_threshold(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        block.config.target_question_count = 2
+        block.config.save(update_fields=["target_question_count", "updated_at"])
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Calculate the speed for a body travelling 20 m in 4 s.",
+            question_type=QuestionBankItem.QuestionType.NUM,
+            correct_answer="5 m/s",
+            distractors=["4 m/s", "16 m/s", "10 m/s"],
+            explanation="Use \\(v = d/t\\).",
+            question_hash="threshold-unlock-num-preview",
+            is_numerical=True,
+            numeric_metadata={"script_version": "v1"},
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.NUM}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.NUM)
 
     def test_student_preview_forced_advanced_type_unlocks_at_configured_target_progress(self):
         course = self.create_course()
@@ -4649,6 +5115,22 @@ print(result)""",
             source_chunk=chunk,
             bank_type=QuestionBankItem.BankType.VALIDATION,
             status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.NUM,
+            stem="Official NUM validation question?",
+            correct_answer="5 m/s",
+            distractors=["4 m/s", "16 m/s", "10 m/s"],
+            explanation="Use \\(v = d/t\\).",
+            question_hash="official-validation-num-mix",
+            is_numerical=True,
+            numeric_metadata={"script_version": "v1"},
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
             question_type=QuestionBankItem.QuestionType.MAQ,
             stem="Official MAQ validation question?",
             correct_answer="A",
@@ -4683,6 +5165,10 @@ print(result)""",
             question_count=3,
             time_limit_minutes=15,
         )
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
         ValidationBooking.objects.create(event=event, enrollment=enrollment, status=ValidationBooking.Status.BOOKED)
 
         self.client.force_login(self.student)
@@ -4691,7 +5177,7 @@ print(result)""",
         self.assertEqual(start_response.status_code, 302)
         attempt = ValidationAttempt.objects.get(event=event, enrollment=enrollment)
         question_types = set(attempt.attempt_questions.values_list("question__question_type", flat=True))
-        self.assertIn(QuestionBankItem.QuestionType.MCQ, question_types)
+        self.assertIn(QuestionBankItem.QuestionType.NUM, question_types)
 
     def test_validation_practice_route_uses_chat_session(self):
         course = self.create_course()

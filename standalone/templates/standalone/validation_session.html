@@ -3,6 +3,7 @@
 {% block title %}Validation | {{ course.title }}{% endblock %}
 {% block extra_head %}
   <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}">
+  <link rel="stylesheet" href="{% static 'standalone/vendor/katex/dist/katex.min.css' %}">
 {% endblock %}
 {% block app_nav_links %}
   <a href="{{ session_exit_url }}">Exit validation</a>
@@ -96,5 +97,8 @@
 {{ session_state|json_script:"validation-session-data" }}
 {% endblock %}
 {% block extra_body %}
+  <script src="{% static 'standalone/vendor/katex/dist/katex.min.js' %}"></script>
+  <script src="{% static 'standalone/vendor/katex/dist/contrib/auto-render.min.js' %}"></script>
+  <script src="{% static 'standalone/js/math-render.js' %}"></script>
   <script src="{% static 'standalone/js/validation-session.js' %}"></script>
 {% endblock %}

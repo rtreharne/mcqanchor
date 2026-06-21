@@ -307,6 +307,7 @@ def _pick_locked_questions(
         return []
     available_by_type: dict[str, list[QuestionBankItem]] = {
         QuestionBankItem.QuestionType.MCQ: [],
+        QuestionBankItem.QuestionType.NUM: [],
         QuestionBankItem.QuestionType.MAQ: [],
         QuestionBankItem.QuestionType.WAQ: [],
     }
@@ -356,6 +357,7 @@ def _pick_practice_validation_questions(
         return []
     available_by_type: dict[str, list[QuestionBankItem]] = {
         QuestionBankItem.QuestionType.MCQ: [],
+        QuestionBankItem.QuestionType.NUM: [],
         QuestionBankItem.QuestionType.MAQ: [],
         QuestionBankItem.QuestionType.WAQ: [],
     }
@@ -392,18 +394,21 @@ def _pick_practice_validation_questions(
 
 
 def _practice_validation_type_targets(course) -> dict[str, float]:
+    numeric_target = max(0.0, min(100.0, float(course.config.numeric_ratio_percent or 0)))
     maq_target = max(0.0, min(100.0, float(course.config.maq_ratio_percent or 0)))
     waq_target = max(0.0, min(100.0, float(course.config.waq_ratio_percent or 0)))
-    mcq_target = max(0.0, 100.0 - maq_target - waq_target)
-    total_target = mcq_target + maq_target + waq_target
+    mcq_target = max(0.0, 100.0 - numeric_target - maq_target - waq_target)
+    total_target = mcq_target + numeric_target + maq_target + waq_target
     if total_target <= 0:
         return {
             QuestionBankItem.QuestionType.MCQ: 100.0,
+            QuestionBankItem.QuestionType.NUM: 0.0,
             QuestionBankItem.QuestionType.MAQ: 0.0,
             QuestionBankItem.QuestionType.WAQ: 0.0,
         }
     return {
         QuestionBankItem.QuestionType.MCQ: (mcq_target * 100.0 / total_target),
+        QuestionBankItem.QuestionType.NUM: (numeric_target * 100.0 / total_target),
         QuestionBankItem.QuestionType.MAQ: (maq_target * 100.0 / total_target),
         QuestionBankItem.QuestionType.WAQ: (waq_target * 100.0 / total_target),
     }
@@ -415,6 +420,7 @@ def _practice_validation_type_preference(course, selected_type_counts: dict[str,
     candidates = []
     for question_type in (
         QuestionBankItem.QuestionType.MCQ,
+        QuestionBankItem.QuestionType.NUM,
         QuestionBankItem.QuestionType.MAQ,
         QuestionBankItem.QuestionType.WAQ,
     ):
@@ -424,8 +430,9 @@ def _practice_validation_type_preference(course, selected_type_counts: dict[str,
         remaining_quota = (targets[question_type] * remaining_slots / 100.0) - current_count
         fallback_priority = {
             QuestionBankItem.QuestionType.MCQ: 0,
-            QuestionBankItem.QuestionType.MAQ: 1,
-            QuestionBankItem.QuestionType.WAQ: 2,
+            QuestionBankItem.QuestionType.NUM: 1,
+            QuestionBankItem.QuestionType.MAQ: 2,
+            QuestionBankItem.QuestionType.WAQ: 3,
         }[question_type]
         candidates.append((-remaining_quota, -gap, fallback_priority, question_type))
     candidates.sort()
@@ -737,8 +744,10 @@ def _serialize_question_message(
     payload = {
         "question_id": question.pk,
         "question_type": question.question_type,
+        "question_type_label": question.question_type_label(),
         "text": question.stem,
         "options": options,
+        "is_numerical": question.is_numeric(),
         "answered": answered,
         "review_visible": bool(review_visible),
         "flagged": flagged,

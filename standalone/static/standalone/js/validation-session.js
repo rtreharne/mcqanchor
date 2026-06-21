@@ -29,6 +29,33 @@ if (validationRoot && validationDataNode) {
   let draftRequestId = 0;
   let alignmentLoadingRequestId = 0;
   let awayTimestamp = 0;
+  const richText = window.StandaloneRichText || {
+    appendFormattedMessageContent(container, text) {
+      if (!container) {
+        return;
+      }
+      const paragraph = document.createElement("p");
+      paragraph.textContent = String(text || "");
+      container.appendChild(paragraph);
+    },
+    appendInlineText(target, text) {
+      if (target) {
+        target.textContent = String(text || "");
+      }
+    },
+    buildTextPanel(headingText, bodyText, extraClass = "") {
+      const panel = document.createElement("div");
+      panel.className = `preview-written-answer-panel${extraClass ? ` ${extraClass}` : ""}`;
+      const heading = document.createElement("span");
+      heading.className = "preview-written-answer-heading";
+      heading.textContent = headingText;
+      const paragraph = document.createElement("p");
+      paragraph.textContent = String(bodyText || "");
+      panel.append(heading, paragraph);
+      return panel;
+    },
+    renderMath() {},
+  };
 
   function isOfficialValidation() {
     return sessionState.mode === "digital_invigilation";
@@ -91,6 +118,23 @@ if (validationRoot && validationDataNode) {
 
   function optionLabel(index) {
     return String.fromCharCode(65 + index);
+  }
+
+  function questionTypeLabel(message) {
+    if (message?.question_type_label) {
+      return String(message.question_type_label);
+    }
+    switch (String(message?.question_type || "")) {
+      case "num":
+        return "Numerical MCQ";
+      case "maq":
+        return "Multiple-answer MCQ";
+      case "waq":
+        return "Written answer";
+      case "mcq":
+      default:
+        return "Standard MCQ";
+    }
   }
 
   function currentPendingQuestion() {
@@ -247,12 +291,23 @@ if (validationRoot && validationDataNode) {
       const state = reviewedOptionState(option, selectedAnswers, correctAnswers);
       const optionRow = document.createElement("div");
       optionRow.className = `preview-answer-chip preview-answer-chip--review${state.modifier ? ` ${state.modifier}` : ""}`;
-      optionRow.innerHTML = `
-        <span class="preview-answer-chip-indicator" aria-hidden="true">${state.indicator}</span>
-        <span class="preview-answer-chip-label">${optionLabel(index)}</span>
-        <span class="preview-answer-chip-text">${option}</span>
-        ${state.badge ? `<span class="preview-answer-chip-badge">${state.badge}</span>` : ""}
-      `;
+      const indicator = document.createElement("span");
+      indicator.className = "preview-answer-chip-indicator";
+      indicator.setAttribute("aria-hidden", "true");
+      indicator.textContent = state.indicator;
+      const label = document.createElement("span");
+      label.className = "preview-answer-chip-label";
+      label.textContent = optionLabel(index);
+      const text = document.createElement("span");
+      text.className = "preview-answer-chip-text";
+      richText.appendInlineText(text, option);
+      optionRow.append(indicator, label, text);
+      if (state.badge) {
+        const badge = document.createElement("span");
+        badge.className = "preview-answer-chip-badge";
+        badge.textContent = state.badge;
+        optionRow.appendChild(badge);
+      }
       wrapper.appendChild(optionRow);
     });
     return wrapper;
@@ -261,13 +316,7 @@ if (validationRoot && validationDataNode) {
   function renderWrittenAnswerReview(message) {
     const review = document.createElement("div");
     review.className = "preview-written-answer-review";
-    const submitted = document.createElement("div");
-    submitted.className = "preview-written-answer-panel";
-    submitted.innerHTML = `
-      <span class="preview-written-answer-heading">Your answer</span>
-      <p>${message.submitted_text || "No answer submitted."}</p>
-    `;
-    review.appendChild(submitted);
+    review.appendChild(richText.buildTextPanel("Your answer", message.submitted_text || "No answer submitted."));
     const meter = document.createElement("div");
     meter.className = `preview-written-answer-alignment is-${message.alignment_state || "drafting"}`;
     meter.innerHTML = `
@@ -281,154 +330,13 @@ if (validationRoot && validationDataNode) {
     `;
     review.appendChild(meter);
     if (message.model_answer_revealed && message.model_answer) {
-      const model = document.createElement("div");
-      model.className = "preview-written-answer-panel is-model-answer";
-      model.innerHTML = `
-        <span class="preview-written-answer-heading">Model answer</span>
-        <p>${message.model_answer}</p>
-      `;
-      review.appendChild(model);
+      review.appendChild(richText.buildTextPanel("Model answer", message.model_answer, "is-model-answer"));
     }
     return review;
   }
 
   function appendFormattedMessageContent(container, text) {
-    if (!container) {
-      return;
-    }
-    const source = String(text || "");
-    const fencePattern = /```([\w+-]+)?\n?([\s\S]*?)```/g;
-    const unorderedListPattern = /^\s*[-*]\s+/;
-    const orderedListPattern = /^\s*\d+\.\s+/;
-    let lastIndex = 0;
-    let hasContent = false;
-
-    function appendInlineMarkdown(target, inlineText) {
-      const sourceText = String(inlineText || "");
-      const tokenPattern = /`[^`\n]+`|\*\*[^*][\s\S]*?\*\*|__[^_][\s\S]*?__|\*[^*\n][\s\S]*?\*|_[^_\n][\s\S]*?_/g;
-      let inlineLastIndex = 0;
-      sourceText.replace(tokenPattern, (match, offset) => {
-        const plainText = sourceText.slice(inlineLastIndex, offset);
-        if (plainText) {
-          target.appendChild(document.createTextNode(plainText));
-        }
-        if (match.startsWith("`")) {
-          const code = document.createElement("code");
-          code.className = "preview-message-inline-code";
-          code.textContent = match.slice(1, -1);
-          target.appendChild(code);
-        } else if (match.startsWith("**") || match.startsWith("__")) {
-          const strong = document.createElement("strong");
-          strong.textContent = match.slice(2, -2);
-          target.appendChild(strong);
-        } else {
-          const em = document.createElement("em");
-          em.textContent = match.slice(1, -1);
-          target.appendChild(em);
-        }
-        inlineLastIndex = offset + match.length;
-        return match;
-      });
-      const trailingText = sourceText.slice(inlineLastIndex);
-      if (trailingText) {
-        target.appendChild(document.createTextNode(trailingText));
-      }
-    }
-
-    function parseListItems(lines, markerPattern) {
-      const items = [];
-      let currentItem = "";
-      for (const line of lines) {
-        if (!line.trim()) {
-          if (currentItem) {
-            currentItem += "\n";
-          }
-          continue;
-        }
-        if (markerPattern.test(line)) {
-          if (currentItem.trim()) {
-            items.push(currentItem.trim());
-          }
-          currentItem = line.replace(markerPattern, "").trim();
-          continue;
-        }
-        if (/^\s+/.test(line) && currentItem) {
-          currentItem = `${currentItem}\n${line.trim()}`;
-          continue;
-        }
-        return [];
-      }
-      if (currentItem.trim()) {
-        items.push(currentItem.trim());
-      }
-      return items;
-    }
-
-    function appendTextBlock(blockText) {
-      const lines = blockText.split("\n");
-      const nonEmptyLines = lines.filter((line) => line.trim());
-      if (!nonEmptyLines.length) {
-        return;
-      }
-      const firstLine = nonEmptyLines[0];
-      const isUnorderedList = unorderedListPattern.test(firstLine);
-      const isOrderedList = !isUnorderedList && orderedListPattern.test(firstLine);
-      const items = isUnorderedList
-        ? parseListItems(lines, unorderedListPattern)
-        : (isOrderedList ? parseListItems(lines, orderedListPattern) : []);
-      if (items.length) {
-        const list = document.createElement(isOrderedList ? "ol" : "ul");
-        list.className = "preview-message-list";
-        items.forEach((itemText) => {
-          const item = document.createElement("li");
-          item.className = "preview-message-list-item";
-          appendInlineMarkdown(item, itemText);
-          list.appendChild(item);
-        });
-        container.appendChild(list);
-        hasContent = true;
-        return;
-      }
-      const paragraph = document.createElement("p");
-      paragraph.className = "preview-message-paragraph";
-      appendInlineMarkdown(paragraph, blockText);
-      container.appendChild(paragraph);
-      hasContent = true;
-    }
-
-    function appendTextSegment(segment) {
-      const normalized = String(segment || "").replace(/^\n+|\n+$/g, "");
-      if (!normalized) {
-        return;
-      }
-      normalized.split(/\n{2,}/).forEach((blockText) => appendTextBlock(blockText));
-    }
-
-    source.replace(fencePattern, (match, language, code, offset) => {
-      appendTextSegment(source.slice(lastIndex, offset));
-      const pre = document.createElement("pre");
-      pre.className = "preview-message-code-block";
-      if (language) {
-        pre.dataset.language = String(language).trim().toLowerCase();
-      }
-      const codeElement = document.createElement("code");
-      codeElement.className = "preview-message-code";
-      codeElement.textContent = String(code || "").replace(/^\n+|\n+$/g, "");
-      pre.appendChild(codeElement);
-      container.appendChild(pre);
-      hasContent = true;
-      lastIndex = offset + match.length;
-      return match;
-    });
-
-    appendTextSegment(source.slice(lastIndex));
-
-    if (!hasContent) {
-      const paragraph = document.createElement("p");
-      paragraph.className = "preview-message-paragraph";
-      appendInlineMarkdown(paragraph, source);
-      container.appendChild(paragraph);
-    }
+    richText.appendFormattedMessageContent(container, text);
   }
 
   function appendQuestionCodeSnippet(container, message) {
@@ -591,17 +499,10 @@ if (validationRoot && validationDataNode) {
 
     if (message.kind === "question") {
       article.dataset.previewQuestion = "true";
-      if (message.question_type === "maq" && !message.answered) {
-        const callout = document.createElement("div");
-        callout.className = "preview-question-callout";
-        callout.textContent = "Select all that apply";
-        article.appendChild(callout);
-      } else if (message.question_type === "waq" && !message.answered) {
-        const callout = document.createElement("div");
-        callout.className = "preview-question-callout";
-        callout.textContent = "Written answer";
-        article.appendChild(callout);
-      }
+      const callout = document.createElement("div");
+      callout.className = "preview-question-callout";
+      callout.textContent = questionTypeLabel(message);
+      article.appendChild(callout);
       appendFormattedMessageContent(article, questionStemText(message));
       appendQuestionCodeSnippet(article, message);
       if (message.question_type === "waq" && !message.answered) {
@@ -622,8 +523,9 @@ if (validationRoot && validationDataNode) {
             optionButton.innerHTML = `
               <span class="preview-answer-chip-checkbox" aria-hidden="true">${selectedAnswers.includes(option) ? "✓" : ""}</span>
               <span class="preview-answer-chip-label">${optionLabel(index)}</span>
-              <span>${option}</span>
+              <span class="preview-answer-chip-text"></span>
             `;
+            richText.appendInlineText(optionButton.querySelector(".preview-answer-chip-text"), option);
             optionButton.addEventListener("click", () => {
               const nextSelected = normalizeAnswers(message.selected_answers);
               if (nextSelected.includes(option)) {
@@ -659,8 +561,9 @@ if (validationRoot && validationDataNode) {
             optionButton.className = "preview-answer-chip";
             optionButton.innerHTML = `
               <span class="preview-answer-chip-label">${optionLabel(index)}</span>
-              <span>${option}</span>
+              <span class="preview-answer-chip-text"></span>
             `;
+            richText.appendInlineText(optionButton.querySelector(".preview-answer-chip-text"), option);
             optionButton.addEventListener("click", () => {
               void postAction("submit", { question_id: message.question_id, answer: option });
             });
@@ -673,6 +576,7 @@ if (validationRoot && validationDataNode) {
       } else if (message.answered && Array.isArray(message.correct_answers) && message.correct_answers.length) {
         article.appendChild(renderAnsweredOptions(message));
       }
+      richText.renderMath(article);
       return article;
     }
 
@@ -684,6 +588,7 @@ if (validationRoot && validationDataNode) {
     }
 
     appendFormattedMessageContent(article, message.text);
+    richText.renderMath(article);
     return article;
   }
 

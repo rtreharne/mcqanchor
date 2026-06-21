@@ -12,7 +12,7 @@ from standalone.services.content import (
     regenerate_course_descriptions_and_objectives,
     refresh_course_summary_from_blocks,
 )
-from standalone.services.pdf_import import analyze_pdf_chapters
+from standalone.services.pdf_import import analyze_pdf_chapters, extract_pdf_page_range
 
 
 def run_content_asset_processing(asset_id: int) -> None:
@@ -199,6 +199,16 @@ def run_course_import_block_creation(import_id: int, selected_chapter_ids: list[
         total = len(chapters)
 
         for index, chapter in enumerate(chapters, start=1):
+            if not chapter.extracted_text.strip():
+                chapter.extracted_text = extract_pdf_page_range(
+                    course_import.source_file.path,
+                    chapter.start_page,
+                    chapter.end_page,
+                )
+                if not chapter.extracted_text.strip():
+                    raise ValueError(f"No readable text could be extracted from {chapter.title}.")
+                chapter.save(update_fields=["extracted_text", "updated_at"])
+
             block = CourseBlock.objects.create(
                 course=course_import.course,
                 title=chapter.title,

@@ -3,6 +3,7 @@
 {% block title %}Validate | {{ course.title }}{% endblock %}
 {% block extra_head %}
   <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}">
+  <link rel="stylesheet" href="{% static 'standalone/vendor/katex/dist/katex.min.css' %}">
 {% endblock %}
 {% block app_nav_links %}
   <a href="{% if exit_url %}{{ exit_url }}{% else %}{% url 'standalone:student_dashboard' %}{% endif %}">{{ exit_label|default:"Dashboard" }}</a>
@@ -183,5 +184,8 @@
 {{ sidebar_state|json_script:"validation-sidebar-data" }}
 {% endblock %}
 {% block extra_body %}
+  <script src="{% static 'standalone/vendor/katex/dist/katex.min.js' %}"></script>
+  <script src="{% static 'standalone/vendor/katex/dist/contrib/auto-render.min.js' %}"></script>
+  <script src="{% static 'standalone/js/math-render.js' %}"></script>
   <script src="{% static 'standalone/js/student-validate.js' %}"></script>
 {% endblock %}

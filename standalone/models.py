@@ -106,6 +106,7 @@ class CourseConfig(TimeStampedModel):
     engagement_weight = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
     target_weight = models.PositiveSmallIntegerField(default=10, validators=[MinValueValidator(0), MaxValueValidator(100)])
     distractor_count = models.PositiveSmallIntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(5)])
+    numeric_ratio_percent = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
     maq_ratio_percent = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
     waq_ratio_percent = models.PositiveSmallIntegerField(default=10, validators=[MinValueValidator(0), MaxValueValidator(100)])
     coding_question_ratio_percent = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
@@ -377,6 +378,7 @@ class QuestionBankItem(TimeStampedModel):
 
     class QuestionType(models.TextChoices):
         MCQ = "mcq", "Single-answer"
+        NUM = "num", "Numeric"
         MAQ = "maq", "Multiple-answer"
         WAQ = "waq", "Written-answer"
 
@@ -413,6 +415,7 @@ class QuestionBankItem(TimeStampedModel):
     difficulty = models.CharField(max_length=50, blank=True)
     question_hash = models.CharField(max_length=64, db_index=True)
     is_numerical = models.BooleanField(default=False)
+    numeric_metadata = models.JSONField(default=dict, blank=True)
     is_coding_question = models.BooleanField(default=False)
     coding_language = models.CharField(max_length=50, blank=True)
     coding_question_kind = models.CharField(max_length=30, choices=CodingQuestionKind.choices, blank=True)
@@ -421,8 +424,23 @@ class QuestionBankItem(TimeStampedModel):
     class Meta:
         ordering = ["bank_type", "block__order", "created_at"]
 
+    @classmethod
+    def display_label_for_question_type(cls, question_type: str) -> str:
+        return {
+            cls.QuestionType.MCQ: "Standard MCQ",
+            cls.QuestionType.NUM: "Numerical MCQ",
+            cls.QuestionType.MAQ: "Multiple-answer MCQ",
+            cls.QuestionType.WAQ: "Written answer",
+        }.get(question_type, "Question")
+
     def __str__(self) -> str:
         return f"{self.bank_type}: {self.stem[:80]}"
+
+    def save(self, *args, **kwargs):
+        self.is_numerical = self.question_type == self.QuestionType.NUM
+        if not self.is_numerical and self.numeric_metadata:
+            self.numeric_metadata = {}
+        super().save(*args, **kwargs)
 
     def correct_answers(self) -> list[str]:
         answers = [self.correct_answer, *self.additional_correct_answers]
@@ -448,6 +466,12 @@ class QuestionBankItem(TimeStampedModel):
 
     def is_written_answer(self) -> bool:
         return self.question_type == self.QuestionType.WAQ
+
+    def is_numeric(self) -> bool:
+        return self.question_type == self.QuestionType.NUM
+
+    def question_type_label(self) -> str:
+        return self.display_label_for_question_type(self.question_type)
 
 
 class EnrollmentQuestionState(TimeStampedModel):

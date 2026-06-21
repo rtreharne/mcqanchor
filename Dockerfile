@@ -8,7 +8,10 @@ WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
 
-RUN pip install --upgrade pip && \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends poppler-utils tesseract-ocr && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip install --upgrade pip && \
     pip install -r /app/requirements.txt
 
 COPY . /app

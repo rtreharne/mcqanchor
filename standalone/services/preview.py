@@ -12,6 +12,7 @@ from openai import OpenAI
 
 from standalone.models import Course, CourseBlock, LearningObjective, QuestionBankItem
 from standalone.services.questions import (
+    QuestionGenerationError,
     coding_question_matches_expected_language,
     coding_question_quality_sort_key,
     further_study_questions_for_chat,
@@ -167,11 +168,13 @@ def _question_prompt_message(course_state: dict, block: CourseBlock, question: Q
         "question",
         question_id=question.pk,
         question_type=question.question_type,
+        question_type_label=question.question_type_label(),
         text=question.stem,
         options=options,
         block_label=block.title,
         learning_objective=(question.learning_objective.text if question.learning_objective else "General course understanding"),
         further_study_questions=further_study_questions_for_question(question),
+        is_numerical=question.is_numeric(),
         is_coding_question=question.is_coding_question,
         coding_language=question.coding_language,
         coding_question_kind=question.coding_question_kind,
@@ -211,7 +214,7 @@ def _move_pending_question_message_to_bottom(course_state: dict, block: CourseBl
 
 
 def _normalize_requested_question_type(question_type: str | None) -> str | None:
-    if question_type in {QuestionBankItem.QuestionType.MCQ, QuestionBankItem.QuestionType.MAQ, QuestionBankItem.QuestionType.WAQ}:
+    if question_type in {QuestionBankItem.QuestionType.MCQ, QuestionBankItem.QuestionType.NUM, QuestionBankItem.QuestionType.MAQ, QuestionBankItem.QuestionType.WAQ}:
         return question_type
     return None
 
@@ -422,6 +425,7 @@ def _ensure_question_for_block(course: Course, block: CourseBlock, course_state:
             block,
             preferred_objective_ids=_ordered_unmet_objective_ids(course_state, block),
             question_type=effective_type,
+            raise_generation_errors=True,
         )
     return question, True
 
@@ -449,7 +453,19 @@ def request_preview_quiz(request, course: Course, block: CourseBlock, requested_
         request.session.modified = True
         return serialize_preview_state(request, course, active_block_id=block.pk)
 
-    question, is_new_request = _ensure_question_for_block(course, block, course_state, requested_question_type)
+    try:
+        question, is_new_request = _ensure_question_for_block(course, block, course_state, requested_question_type)
+    except QuestionGenerationError as exc:
+        _append_message(
+            course_state,
+            block,
+            "assistant",
+            "text",
+            text=str(exc),
+            source_blocks=[block.title],
+        )
+        request.session.modified = True
+        return serialize_preview_state(request, course, active_block_id=block.pk)
     if question is None:
         _append_message(
             course_state,
@@ -771,7 +787,7 @@ def _grade_question_response(question: QuestionBankItem, selected_answers) -> tu
 
 
 def _feedback_text(question: QuestionBankItem, selected_answers, is_correct: bool, missing_answers: list[str], extra_answers: list[str]) -> str:
-    explanation = normalize_explanation_text(question.explanation)
+    explanation = question.explanation if question.is_numeric() else normalize_explanation_text(question.explanation)
     if question.is_multiple_answer():
         if is_correct:
             return "Correct."
