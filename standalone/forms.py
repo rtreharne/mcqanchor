@@ -21,6 +21,7 @@ from standalone.models import (
     ValidationEvent,
 )
 from standalone.services.content import SUPPORTED_EXTENSIONS, sanitize_learning_objective, sanitize_summary
+from standalone.services.guidance import sanitize_assistant_guidance
 
 
 class EmailOrUsernameAuthenticationForm(forms.Form):
@@ -172,6 +173,11 @@ class CourseConfigForm(forms.ModelForm):
         self.fields["self_enrol_domain"].help_text = (
             "Optional. Enter a domain such as example.ac.uk. It applies to both self-enrol allowlist signups and magic links."
         )
+        self.fields["assistant_guidance"].label = "Assistant guidance"
+        self.fields["assistant_guidance"].help_text = (
+            "Optional. Add free-text steering notes for question generation and student course chat, such as audience age, notation rules, or preferred wording."
+        )
+        self.fields["assistant_guidance"].widget = forms.Textarea(attrs={"rows": 5, "placeholder": "E.g. KS2 mathematics for 10-11 year olds. Keep language age-appropriate and concrete."})
         self.fields["numeric_ratio_percent"].label = "Numeric question ratio (%)"
         self.fields["numeric_ratio_percent"].help_text = (
             "Target percentage of newly generated questions that should be numeric single-answer items with locally validated calculations."
@@ -223,6 +229,9 @@ class CourseConfigForm(forms.ModelForm):
         if value.startswith("@"):
             value = value[1:]
         return value
+
+    def clean_assistant_guidance(self):
+        return sanitize_assistant_guidance(self.cleaned_data.get("assistant_guidance", ""))
 
 
 class CourseAllowedEmailForm(forms.ModelForm):
@@ -416,6 +425,15 @@ class LearningObjectiveInlineForm(forms.ModelForm):
         if not text:
             raise forms.ValidationError("Please enter a learning objective.")
         return text
+
+
+class LearningObjectiveGuidanceInlineForm(forms.ModelForm):
+    class Meta:
+        model = LearningObjective
+        fields = ["assistant_guidance"]
+
+    def clean_assistant_guidance(self):
+        return sanitize_assistant_guidance(self.cleaned_data.get("assistant_guidance", ""))
 
 
 class ContentAssetForm(forms.Form):

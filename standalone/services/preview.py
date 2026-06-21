@@ -10,7 +10,8 @@ from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from openai import OpenAI
 
-from standalone.models import Course, CourseBlock, LearningObjective, QuestionBankItem
+from standalone.models import Course, CourseBlock, LearningObjective, LearningObjectiveCorrection, QuestionBankItem
+from standalone.services.guidance import build_chat_guidance_prompt, merge_assistant_guidance, sanitize_assistant_guidance
 from standalone.services.questions import (
     QuestionGenerationError,
     coding_question_matches_expected_language,
@@ -19,6 +20,7 @@ from standalone.services.questions import (
     further_study_questions_for_question,
     generate_question_pair_for_block,
     normalize_explanation_text,
+    normalize_numeric_explanation_text,
     preferred_coding_language_for_block,
 )
 
@@ -172,6 +174,7 @@ def _question_prompt_message(course_state: dict, block: CourseBlock, question: Q
         text=question.stem,
         options=options,
         block_label=block.title,
+        learning_objective_id=question.learning_objective_id,
         learning_objective=(question.learning_objective.text if question.learning_objective else "General course understanding"),
         further_study_questions=further_study_questions_for_question(question),
         is_numerical=question.is_numeric(),
@@ -241,8 +244,12 @@ def _effective_preview_question_type(
     block: CourseBlock,
     course_state: dict,
     requested_question_type: str | None,
+    *,
+    force_requested_type: bool = False,
 ) -> str | None:
     normalized_type = _normalize_requested_question_type(requested_question_type)
+    if force_requested_type:
+        return normalized_type
     if _advanced_question_types_unlocked(course, block, course_state):
         return normalized_type
     if normalized_type in ADVANCED_QUESTION_TYPES or normalized_type is None:
@@ -405,9 +412,40 @@ def _pending_question(course: Course, block: CourseBlock, course_state: dict):
     ).select_related("learning_objective", "block", "source_chunk").first()
 
 
-def _ensure_question_for_block(course: Course, block: CourseBlock, course_state: dict, requested_question_type: str | None = None):
-    effective_type = _effective_preview_question_type(course, block, course_state, requested_question_type)
+def _objective_for_block(block: CourseBlock, learning_objective_id: int | None):
+    if not learning_objective_id:
+        return None
+    return block.learning_objectives.filter(pk=learning_objective_id).first()
+
+
+def _ensure_question_for_block(
+    course: Course,
+    block: CourseBlock,
+    course_state: dict,
+    requested_question_type: str | None = None,
+    *,
+    preferred_objective_id: int | None = None,
+    force_new: bool = False,
+):
+    effective_type = _effective_preview_question_type(
+        course,
+        block,
+        course_state,
+        requested_question_type,
+        force_requested_type=force_new and preferred_objective_id is not None,
+    )
+    preferred_objective = _objective_for_block(block, preferred_objective_id)
+    if preferred_objective_id and preferred_objective is None:
+        raise ValueError("Choose a learning objective from this block.")
     pending_question_id = course_state.setdefault("pending_questions", {}).get(str(block.pk))
+    if force_new and pending_question_id:
+        question = course.question_bank_items.filter(
+            pk=pending_question_id,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+        ).first()
+        if question is not None and question.pk not in _flagged_question_ids(course_state):
+            raise ValueError("Answer or flag the current question before generating a fresh question for a learning objective.")
     if pending_question_id:
         question = course.question_bank_items.filter(
             pk=pending_question_id,
@@ -417,13 +455,16 @@ def _ensure_question_for_block(course: Course, block: CourseBlock, course_state:
         if question is not None and question.pk not in _flagged_question_ids(course_state):
             return question, False
 
-    question = _pick_unseen_question(course, block, course_state, effective_type)
-    if question is None:
-        question = _pick_retry_question(course, block, course_state, effective_type)
+    question = None
+    if not force_new:
+        question = _pick_unseen_question(course, block, course_state, effective_type)
+        if question is None:
+            question = _pick_retry_question(course, block, course_state, effective_type)
     if question is None:
         question, _ = generate_question_pair_for_block(
             block,
-            preferred_objective_ids=_ordered_unmet_objective_ids(course_state, block),
+            preferred_objective_ids=[preferred_objective.pk] if preferred_objective is not None else _ordered_unmet_objective_ids(course_state, block),
+            strict_preferred_objectives=preferred_objective is not None,
             question_type=effective_type,
             raise_generation_errors=True,
         )
@@ -438,7 +479,15 @@ def _mark_question_presented(course_state: dict, block: CourseBlock, question: Q
     return state
 
 
-def request_preview_quiz(request, course: Course, block: CourseBlock, requested_question_type: str | None = None) -> dict:
+def request_preview_quiz(
+    request,
+    course: Course,
+    block: CourseBlock,
+    requested_question_type: str | None = None,
+    *,
+    preferred_objective_id: int | None = None,
+    force_new: bool = False,
+) -> dict:
     course_state = _course_state(request, course)
     _ensure_block_transcript(course_state, block)
     if not block.is_available():
@@ -454,7 +503,14 @@ def request_preview_quiz(request, course: Course, block: CourseBlock, requested_
         return serialize_preview_state(request, course, active_block_id=block.pk)
 
     try:
-        question, is_new_request = _ensure_question_for_block(course, block, course_state, requested_question_type)
+        question, is_new_request = _ensure_question_for_block(
+            course,
+            block,
+            course_state,
+            requested_question_type,
+            preferred_objective_id=preferred_objective_id,
+            force_new=force_new,
+        )
     except QuestionGenerationError as exc:
         _append_message(
             course_state,
@@ -485,6 +541,42 @@ def request_preview_quiz(request, course: Course, block: CourseBlock, requested_
         if not _move_pending_question_message_to_bottom(course_state, block, question):
             _question_prompt_message(course_state, block, question)
 
+    request.session.modified = True
+    return serialize_preview_state(request, course, active_block_id=block.pk)
+
+
+def save_preview_objective_guardrail(
+    request,
+    course: Course,
+    block: CourseBlock,
+    learning_objective_id: int,
+    instruction: str,
+) -> dict:
+    objective = _objective_for_block(block, learning_objective_id)
+    if objective is None:
+        raise ValueError("Choose a learning objective from this block.")
+
+    cleaned_instruction = sanitize_assistant_guidance(instruction)
+    if not cleaned_instruction:
+        raise ValueError("Enter a guardrail first.")
+
+    updated_guidance = merge_assistant_guidance(objective.assistant_guidance, cleaned_instruction)
+    if updated_guidance != objective.assistant_guidance:
+        objective.assistant_guidance = updated_guidance
+        objective.save(update_fields=["assistant_guidance", "updated_at"])
+
+    course_state = _course_state(request, course)
+    _append_message(
+        course_state,
+        block,
+        "assistant",
+        "text",
+        text=(
+            f"Guardrail saved for {objective.code}. "
+            "Future questions for this learning objective will follow it here and in the student app."
+        ),
+        source_blocks=[block.title],
+    )
     request.session.modified = True
     return serialize_preview_state(request, course, active_block_id=block.pk)
 
@@ -787,7 +879,11 @@ def _grade_question_response(question: QuestionBankItem, selected_answers) -> tu
 
 
 def _feedback_text(question: QuestionBankItem, selected_answers, is_correct: bool, missing_answers: list[str], extra_answers: list[str]) -> str:
-    explanation = question.explanation if question.is_numeric() else normalize_explanation_text(question.explanation)
+    explanation = (
+        normalize_numeric_explanation_text(question.explanation)
+        if question.is_numeric()
+        else normalize_explanation_text(question.explanation)
+    )
     if question.is_multiple_answer():
         if is_correct:
             return "Correct."
@@ -905,16 +1001,39 @@ def submit_preview_answer(request, course: Course, block: CourseBlock, question_
     return serialize_preview_state(request, course, active_block_id=block.pk)
 
 
-def flag_preview_question(request, course: Course, block: CourseBlock, question_id: int) -> dict:
+def flag_preview_question(
+    request,
+    course: Course,
+    block: CourseBlock,
+    question_id: int,
+    *,
+    instruction: str = "",
+    learning_objective_id: int | None = None,
+) -> dict:
     course_state = _course_state(request, course)
     question = course.question_bank_items.filter(
         pk=question_id,
         course=course,
         block=block,
         bank_type=QuestionBankItem.BankType.PRACTICE,
-    ).select_related("linked_question").first()
+    ).select_related("linked_question", "learning_objective").first()
     if question is None:
         return serialize_preview_state(request, course, active_block_id=block.pk)
+
+    cleaned_instruction = sanitize_assistant_guidance(instruction)
+    if cleaned_instruction:
+        correction_objective = question.learning_objective
+        if correction_objective is None:
+            correction_objective = block.learning_objectives.filter(pk=learning_objective_id or 0).first()
+        if correction_objective is None:
+            raise ValueError("Choose a learning objective before saving a correction note for this question.")
+        LearningObjectiveCorrection.objects.create(
+            learning_objective=correction_objective,
+            question=question,
+            created_by=getattr(request, "user", None),
+            instruction=cleaned_instruction,
+            question_stem_snapshot=question.stem,
+        )
 
     flagged_ids = course_state.setdefault("flagged_question_ids", [])
     for linked_question_id in filter(None, [question.pk, question.linked_question_id]):
@@ -937,7 +1056,12 @@ def flag_preview_question(request, course: Course, block: CourseBlock, question_
         block,
         "assistant",
         "text",
-        text="Thanks. I won't show this question again here, and its linked validation question has been removed too.",
+        text=(
+            f"Thanks. I saved that correction note against {question.learning_objective.code if question.learning_objective else correction_objective.code}, "
+            "and I won't show this question or its linked validation variant again here."
+            if cleaned_instruction
+            else "Thanks. I won't show this question again here, and its linked validation question has been removed too."
+        ),
         source_blocks=[block.title],
     )
     request.session.modified = True
@@ -1080,6 +1204,7 @@ def _openai_chat_reply(course_state: dict, course: Course, block: CourseBlock, q
         f"[Block: {snippet['block'].title} | Type: {snippet['kind']}]\n{snippet['text']}"
         for snippet in snippets
     )
+    teacher_guidance = build_chat_guidance_prompt(course, block, question)
     prompt = f"""
 You are the student chat tutor for the course "{course.title}".
 
@@ -1106,6 +1231,8 @@ Recent chat:
 
 Relevant course notes:
 {sources_text}
+
+{teacher_guidance}
 
 Student question:
 {question}
@@ -1414,6 +1541,8 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None) ->
                         "code": objective.code,
                         "text": objective.text,
                         "covered": objective.pk in covered_objective_ids,
+                        "assistant_guidance": sanitize_assistant_guidance(objective.assistant_guidance),
+                        "has_guardrail": bool(sanitize_assistant_guidance(objective.assistant_guidance)),
                     }
                     for objective in objectives
                 ],

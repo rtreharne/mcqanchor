@@ -64,6 +64,11 @@ urlpatterns = [
     path("teacher/assets/<int:asset_id>/toggle/", views.toggle_asset_generation, name="toggle_asset_generation"),
     path("teacher/objectives/<int:objective_id>/update/", views.update_learning_objective, name="update_learning_objective"),
     path("teacher/objectives/<int:objective_id>/delete/", views.delete_learning_objective_view, name="delete_learning_objective"),
+    path(
+        "teacher/objective-corrections/<int:correction_id>/delete/",
+        views.delete_learning_objective_correction,
+        name="delete_learning_objective_correction",
+    ),
     path("teacher/validation-events/<int:event_id>/pack.pdf", views.validation_pack_pdf, name="validation_pack_pdf"),
     path("student/", views.student_dashboard, name="student_dashboard"),
     path("student/invite/<uuid:token>/", views.student_activate, name="student_activate"),

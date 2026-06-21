@@ -99,6 +99,7 @@ class CourseConfig(TimeStampedModel):
     course = models.OneToOneField(Course, on_delete=models.CASCADE, related_name="config")
     self_enrol_enabled = models.BooleanField(default=True)
     self_enrol_domain = models.CharField(max_length=255, blank=True)
+    assistant_guidance = models.TextField(blank=True)
     practice_weight = models.PositiveSmallIntegerField(default=80, validators=[MinValueValidator(0), MaxValueValidator(100)])
     validation_weight = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
     mastery_weight = models.PositiveSmallIntegerField(default=40, validators=[MinValueValidator(0), MaxValueValidator(100)])
@@ -295,12 +296,43 @@ class LearningObjective(TimeStampedModel):
     position = models.PositiveSmallIntegerField(default=1)
     code = models.CharField(max_length=50)
     text = models.TextField()
+    assistant_guidance = models.TextField(blank=True)
 
     class Meta:
         ordering = ["block__order", "position", "pk"]
 
     def __str__(self) -> str:
         return f"{self.code}: {self.text[:60]}"
+
+
+class LearningObjectiveCorrection(TimeStampedModel):
+    learning_objective = models.ForeignKey(
+        LearningObjective,
+        on_delete=models.CASCADE,
+        related_name="corrections",
+    )
+    question = models.ForeignKey(
+        "QuestionBankItem",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="learning_objective_corrections",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="learning_objective_corrections_created",
+    )
+    instruction = models.TextField()
+    question_stem_snapshot = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-pk"]
+
+    def __str__(self) -> str:
+        return f"Correction for {self.learning_objective.code}"
 
 
 class ContentChunk(TimeStampedModel):

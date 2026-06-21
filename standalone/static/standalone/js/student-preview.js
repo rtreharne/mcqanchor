@@ -35,6 +35,26 @@ if (previewRoot && previewDataNode) {
   const resourceButtons = Array.from(previewRoot.querySelectorAll("[data-preview-resource]"));
   const mobileSidebarMedia = window.matchMedia("(max-width: 980px)");
   const mobileChatMedia = window.matchMedia("(max-width: 640px)");
+  const flagSheet = previewRoot.querySelector("[data-preview-flag-sheet]");
+  const flagSheetScrim = previewRoot.querySelector("[data-preview-flag-sheet-scrim]");
+  const flagSheetCloseButton = previewRoot.querySelector("[data-preview-flag-sheet-close]");
+  const flagSheetQuestion = previewRoot.querySelector("[data-preview-flag-sheet-question]");
+  const flagObjectiveField = previewRoot.querySelector("[data-preview-flag-objective-field]");
+  const flagObjectiveSelect = previewRoot.querySelector("[data-preview-flag-objective-select]");
+  const flagInstructionInput = previewRoot.querySelector("[data-preview-flag-instruction]");
+  const flagSheetError = previewRoot.querySelector("[data-preview-flag-error]");
+  const flagOnlyButton = previewRoot.querySelector("[data-preview-flag-only]");
+  const flagSaveButton = previewRoot.querySelector("[data-preview-flag-save]");
+  const objectiveSheet = previewRoot.querySelector("[data-preview-objective-sheet]");
+  const objectiveSheetScrim = previewRoot.querySelector("[data-preview-objective-sheet-scrim]");
+  const objectiveSheetCloseButton = previewRoot.querySelector("[data-preview-objective-sheet-close]");
+  const objectiveSheetObjective = previewRoot.querySelector("[data-preview-objective-sheet-objective]");
+  const objectiveSheetExistingWrap = previewRoot.querySelector("[data-preview-objective-sheet-existing-wrap]");
+  const objectiveSheetExisting = previewRoot.querySelector("[data-preview-objective-sheet-existing]");
+  const objectiveGuardrailInput = previewRoot.querySelector("[data-preview-objective-guardrail]");
+  const objectiveSheetError = previewRoot.querySelector("[data-preview-objective-sheet-error]");
+  const objectiveSheetSaveButton = previewRoot.querySelector("[data-preview-objective-sheet-save]");
+  const isTeacherPreview = previewRoot.dataset.previewMode === "student-preview";
 
   let previewState = JSON.parse(previewDataNode.textContent || "{}");
   let activeBlockId = String(previewState.active_block_id || "");
@@ -50,6 +70,8 @@ if (previewRoot && previewDataNode) {
   let sidebarSummaryExpanded = false;
   let sidebarSummaryFullText = "";
   let practiceValidationNavigationTimer = 0;
+  let flagSheetState = null;
+  let guardrailSheetState = null;
   const inlineMessagesByBlock = {};
   const loadingMessagesByBlock = {};
   const optimisticUserMessagesByBlock = {};
@@ -205,6 +227,253 @@ if (previewRoot && previewDataNode) {
 
   function findBlock(blockId) {
     return (previewState.blocks || []).find((block) => String(block.id) === String(blockId)) || null;
+  }
+
+  function currentFlagSheetBlock() {
+    return flagSheetState ? findBlock(flagSheetState.blockId) : null;
+  }
+
+  function currentGuardrailSheetBlock() {
+    return guardrailSheetState ? findBlock(guardrailSheetState.blockId) : null;
+  }
+
+  function currentObjectiveForGuardrailSheet() {
+    const block = currentGuardrailSheetBlock();
+    if (!guardrailSheetState || !block || !Array.isArray(block.learning_objectives)) {
+      return null;
+    }
+    return block.learning_objectives.find(
+      (objective) => Number(objective.id || 0) === Number(guardrailSheetState.learningObjectiveId || 0),
+    ) || null;
+  }
+
+  function setFlagSheetError(message = "") {
+    if (!flagSheetError) {
+      return;
+    }
+    flagSheetError.textContent = message;
+    flagSheetError.hidden = !message;
+  }
+
+  function setGuardrailSheetError(message = "") {
+    if (!objectiveSheetError) {
+      return;
+    }
+    objectiveSheetError.textContent = message;
+    objectiveSheetError.hidden = !message;
+  }
+
+  function closeFlagSheet() {
+    flagSheetState = null;
+    setFlagSheetError("");
+    if (flagInstructionInput) {
+      flagInstructionInput.value = "";
+    }
+    if (flagObjectiveSelect) {
+      flagObjectiveSelect.innerHTML = "";
+      flagObjectiveSelect.value = "";
+    }
+    syncFlagSheetState();
+  }
+
+  function closeGuardrailSheet() {
+    guardrailSheetState = null;
+    setGuardrailSheetError("");
+    if (objectiveGuardrailInput) {
+      objectiveGuardrailInput.value = "";
+    }
+    if (objectiveSheetExistingWrap) {
+      objectiveSheetExistingWrap.hidden = true;
+    }
+    if (objectiveSheetExisting) {
+      objectiveSheetExisting.textContent = "";
+    }
+    syncGuardrailSheetState();
+  }
+
+  function syncFlagSheetState() {
+    if (!flagSheet || !isTeacherPreview) {
+      return;
+    }
+    const isOpen = Boolean(flagSheetState);
+    flagSheet.hidden = !isOpen;
+    flagSheetScrim.hidden = !isOpen;
+    flagSheet.classList.toggle("is-open", isOpen);
+    if (!isOpen) {
+      return;
+    }
+    if (flagOnlyButton) {
+      flagOnlyButton.disabled = requestInFlight;
+    }
+    if (flagSaveButton) {
+      flagSaveButton.disabled = requestInFlight;
+    }
+    if (flagInstructionInput) {
+      flagInstructionInput.disabled = requestInFlight;
+    }
+    if (flagObjectiveSelect) {
+      flagObjectiveSelect.disabled = requestInFlight;
+    }
+  }
+
+  function syncGuardrailSheetState() {
+    if (!objectiveSheet || !isTeacherPreview) {
+      return;
+    }
+    const isOpen = Boolean(guardrailSheetState);
+    objectiveSheet.hidden = !isOpen;
+    objectiveSheetScrim.hidden = !isOpen;
+    objectiveSheet.classList.toggle("is-open", isOpen);
+    if (!isOpen) {
+      return;
+    }
+    if (objectiveSheetSaveButton) {
+      objectiveSheetSaveButton.disabled = requestInFlight;
+    }
+    if (objectiveGuardrailInput) {
+      objectiveGuardrailInput.disabled = requestInFlight;
+    }
+  }
+
+  function openFlagSheet(message) {
+    if (!isTeacherPreview || !message) {
+      return;
+    }
+    const block = currentBlock();
+    if (!block) {
+      return;
+    }
+    flagSheetState = {
+      blockId: String(block.id),
+      questionId: Number(message.question_id || 0),
+      learningObjectiveId: Number(message.learning_objective_id || 0) || null,
+    };
+    if (flagSheetQuestion) {
+      flagSheetQuestion.textContent = questionStemText(message);
+    }
+    if (flagInstructionInput) {
+      flagInstructionInput.value = "";
+    }
+    setFlagSheetError("");
+    if (flagObjectiveSelect) {
+      flagObjectiveSelect.innerHTML = "";
+      const objectives = Array.isArray(block.learning_objectives) ? block.learning_objectives : [];
+      if (flagSheetState.learningObjectiveId) {
+        if (flagObjectiveField) {
+          flagObjectiveField.hidden = true;
+        }
+      } else {
+        if (flagObjectiveField) {
+          flagObjectiveField.hidden = false;
+        }
+        const placeholderOption = document.createElement("option");
+        placeholderOption.value = "";
+        placeholderOption.textContent = "Choose a learning objective";
+        flagObjectiveSelect.appendChild(placeholderOption);
+        objectives.forEach((objective) => {
+          const option = document.createElement("option");
+          option.value = String(objective.id);
+          option.textContent = `${objective.code} ${objective.text}`;
+          flagObjectiveSelect.appendChild(option);
+        });
+      }
+    }
+    syncFlagSheetState();
+    flagInstructionInput?.focus();
+  }
+
+  function openGuardrailSheet(objective) {
+    if (!isTeacherPreview || !objective) {
+      return;
+    }
+    const block = currentBlock();
+    if (!block) {
+      return;
+    }
+    guardrailSheetState = {
+      blockId: String(block.id),
+      learningObjectiveId: Number(objective.id || 0),
+    };
+    if (objectiveSheetObjective) {
+      objectiveSheetObjective.textContent = `${objective.code} ${objective.text}`;
+    }
+    const currentGuidance = String(objective.assistant_guidance || "").trim();
+    if (objectiveSheetExistingWrap) {
+      objectiveSheetExistingWrap.hidden = !currentGuidance;
+    }
+    if (objectiveSheetExisting) {
+      objectiveSheetExisting.textContent = currentGuidance;
+    }
+    if (objectiveGuardrailInput) {
+      objectiveGuardrailInput.value = "";
+    }
+    setGuardrailSheetError("");
+    syncGuardrailSheetState();
+    objectiveGuardrailInput?.focus();
+  }
+
+  async function submitFlagSheet({ saveCorrection }) {
+    if (!flagSheetState || requestInFlight) {
+      return;
+    }
+    const payload = { question_id: flagSheetState.questionId };
+    if (saveCorrection) {
+      const instruction = String(flagInstructionInput?.value || "").trim();
+      const learningObjectiveId = flagSheetState.learningObjectiveId || Number(flagObjectiveSelect?.value || 0) || null;
+      if (!instruction) {
+        setFlagSheetError("Add a correction note before saving it.");
+        flagInstructionInput?.focus();
+        return;
+      }
+      if (!learningObjectiveId) {
+        setFlagSheetError("Choose the learning objective this correction belongs to.");
+        flagObjectiveSelect?.focus();
+        return;
+      }
+      payload.instruction = instruction;
+      payload.learning_objective_id = learningObjectiveId;
+    }
+    setFlagSheetError("");
+    const succeeded = await postPreviewAction("flag", payload, {
+      focusComposer: true,
+      scrollMode: "preserve",
+      onError: (error) => {
+        setFlagSheetError(error?.message || "Unable to save this correction right now.");
+      },
+    });
+    if (succeeded) {
+      closeFlagSheet();
+    }
+  }
+
+  async function submitGuardrailSheet() {
+    if (!guardrailSheetState || requestInFlight) {
+      return;
+    }
+    const instruction = String(objectiveGuardrailInput?.value || "").trim();
+    if (!instruction) {
+      setGuardrailSheetError("Add a guardrail before saving it.");
+      objectiveGuardrailInput?.focus();
+      return;
+    }
+    setGuardrailSheetError("");
+    const succeeded = await postPreviewAction(
+      "guardrail",
+      {
+        learning_objective_id: guardrailSheetState.learningObjectiveId,
+        instruction,
+      },
+      {
+        focusComposer: true,
+        scrollMode: "preserve",
+        onError: (error) => {
+          setGuardrailSheetError(error?.message || "Unable to save this guardrail right now.");
+        },
+      },
+    );
+    if (succeeded) {
+      closeGuardrailSheet();
+    }
   }
 
   function pendingQuestion(block = currentBlock()) {
@@ -491,6 +760,46 @@ if (previewRoot && previewDataNode) {
     return !!quizMenuPanel && !quizMenuPanel.hidden;
   }
 
+  function closeObjectiveMenus(exceptMenu = null) {
+    previewRoot.querySelectorAll("[data-preview-objective-menu]").forEach((menu) => {
+      if (exceptMenu && menu === exceptMenu) {
+        return;
+      }
+      const trigger = menu.querySelector("[data-preview-objective-menu-trigger]");
+      const panel = menu.querySelector("[data-preview-objective-menu-panel]");
+      menu.dataset.open = "false";
+      trigger?.setAttribute("aria-expanded", "false");
+      if (panel) {
+        panel.hidden = true;
+        panel.setAttribute("hidden", "hidden");
+      }
+    });
+  }
+
+  function toggleObjectiveMenu(menu) {
+    if (!menu || requestInFlight) {
+      return;
+    }
+    const trigger = menu.querySelector("[data-preview-objective-menu-trigger]");
+    const panel = menu.querySelector("[data-preview-objective-menu-panel]");
+    if (!trigger || !panel) {
+      return;
+    }
+    const willOpen = panel.hidden;
+    closeObjectiveMenus(willOpen ? menu : null);
+    if (!willOpen) {
+      menu.dataset.open = "false";
+      trigger.setAttribute("aria-expanded", "false");
+      panel.hidden = true;
+      panel.setAttribute("hidden", "hidden");
+      return;
+    }
+    menu.dataset.open = "true";
+    trigger.setAttribute("aria-expanded", "true");
+    panel.hidden = false;
+    panel.removeAttribute("hidden");
+  }
+
   function resizeComposerInput() {
     if (!input) {
       return;
@@ -651,8 +960,11 @@ if (previewRoot && previewDataNode) {
     });
     if (disabled) {
       closeQuizMenu();
+      closeObjectiveMenus();
     }
     syncQuizMenuItems();
+    syncFlagSheetState();
+    syncGuardrailSheetState();
   }
 
   function updateComposerClearance() {
@@ -732,6 +1044,23 @@ if (previewRoot && previewDataNode) {
     ) || null;
   }
 
+  function updateQuestionOverflowState(activeQuestion) {
+    if (!transcript || !activeQuestion || !activeQuestion.isConnected) {
+      return;
+    }
+    const hint = activeQuestion.querySelector(".preview-question-overflow-hint");
+    if (!hint) {
+      return;
+    }
+    const answerRegion = activeQuestion.querySelector(".preview-message-options") || activeQuestion;
+    const transcriptRect = transcript.getBoundingClientRect();
+    const answerRect = answerRegion.getBoundingClientRect();
+    const visibilityTolerance = 6;
+    const isFullyVisible = answerRect.bottom <= transcriptRect.bottom + visibilityTolerance;
+    activeQuestion.classList.toggle("is-overflowing-question", !isFullyVisible);
+    hint.hidden = isFullyVisible;
+  }
+
   function syncQuestionViewport(scrollMode = "bottom", previousScrollTop = 0) {
     if (!transcript) {
       return;
@@ -748,23 +1077,21 @@ if (previewRoot && previewDataNode) {
 
     const activeQuestion = latestPendingQuestionCard();
     if (activeQuestion) {
-      const hint = activeQuestion.querySelector(".preview-question-overflow-hint");
       const isTallerThanViewport = activeQuestion.offsetHeight > transcript.clientHeight - 16;
       if (scrollMode === "question" && (mobileChatMedia.matches || isTallerThanViewport)) {
         transcript.scrollTo({ top: Math.max(activeQuestion.offsetTop, 0), behavior: "auto" });
-      }
-
-      const transcriptRect = transcript.getBoundingClientRect();
-      const questionRect = activeQuestion.getBoundingClientRect();
-      const isFullyVisible = (
-        questionRect.top >= transcriptRect.top + 1
-        && questionRect.bottom <= transcriptRect.bottom - 1
-      );
-      if (!isFullyVisible) {
-        activeQuestion.classList.add("is-overflowing-question");
-        if (hint) {
-          hint.hidden = false;
-        }
+        window.requestAnimationFrame(() => {
+          if (latestPendingQuestionCard() === activeQuestion) {
+            updateQuestionOverflowState(activeQuestion);
+          }
+        });
+      } else {
+        updateQuestionOverflowState(activeQuestion);
+        window.requestAnimationFrame(() => {
+          if (latestPendingQuestionCard() === activeQuestion) {
+            updateQuestionOverflowState(activeQuestion);
+          }
+        });
       }
 
       if (scrollMode === "question") {
@@ -1254,6 +1581,10 @@ if (previewRoot && previewDataNode) {
       flagButton.textContent = message.flagged ? "Flagged" : "Flag question";
       flagButton.disabled = requestInFlight || message.flagged;
       flagButton.addEventListener("click", () => {
+        if (isTeacherPreview) {
+          openFlagSheet(message);
+          return;
+        }
         void postPreviewAction("flag", { question_id: message.question_id });
       });
       actions.appendChild(flagButton);
@@ -1357,7 +1688,10 @@ if (previewRoot && previewDataNode) {
       if (message.resource_key === "objectives") {
         const list = document.createElement("ul");
         list.className = "preview-objective-list";
-        const objectives = Array.isArray(message.objectives) ? message.objectives : [];
+        const resourceBlock = findBlock(message.block_id || currentBlock()?.id || 0);
+        const objectives = Array.isArray(resourceBlock?.learning_objectives)
+          ? resourceBlock.learning_objectives
+          : (Array.isArray(message.objectives) ? message.objectives : []);
 
         if (!objectives.length) {
           const emptyItem = document.createElement("li");
@@ -1383,6 +1717,55 @@ if (previewRoot && previewDataNode) {
             text.textContent = objective.text;
 
             item.append(tick, code, text);
+
+            if (isTeacherPreview) {
+              const actions = document.createElement("div");
+              actions.className = "preview-objective-actions";
+              const menu = document.createElement("div");
+              menu.className = "preview-objective-menu";
+              menu.dataset.previewObjectiveMenu = "true";
+              const trigger = document.createElement("button");
+              trigger.type = "button";
+              trigger.className = "preview-objective-menu-trigger";
+              trigger.setAttribute("aria-label", `Actions for ${objective.code}`);
+              trigger.setAttribute("aria-haspopup", "menu");
+              trigger.setAttribute("aria-expanded", "false");
+              trigger.dataset.previewObjectiveMenuTrigger = "true";
+              trigger.disabled = requestInFlight;
+              trigger.innerHTML = `
+                <span class="preview-objective-menu-trigger-dots" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              `;
+              const panel = document.createElement("div");
+              panel.className = "preview-objective-menu-panel";
+              panel.setAttribute("role", "menu");
+              panel.hidden = true;
+              panel.dataset.previewObjectiveMenuPanel = "true";
+              panel.innerHTML = `
+                <button type="button" role="menuitem" class="preview-objective-menu-item" data-preview-objective-question-type="mcq" data-objective-id="${objective.id}">
+                  Re-generate MCQ
+                </button>
+                <button type="button" role="menuitem" class="preview-objective-menu-item" data-preview-objective-question-type="num" data-objective-id="${objective.id}">
+                  Re-generate Numeric
+                </button>
+                <button type="button" role="menuitem" class="preview-objective-menu-item" data-preview-objective-question-type="maq" data-objective-id="${objective.id}">
+                  Re-generate MAQ
+                </button>
+                <button type="button" role="menuitem" class="preview-objective-menu-item" data-preview-objective-question-type="waq" data-objective-id="${objective.id}">
+                  Re-generate WAQ
+                </button>
+                <button type="button" role="menuitem" class="preview-objective-menu-item is-accent" data-preview-objective-guardrail="true" data-objective-id="${objective.id}">
+                  Add guardrail
+                </button>
+              `;
+              menu.append(trigger, panel);
+              actions.appendChild(menu);
+              item.appendChild(actions);
+            }
+
             list.appendChild(item);
           });
         }
@@ -1465,6 +1848,7 @@ if (previewRoot && previewDataNode) {
   function resourceMessagePayload(block, resource) {
     if (resource === "description") {
       return {
+        block_id: block.id,
         block_label: block.title,
         kind: "resource",
         resource_key: "description",
@@ -1476,6 +1860,7 @@ if (previewRoot && previewDataNode) {
 
     const objectives = Array.isArray(block.learning_objectives) ? block.learning_objectives : [];
     return {
+      block_id: block.id,
       block_label: block.title,
       kind: "resource",
       resource_key: "objectives",
@@ -1695,6 +2080,7 @@ if (previewRoot && previewDataNode) {
     if (!block) {
       return;
     }
+    closeObjectiveMenus();
     activeBlockId = String(block.id);
     persistActiveBlockId(activeBlockId);
     if (activeBlockTitle) {
@@ -1703,6 +2089,37 @@ if (previewRoot && previewDataNode) {
     renderCourseMetrics();
     renderBlockSwitcher();
     renderTranscript(scrollMode);
+    if (flagSheetState) {
+      const sheetBlock = currentFlagSheetBlock();
+      const stillAvailable = Array.isArray(sheetBlock?.transcript)
+        && sheetBlock.transcript.some(
+          (message) => Number(message.question_id || 0) === Number(flagSheetState.questionId)
+            && !message.flagged,
+        );
+      if (!stillAvailable) {
+        closeFlagSheet();
+      } else {
+        syncFlagSheetState();
+      }
+    }
+    if (guardrailSheetState) {
+      const objective = currentObjectiveForGuardrailSheet();
+      if (!objective) {
+        closeGuardrailSheet();
+      } else {
+        if (objectiveSheetObjective) {
+          objectiveSheetObjective.textContent = `${objective.code} ${objective.text}`;
+        }
+        const currentGuidance = String(objective.assistant_guidance || "").trim();
+        if (objectiveSheetExistingWrap) {
+          objectiveSheetExistingWrap.hidden = !currentGuidance;
+        }
+        if (objectiveSheetExisting) {
+          objectiveSheetExisting.textContent = currentGuidance;
+        }
+        syncGuardrailSheetState();
+      }
+    }
     syncComposerInputFromState();
     syncComposerState();
     updateComposerClearance();
@@ -1751,13 +2168,14 @@ if (previewRoot && previewDataNode) {
   async function postPreviewAction(action, payload = null, options = {}) {
     const block = currentBlock();
     if (!block) {
-      return;
+      return false;
     }
     setStatus("");
     clearWaqDraftTimer();
     waqDraftRequestId += 1;
     clearWaqAlignmentLoading();
     setComposerDisabled(true);
+    let succeeded = false;
     try {
       const responsePromise = fetch(actionUrl(block.id, action), {
         method: "POST",
@@ -1781,8 +2199,12 @@ if (previewRoot && previewDataNode) {
       activeBlockId = String(data.preview.active_block_id || block.id);
       clearAnsweredQuestionSelections();
       renderPreview(options.scrollMode || "bottom");
+      succeeded = true;
     } catch (error) {
       setStatus(error.message || "Unable to update right now.");
+      if (typeof options.onError === "function") {
+        options.onError(error);
+      }
     } finally {
       setComposerDisabled(false);
       if (options.focusComposer) {
@@ -1790,6 +2212,7 @@ if (previewRoot && previewDataNode) {
       }
       syncComposerState();
     }
+    return succeeded;
   }
 
   async function sendCourseChatQuestion(questionText, { clearComposer = false, focusComposer = true, closeSidebarOnMobile = false } = {}) {
@@ -1975,6 +2398,67 @@ if (previewRoot && previewDataNode) {
   });
 
   previewRoot.addEventListener("click", (event) => {
+    const objectiveMenuTrigger = event.target.closest("[data-preview-objective-menu-trigger='true']");
+    if (objectiveMenuTrigger && previewRoot.contains(objectiveMenuTrigger)) {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleObjectiveMenu(objectiveMenuTrigger.closest("[data-preview-objective-menu]"));
+      return;
+    }
+
+    const objectiveGenerateButton = event.target.closest("[data-preview-objective-question-type]");
+    if (objectiveGenerateButton && previewRoot.contains(objectiveGenerateButton)) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (requestInFlight || objectiveGenerateButton.disabled) {
+        return;
+      }
+      const block = currentBlock();
+      const objectiveId = Number(objectiveGenerateButton.dataset.objectiveId || 0);
+      const questionType = objectiveGenerateButton.dataset.previewObjectiveQuestionType || "";
+      closeObjectiveMenus();
+      input?.blur();
+      if (block) {
+        setQuizLoading(block.id, true);
+        renderTranscript();
+      }
+      void (async () => {
+        try {
+          await postPreviewAction(
+            "quiz",
+            {
+              question_type: questionType,
+              learning_objective_id: objectiveId,
+              force_new: true,
+            },
+            { minDurationMs: 2000, scrollMode: "question" },
+          );
+        } finally {
+          if (block) {
+            setQuizLoading(block.id, false);
+            renderTranscript("preserve");
+          }
+        }
+      })();
+      return;
+    }
+
+    const objectiveGuardrailButton = event.target.closest("[data-preview-objective-guardrail='true']");
+    if (objectiveGuardrailButton && previewRoot.contains(objectiveGuardrailButton)) {
+      event.preventDefault();
+      event.stopPropagation();
+      const block = currentBlock();
+      const objectiveId = Number(objectiveGuardrailButton.dataset.objectiveId || 0);
+      const objective = Array.isArray(block?.learning_objectives)
+        ? block.learning_objectives.find((item) => Number(item.id || 0) === objectiveId)
+        : null;
+      closeObjectiveMenus();
+      if (objective) {
+        openGuardrailSheet(objective);
+      }
+      return;
+    }
+
     const metricButton = event.target.closest("[data-preview-metric-button='true']");
     if (!metricButton || !previewRoot.contains(metricButton) || metricButton.disabled) {
       return;
@@ -1987,6 +2471,58 @@ if (previewRoot && previewDataNode) {
     );
   });
 
+  flagSheetScrim?.addEventListener("click", () => {
+    closeFlagSheet();
+  });
+
+  flagSheetCloseButton?.addEventListener("click", () => {
+    closeFlagSheet();
+  });
+
+  flagOnlyButton?.addEventListener("click", () => {
+    void submitFlagSheet({ saveCorrection: false });
+  });
+
+  flagSaveButton?.addEventListener("click", () => {
+    void submitFlagSheet({ saveCorrection: true });
+  });
+
+  flagInstructionInput?.addEventListener("input", () => {
+    if (!flagSheetError?.hidden) {
+      setFlagSheetError("");
+    }
+  });
+
+  objectiveSheetScrim?.addEventListener("click", () => {
+    closeGuardrailSheet();
+  });
+
+  objectiveSheetCloseButton?.addEventListener("click", () => {
+    closeGuardrailSheet();
+  });
+
+  objectiveSheetSaveButton?.addEventListener("click", () => {
+    void submitGuardrailSheet();
+  });
+
+  objectiveGuardrailInput?.addEventListener("input", () => {
+    if (!objectiveSheetError?.hidden) {
+      setGuardrailSheetError("");
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && flagSheetState) {
+      closeFlagSheet();
+    }
+    if (event.key === "Escape" && guardrailSheetState) {
+      closeGuardrailSheet();
+    }
+    if (event.key === "Escape") {
+      closeObjectiveMenus();
+    }
+  });
+
   sidebarToggle?.addEventListener("click", () => {
     toggleSidebar();
   });
@@ -1996,6 +2532,12 @@ if (previewRoot && previewDataNode) {
   });
 
   document.addEventListener("click", (event) => {
+    if (isTeacherPreview) {
+      const objectiveMenuTarget = event.target instanceof Element ? event.target.closest("[data-preview-objective-menu]") : null;
+      if (!objectiveMenuTarget) {
+        closeObjectiveMenus();
+      }
+    }
     if (!quizMenu || !isQuizMenuOpen()) {
       return;
     }

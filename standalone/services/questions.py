@@ -9,11 +9,12 @@ from django.utils import timezone
 from openai import OpenAI
 
 from standalone.models import ContentChunk, Course, CourseBlock, LearningObjective, QuestionBankItem
+from standalone.services.guidance import build_generation_guidance_prompt
 from standalone.services.numeric_questions import (
     NumericQuestionRequestError,
     NumericQuestionValidationError,
     build_numeric_question_payload,
-    chunk_has_numeric_signal,
+    supports_local_numeric_mcq,
 )
 
 
@@ -67,6 +68,20 @@ WAQ_FALLBACK_STEM_TEMPLATES = (
 )
 
 FURTHER_STUDY_QUESTION_COUNT = 3
+LATEX_GREEK_REPLACEMENTS = {
+    "alpha": "α",
+    "beta": "β",
+    "gamma": "γ",
+    "delta": "δ",
+    "epsilon": "ε",
+    "theta": "θ",
+    "lambda": "λ",
+    "mu": "μ",
+    "pi": "π",
+    "sigma": "σ",
+    "phi": "φ",
+    "omega": "ω",
+}
 STUDY_FOCUS_ACTION_VERBS = (
     "explain",
     "describe",
@@ -228,6 +243,19 @@ CODING_LANGUAGE_REFERENCE_PATTERNS = {
     "html": (r"\bhtml\b",),
     "css": (r"\bcss\b",),
 }
+
+LITERAL_UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})")
+
+
+def _decode_literal_unicode_escapes(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        codepoint = match.group(1) or match.group(2)
+        try:
+            return chr(int(codepoint, 16))
+        except (TypeError, ValueError):
+            return match.group(0)
+
+    return LITERAL_UNICODE_ESCAPE_RE.sub(replace, str(text or ""))
 
 
 def _keyword_set(text: str) -> set[str]:
@@ -521,7 +549,7 @@ def _coding_signal_for_chunk(chunk: ContentChunk) -> dict[str, str]:
 
 
 def normalize_explanation_text(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    cleaned = re.sub(r"\s+", " ", _decode_literal_unicode_escapes(text).strip())
     if not cleaned:
         return ""
 
@@ -552,12 +580,78 @@ def normalize_explanation_text(text: str) -> str:
     return cleaned
 
 
+def _replace_numeric_formula_clause(match: re.Match[str]) -> str:
+    verb = str(match.group("verb") or "").lower()
+    where_clause = re.sub(r"\s+", " ", str(match.group("where") or "").strip(" ,"))
+    replacement = "are described by the key relationship" if verb == "are" else "is described by the key relationship"
+    if where_clause:
+        replacement += f", where {where_clause}"
+    return replacement
+
+
+def _normalize_numeric_explanation_prose(text: str) -> str:
+    cleaned = _decode_literal_unicode_escapes(text).strip()
+    if not cleaned:
+        return ""
+
+    for name, symbol in LATEX_GREEK_REPLACEMENTS.items():
+        cleaned = re.sub(rf"\\{name}(?=[A-Za-z])", rf"\\{name} ", cleaned)
+        cleaned = re.sub(rf"\\{name}\b", symbol, cleaned)
+
+    cleaned = re.sub(
+        (
+            r"\b(?P<verb>is|are)\s+given(?:\s+by)?\s+(?:the\s+)?"
+            r"(?P<label>formula|equation|relationship|law)\s+"
+            r"(?P<formula>[^.?!]*?)"
+            r"(?:,\s*where\s+(?P<where>[^.?!]+))?"
+            r"(?=[.?!]|$)"
+        ),
+        _replace_numeric_formula_clause,
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\b(?:the\s+)?(?:formula|equation|relationship|law)\s+[A-Za-z][^=]{0,20}=\s*[^.?!]+(?=[.?!]|$)",
+        "the key relationship",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return normalize_explanation_text(cleaned)
+
+
+def normalize_numeric_explanation_text(text: str) -> str:
+    source = _decode_literal_unicode_escapes(str(text or "").strip())
+    if not source:
+        return ""
+
+    formula_marker = "\n\nFormula:\n"
+    worked_solution_marker = "\n\nWorked solution:\n"
+    if formula_marker not in source:
+        return _normalize_numeric_explanation_prose(source)
+
+    prose_text, remainder = source.split(formula_marker, 1)
+    formula_text = remainder
+    worked_solution_text = ""
+    if worked_solution_marker in remainder:
+        formula_text, worked_solution_text = remainder.split(worked_solution_marker, 1)
+
+    normalized_parts = []
+    normalized_prose = _normalize_numeric_explanation_prose(prose_text)
+    if normalized_prose:
+        normalized_parts.append(normalized_prose)
+
+    normalized_parts.append(f"Formula:\n{formula_text.strip()}")
+    if worked_solution_text.strip():
+        normalized_parts.append(f"Worked solution:\n{worked_solution_text.strip()}")
+    return "\n\n".join(normalized_parts)
+
+
 def _normalize_answer_list(items) -> list[str]:
     normalized = []
     if not isinstance(items, list):
         return normalized
     for item in items:
-        cleaned = str(item).strip()
+        cleaned = _decode_literal_unicode_escapes(str(item).strip())
         if cleaned and cleaned not in normalized:
             normalized.append(cleaned)
     return normalized
@@ -594,7 +688,7 @@ def _fallback_written_answer_keywords(*texts: str, limit: int = 6) -> list[str]:
 
 
 def _normalize_study_question(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" -")
+    cleaned = re.sub(r"\s+", " ", _decode_literal_unicode_escapes(text)).strip(" -")
     if not cleaned:
         return ""
     cleaned = cleaned.rstrip(".!")
@@ -966,17 +1060,18 @@ def _numeric_question_payload(
     avoid_question_angles: list[str] | None = None,
 ) -> dict:
     objective_text = objective.text if objective else ""
-    signal_text = f"{objective_text}\n{chunk.text}"
-    if not chunk_has_numeric_signal(signal_text):
+    if not supports_local_numeric_mcq(objective_text, chunk.text):
         raise NumericQuestionValidationError(
-            "This block does not contain enough quantitative signal for a numerical MCQ."
+            "This learning objective is not suitable for a locally evaluable numerical MCQ."
         )
     objective_text = objective_text or "this block"
+    teacher_guidance = build_generation_guidance_prompt(chunk.course, objective=objective)
     result = build_numeric_question_payload(
         chunk.text,
         objective_text,
         distractor_count,
         avoid_question_angles=avoid_question_angles,
+        teacher_guidance=teacher_guidance,
     )
     _trace_generation(
         "numeric_candidate_validated",
@@ -987,6 +1082,138 @@ def _numeric_question_payload(
         correct_answer=(result.payload.get("correct_answers") or [""])[0],
     )
     return result.payload
+
+
+NUMERIC_GENERATION_ATTEMPT_LIMIT = 3
+
+
+def _numeric_avoidance_note_from_payload(payload: dict) -> str:
+    stem = re.sub(r"\s+", " ", str(payload.get("stem", "")).strip())
+    correct_answers = payload.get("correct_answers") or []
+    correct_answer = str(correct_answers[0]).strip() if correct_answers else ""
+    numeric_metadata = payload.get("numeric_metadata") if isinstance(payload.get("numeric_metadata"), dict) else {}
+    note = f'- Avoid another numerical MCQ like "{stem[:180]}"'
+    if correct_answer:
+        note += f' with answer focus "{correct_answer[:120]}"'
+    formula_focus = _numeric_formula_focus_from_metadata(numeric_metadata)
+    if formula_focus:
+        note += f' and formula focus "{formula_focus[:120]}"'
+    return note
+
+
+def _is_retryable_numeric_validation_error(error_message: str) -> bool:
+    lowered = str(error_message or "").lower()
+    return (
+        "repeated numerical mcq" in lowered
+        or "duplicated an existing question" in lowered
+        or "gives away the method too explicitly" in lowered
+        or "stem template must contain each supplied variable" in lowered
+        or "calculation expression must use at least one supplied variable" in lowered
+        or "calculation expression contains unsupported syntax" in lowered
+    )
+
+
+def _retry_notes_for_numeric_validation_error(error_message: str, payload: dict | None = None) -> list[str]:
+    lowered = str(error_message or "").lower()
+    notes: list[str] = []
+    if payload is not None:
+        notes.append(_numeric_avoidance_note_from_payload(payload))
+    if "stem template must contain each supplied variable" in lowered:
+        notes.append("- In stem_template, include every variable exactly once using Python-style placeholders like {distance}.")
+        notes.append("- Do not place raw numeric givens directly in the stem outside those placeholders.")
+    if "calculation expression must use at least one supplied variable" in lowered:
+        notes.append("- calculation_expression must reference one or more declared variable names directly and must not be a constant.")
+    if "calculation expression contains unsupported syntax" in lowered:
+        notes.append("- Keep calculation_expression to supported arithmetic only: +, -, *, /, //, %, **, parentheses, and allowed functions.")
+    if "repeated numerical mcq" in lowered or "duplicated an existing question" in lowered:
+        notes.append("- Retry with a materially different numerical scenario, target quantity, and formula focus.")
+    if "gives away the method too explicitly" in lowered:
+        notes.append("- Do not name the exact formula or arithmetic step in the stem; let the student infer it from the scenario.")
+    if not notes:
+        notes.append("- Retry with a materially different numerical scenario, target quantity, and formula focus.")
+    return notes
+
+
+def _block_has_suitable_numeric_path(
+    block: CourseBlock,
+    candidate_chunks: list[ContentChunk],
+    objectives_by_block: dict[int, list[LearningObjective]],
+) -> bool:
+    objectives = list(objectives_by_block.get(block.pk, []))
+    if not objectives:
+        return any(supports_local_numeric_mcq("", chunk.text) for chunk in candidate_chunks)
+    return any(
+        supports_local_numeric_mcq(objective.text, chunk.text)
+        for objective in objectives
+        for chunk in candidate_chunks
+    )
+
+
+def _attempt_numeric_generation_for_chunk(
+    *,
+    course: Course,
+    block: CourseBlock,
+    chunk: ContentChunk,
+    objective: LearningObjective | None,
+    distractor_count: int,
+    existing_hashes: set[str],
+    avoid_question_angles: list[str] | None = None,
+) -> tuple[QuestionBankItem | None, QuestionBankItem | None, str]:
+    numeric_avoid_question_angles = list(avoid_question_angles or [])
+    last_generation_error = ""
+
+    for _attempt_index in range(NUMERIC_GENERATION_ATTEMPT_LIMIT):
+        payload = None
+        try:
+            payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
+                chunk,
+                objective,
+                distractor_count,
+                QuestionBankItem.QuestionType.NUM,
+                avoid_question_angles=numeric_avoid_question_angles,
+            )
+            practice, validation = _create_question_pair(
+                course=course,
+                block=block,
+                chunk=chunk,
+                objective=objective,
+                question_type=effective_question_type,
+                payload=payload,
+                existing_hashes=existing_hashes,
+                expected_coding_language=expected_coding_language,
+            )
+        except NumericQuestionRequestError as exc:
+            last_generation_error = str(exc)
+            _trace_generation(
+                "numeric_request_failed",
+                error=last_generation_error,
+                objective=(objective.text if objective else ""),
+                chunk_id=chunk.pk,
+            )
+            break
+        except NumericQuestionValidationError as exc:
+            last_generation_error = str(exc)
+            _trace_generation(
+                "numeric_validation_failed",
+                error=last_generation_error,
+                objective=(objective.text if objective else ""),
+                chunk_id=chunk.pk,
+            )
+            if _is_retryable_numeric_validation_error(last_generation_error):
+                numeric_avoid_question_angles.extend(_retry_notes_for_numeric_validation_error(last_generation_error, payload))
+                continue
+            break
+
+        if practice is not None and validation is not None:
+            return practice, validation, ""
+
+        last_generation_error = "The generated numerical MCQ duplicated an existing question."
+        if payload is not None:
+            numeric_avoid_question_angles.append(_numeric_avoidance_note_from_payload(payload))
+        if not _is_retryable_numeric_validation_error(last_generation_error):
+            break
+
+    return None, None, last_generation_error
 
 
 def _payload_for_generation_attempt(
@@ -1128,6 +1355,7 @@ def _openai_question_payload(
     objective_text = objective.text if objective else "this block"
     is_maq = question_type == QuestionBankItem.QuestionType.MAQ
     is_waq = question_type == QuestionBankItem.QuestionType.WAQ
+    teacher_guidance = build_generation_guidance_prompt(chunk.course, objective=objective)
     avoidance_prompt = ""
     if avoid_question_angles:
         avoidance_prompt = "\nAvoid repeating the wording, answer angle, or explanation focus of these recent questions:\n" + "\n".join(
@@ -1164,6 +1392,8 @@ Learning objective:
 
 Source text:
 {chunk.text}
+
+{teacher_guidance}
 """.strip()
     response = client.responses.create(
         model=settings.OPENAI_MODEL,
@@ -1192,6 +1422,7 @@ def _openai_coding_question_payload(
     language_label = _coding_language_label(language)
     is_maq = question_type == QuestionBankItem.QuestionType.MAQ
     is_waq = question_type == QuestionBankItem.QuestionType.WAQ
+    teacher_guidance = build_generation_guidance_prompt(chunk.course, objective=objective)
     avoidance_prompt = ""
     if avoid_question_angles:
         avoidance_prompt = "\nAvoid repeating the wording, answer angle, or explanation focus of these recent questions:\n" + "\n".join(
@@ -1235,6 +1466,8 @@ Detected snippet:
 
 Source text:
 {chunk.text}
+
+{teacher_guidance}
 """.strip()
     response = client.responses.create(
         model=settings.OPENAI_MODEL,
@@ -1290,6 +1523,8 @@ def _ordered_generation_objectives(
     block: CourseBlock,
     objectives_by_block: dict[int, list[LearningObjective]],
     preferred_objective_ids: list[int] | None = None,
+    *,
+    strict_preferred_objectives: bool = False,
 ) -> list[LearningObjective]:
     ordered_objectives = list(objectives_by_block.get(block.pk, []))
     if not preferred_objective_ids:
@@ -1298,6 +1533,8 @@ def _ordered_generation_objectives(
     preferred_lookup = {objective_id: index for index, objective_id in enumerate(preferred_objective_ids)}
     preferred = [objective for objective in ordered_objectives if objective.pk in preferred_lookup]
     preferred.sort(key=lambda objective: preferred_lookup[objective.pk])
+    if strict_preferred_objectives:
+        return preferred
     remaining = [objective for objective in ordered_objectives if objective.pk not in preferred_lookup]
     return [*preferred, *remaining]
 
@@ -1607,9 +1844,9 @@ def _normalize_generated_payload(
         for distractor in _normalize_answer_list(payload.get("distractors"))
         if distractor not in correct_answers
     ][:distractor_count]
-    stem = str(payload.get("stem", "")).strip()
-    explanation = str(payload.get("explanation", "")).strip()
-    difficulty = str(payload.get("difficulty", "core")).strip() or "core"
+    stem = _decode_literal_unicode_escapes(str(payload.get("stem", "")).strip())
+    explanation = _decode_literal_unicode_escapes(str(payload.get("explanation", "")).strip())
+    difficulty = _decode_literal_unicode_escapes(str(payload.get("difficulty", "core")).strip()) or "core"
     numeric_metadata = payload.get("numeric_metadata") if isinstance(payload.get("numeric_metadata"), dict) else {}
     is_coding_question = bool(payload.get("is_coding_question"))
     coding_language = _normalize_coding_language(str(payload.get("coding_language", "")))
@@ -1812,6 +2049,7 @@ def generate_question_pair_for_block(
     *,
     existing_hashes: set[str] | None = None,
     preferred_objective_ids: list[int] | None = None,
+    strict_preferred_objectives: bool = False,
     question_type: str | None = None,
     raise_generation_errors: bool = False,
 ):
@@ -1848,11 +2086,19 @@ def generate_question_pair_for_block(
     coding_generation_due = _coding_question_generation_due(course) and bool(coding_signals)
     total_chunks_by_block: dict[int, int] = defaultdict(int)
     chunk_index_by_block: dict[int, int] = defaultdict(int)
-    question_type = (
-        question_type
-        if question_type in {QuestionBankItem.QuestionType.MCQ, QuestionBankItem.QuestionType.NUM, QuestionBankItem.QuestionType.MAQ, QuestionBankItem.QuestionType.WAQ}
-        else _preferred_generated_question_type(course)
-    )
+    explicit_question_type = question_type if question_type in {
+        QuestionBankItem.QuestionType.MCQ,
+        QuestionBankItem.QuestionType.NUM,
+        QuestionBankItem.QuestionType.MAQ,
+        QuestionBankItem.QuestionType.WAQ,
+    } else None
+    question_type = explicit_question_type or _preferred_generated_question_type(course)
+    if (
+        question_type == QuestionBankItem.QuestionType.NUM
+        and explicit_question_type is None
+        and not _block_has_suitable_numeric_path(block, candidate_chunks, objectives_by_block)
+    ):
+        question_type = _preferred_standard_generated_question_type(course)
     last_generation_error = ""
     _trace_generation(
         "question_generation_requested",
@@ -1867,13 +2113,19 @@ def generate_question_pair_for_block(
     for chunk in candidate_chunks:
         total_chunks_by_block[chunk.block_id] += 1
 
-    ordered_objectives = _ordered_generation_objectives(block, objectives_by_block, preferred_objective_ids)
+    ordered_objectives = _ordered_generation_objectives(
+        block,
+        objectives_by_block,
+        preferred_objective_ids,
+        strict_preferred_objectives=strict_preferred_objectives,
+    )
     if question_type in {QuestionBankItem.QuestionType.NUM, QuestionBankItem.QuestionType.WAQ}:
         ordered_objectives = sorted(
             ordered_objectives,
             key=lambda objective: question_type_objective_counts.get(objective.pk, 0),
         )
     attempted_chunk_ids: set[int] = set()
+    found_numeric_candidate_path = False
 
     for objective in ordered_objectives:
         avoid_question_angles = _recent_question_avoidance_notes(block, question_type, objective=objective)
@@ -1891,8 +2143,10 @@ def generate_question_pair_for_block(
                 chunk
                 for chunk in ranked_chunks
                 if ((not target_keywords) or (_keyword_set(chunk.text) & target_keywords))
-                and chunk_has_numeric_signal(f"{objective.text}\n{chunk.text}")
+                and supports_local_numeric_mcq(objective.text, chunk.text)
             ]
+            if ranked_chunks:
+                found_numeric_candidate_path = True
         if coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM:
             ranked_chunks = [chunk for chunk in ranked_chunks if chunk.pk in coding_signals] or ranked_chunks
         for chunk in ranked_chunks:
@@ -1901,62 +2155,43 @@ def generate_question_pair_for_block(
                 (objective.pk, chunk.pk),
                 0,
             )
-            coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
-            try:
-                payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
-                    chunk,
-                    objective,
-                    course.config.distractor_count,
-                    question_type,
-                    coding_signal=coding_signal,
-                    avoid_question_angles=avoid_question_angles,
-                    question_variant_index=question_variant_index,
-                )
-                practice, validation = _create_question_pair(
+            if question_type == QuestionBankItem.QuestionType.NUM:
+                practice, validation, numeric_error = _attempt_numeric_generation_for_chunk(
                     course=course,
                     block=block,
                     chunk=chunk,
                     objective=objective,
-                    question_type=effective_question_type,
-                    payload=payload,
+                    distractor_count=course.config.distractor_count,
                     existing_hashes=existing_hashes,
-                    expected_coding_language=expected_coding_language,
+                    avoid_question_angles=avoid_question_angles,
                 )
-            except NumericQuestionRequestError as exc:
-                last_generation_error = str(exc)
-                _trace_generation(
-                    "numeric_request_failed",
-                    error=last_generation_error,
-                    objective=(objective.text if objective else ""),
-                    chunk_id=chunk.pk,
-                )
-                if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
-                    raise QuestionGenerationError(
-                        f"Could not generate a numerical MCQ for this block. {last_generation_error}"
-                    ) from exc
-                return None, None
-            except NumericQuestionValidationError as exc:
-                last_generation_error = str(exc)
-                _trace_generation(
-                    "numeric_validation_failed",
-                    error=last_generation_error,
-                    objective=(objective.text if objective else ""),
-                    chunk_id=chunk.pk,
-                )
-                if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
-                    raise QuestionGenerationError(
-                        f"Could not generate a numerical MCQ for this block. {last_generation_error}"
-                    ) from exc
-                return None, None
+                if practice is not None and validation is not None:
+                    return practice, validation
+                if numeric_error:
+                    last_generation_error = numeric_error
+                continue
+            coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
+            payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
+                chunk,
+                objective,
+                course.config.distractor_count,
+                question_type,
+                coding_signal=coding_signal,
+                avoid_question_angles=avoid_question_angles,
+                question_variant_index=question_variant_index,
+            )
+            practice, validation = _create_question_pair(
+                course=course,
+                block=block,
+                chunk=chunk,
+                objective=objective,
+                question_type=effective_question_type,
+                payload=payload,
+                existing_hashes=existing_hashes,
+                expected_coding_language=expected_coding_language,
+            )
             if practice is not None and validation is not None:
                 return practice, validation
-            if question_type == QuestionBankItem.QuestionType.NUM:
-                last_generation_error = "The generated numerical MCQ duplicated an existing question."
-                if raise_generation_errors:
-                    raise QuestionGenerationError(
-                        f"Could not generate a numerical MCQ for this block. {last_generation_error}"
-                    )
-                return None, None
 
     for chunk in candidate_chunks:
         if chunk.pk in attempted_chunk_ids:
@@ -1975,70 +2210,55 @@ def generate_question_pair_for_block(
                 objective_keywords.get(objective.pk, set())
                 and not (_keyword_set(chunk.text) & objective_keywords.get(objective.pk, set()))
             )
-            or not chunk_has_numeric_signal(f"{objective.text}\n{chunk.text}")
+            or not supports_local_numeric_mcq(objective.text, chunk.text)
         ):
             continue
+        if question_type == QuestionBankItem.QuestionType.NUM:
+            found_numeric_candidate_path = True
         question_variant_index = question_type_objective_counts.get(int(objective.pk) if objective else 0, 0) + question_type_objective_chunk_counts.get(
             ((objective.pk if objective else None), chunk.pk),
             0,
         )
-        coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
-        try:
-            payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
-                chunk,
-                objective,
-                course.config.distractor_count,
-                question_type,
-                coding_signal=coding_signal,
-                avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
-                question_variant_index=question_variant_index,
-            )
-            practice, validation = _create_question_pair(
+        if question_type == QuestionBankItem.QuestionType.NUM:
+            practice, validation, numeric_error = _attempt_numeric_generation_for_chunk(
                 course=course,
                 block=block,
                 chunk=chunk,
                 objective=objective,
-                question_type=effective_question_type,
-                payload=payload,
+                distractor_count=course.config.distractor_count,
                 existing_hashes=existing_hashes,
-                expected_coding_language=expected_coding_language,
+                avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
             )
-        except NumericQuestionRequestError as exc:
-            last_generation_error = str(exc)
-            _trace_generation(
-                "numeric_request_failed",
-                error=last_generation_error,
-                objective=(objective.text if objective else ""),
-                chunk_id=chunk.pk,
-            )
-            if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
-                raise QuestionGenerationError(
-                    f"Could not generate a numerical MCQ for this block. {last_generation_error}"
-                ) from exc
-            return None, None
-        except NumericQuestionValidationError as exc:
-            last_generation_error = str(exc)
-            _trace_generation(
-                "numeric_validation_failed",
-                error=last_generation_error,
-                objective=(objective.text if objective else ""),
-                chunk_id=chunk.pk,
-            )
-            if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
-                raise QuestionGenerationError(
-                    f"Could not generate a numerical MCQ for this block. {last_generation_error}"
-                ) from exc
-            return None, None
+            if practice is not None and validation is not None:
+                return practice, validation
+            if numeric_error:
+                last_generation_error = numeric_error
+            continue
+        coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
+        payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
+            chunk,
+            objective,
+            course.config.distractor_count,
+            question_type,
+            coding_signal=coding_signal,
+            avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
+            question_variant_index=question_variant_index,
+        )
+        practice, validation = _create_question_pair(
+            course=course,
+            block=block,
+            chunk=chunk,
+            objective=objective,
+            question_type=effective_question_type,
+            payload=payload,
+            existing_hashes=existing_hashes,
+            expected_coding_language=expected_coding_language,
+        )
         if practice is not None and validation is not None:
             return practice, validation
-        if question_type == QuestionBankItem.QuestionType.NUM:
-            last_generation_error = "The generated numerical MCQ duplicated an existing question."
-            if raise_generation_errors:
-                raise QuestionGenerationError(
-                    f"Could not generate a numerical MCQ for this block. {last_generation_error}"
-                )
-            return None, None
 
+    if question_type == QuestionBankItem.QuestionType.NUM and not found_numeric_candidate_path and not last_generation_error:
+        last_generation_error = "This block does not contain a suitable calculation-style path for a numerical MCQ."
     if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
         detail = f" {last_generation_error}" if last_generation_error else ""
         raise QuestionGenerationError(
@@ -2073,6 +2293,12 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
             chunk_index_by_block[chunk.block_id] - 1,
             total_chunks_by_block[chunk.block_id],
         )
+        if (
+            question_type == QuestionBankItem.QuestionType.NUM
+            and objective is not None
+            and not supports_local_numeric_mcq(objective.text, chunk.text)
+        ):
+            question_type = _preferred_standard_generated_question_type(course)
         coding_signal = _coding_signal_for_chunk(chunk) if (_coding_question_generation_due(course) and question_type != QuestionBankItem.QuestionType.NUM) else {"language": "", "snippet": ""}
         preferred_coding_language = preferred_coding_language_for_block(chunk.block, [chunk], {chunk.pk: coding_signal} if coding_signal["language"] else {})
         if preferred_coding_language and coding_signal["language"] and coding_signal["language"] != preferred_coding_language:

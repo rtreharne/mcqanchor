@@ -30,6 +30,7 @@ from standalone.forms import (
     CourseImportUploadForm,
     CourseTitleInlineForm,
     EmailOrUsernameAuthenticationForm,
+    LearningObjectiveGuidanceInlineForm,
     LearningObjectiveInlineForm,
     MagicLinkCreateForm,
     MagicLinkEmailForm,
@@ -52,6 +53,7 @@ from standalone.models import (
     CourseMagicLink,
     Enrollment,
     LearningObjective,
+    LearningObjectiveCorrection,
     PracticeAttempt,
     PracticeAttemptQuestion,
     QuestionBankItem,
@@ -79,6 +81,7 @@ from standalone.services.preview import (
     draft_preview_written_answer,
     flag_preview_question,
     request_preview_quiz,
+    save_preview_objective_guardrail,
     send_preview_chat_message,
     serialize_preview_state,
     submit_preview_answer,
@@ -521,7 +524,7 @@ def _course_detail_context(course: Course):
                 distinct=True,
             ),
         )
-        .prefetch_related("assets", "learning_objectives")
+        .prefetch_related("assets", "learning_objectives", "learning_objectives__corrections__created_by")
     )
     _attach_course_practice_average(course)
     magic_links = list(course.magic_links.all())
@@ -931,13 +934,27 @@ def student_preview(request: HttpRequest, course_id: int) -> HttpResponse:
 def _preview_payload(request: HttpRequest, course: Course, block: CourseBlock, action: str) -> JsonResponse:
     if action == "quiz":
         requested_question_type = None
+        preferred_objective_id = None
+        force_new = False
         if request.body and "application/json" in (request.content_type or ""):
             try:
                 data = json.loads(request.body.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
             requested_question_type = str(data.get("question_type", "")).strip().lower() or None
-        payload = request_preview_quiz(request, course, block, requested_question_type=requested_question_type)
+            preferred_objective_id = int(data.get("learning_objective_id") or 0) or None
+            force_new = bool(data.get("force_new"))
+        try:
+            payload = request_preview_quiz(
+                request,
+                course,
+                block,
+                requested_question_type=requested_question_type,
+                preferred_objective_id=preferred_objective_id,
+                force_new=force_new,
+            )
+        except ValueError as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         return JsonResponse({"ok": True, "preview": payload})
 
     try:
@@ -967,7 +984,29 @@ def _preview_payload(request: HttpRequest, course: Course, block: CourseBlock, a
         return JsonResponse({"ok": True, "preview": payload})
     if action == "flag":
         question_id = int(data.get("question_id") or 0)
-        payload = flag_preview_question(request, course, block, question_id)
+        try:
+            payload = flag_preview_question(
+                request,
+                course,
+                block,
+                question_id,
+                instruction=str(data.get("instruction", "")).strip(),
+                learning_objective_id=int(data.get("learning_objective_id") or 0) or None,
+            )
+        except ValueError as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+        return JsonResponse({"ok": True, "preview": payload})
+    if action == "guardrail":
+        try:
+            payload = save_preview_objective_guardrail(
+                request,
+                course,
+                block,
+                int(data.get("learning_objective_id") or 0),
+                str(data.get("instruction", "")).strip(),
+            )
+        except ValueError as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         return JsonResponse({"ok": True, "preview": payload})
     raise Http404
 
@@ -988,12 +1027,36 @@ def update_learning_objective(request: HttpRequest, objective_id: int) -> JsonRe
     objective = get_object_or_404(LearningObjective.objects.select_related("course"), pk=objective_id)
     _teacher_course_or_404(request.user, objective.course_id)
 
-    form = LearningObjectiveInlineForm(request.POST, instance=objective)
+    field_name = "assistant_guidance" if "assistant_guidance" in request.POST else "text"
+    form_class = {
+        "text": LearningObjectiveInlineForm,
+        "assistant_guidance": LearningObjectiveGuidanceInlineForm,
+    }.get(field_name)
+    if form_class is None:
+        raise Http404
+
+    form = form_class(request.POST, instance=objective)
     if not form.is_valid():
-        return JsonResponse({"ok": False, "errors": form.errors.get("text", form.non_field_errors())}, status=400)
+        return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
 
     updated_objective = form.save()
-    return JsonResponse({"ok": True, "value": updated_objective.text, "display_value": updated_objective.text})
+    value = getattr(updated_objective, field_name)
+    display_value = value or ("No assistant guidance yet." if field_name == "assistant_guidance" else "")
+    return JsonResponse({"ok": True, "value": value, "display_value": display_value, "raw_value": value})
+
+
+@login_required
+def delete_learning_objective_correction(request: HttpRequest, correction_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    correction = get_object_or_404(
+        LearningObjectiveCorrection.objects.select_related("learning_objective__course"),
+        pk=correction_id,
+    )
+    course = _teacher_course_or_404(request.user, correction.learning_objective.course_id)
+    correction.delete()
+    messages.success(request, "Correction note deleted.")
+    return redirect("standalone:course_detail", course.pk)
 
 
 @login_required

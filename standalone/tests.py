@@ -28,6 +28,7 @@ from standalone.models import (
     Enrollment,
     EnrollmentQuestionState,
     LearningObjective,
+    LearningObjectiveCorrection,
     PracticeAttempt,
     PracticeAttemptQuestion,
     PracticeMessage,
@@ -44,7 +45,14 @@ from standalone.tasks import run_block_creation_processing, run_block_regenerati
 from standalone.services.content import chunk_text, summarize_block_content
 from standalone.services.pdf_import import analyze_pdf_chapters, _select_outline_items, _toc_boundaries_from_ocr
 from standalone.services.preview import PREVIEW_SESSION_KEY
-from standalone.services.numeric_questions import NumericQuestionValidationError, _evaluate_expression
+from standalone.services.numeric_questions import (
+    NumericQuestionValidationError,
+    _evaluate_expression,
+    _expression_to_tex,
+    _normalize_text as normalize_numeric_text,
+    _validate_numeric_candidate,
+    normalize_numeric_answer_text,
+)
 from standalone.services.validation_flow import _pick_locked_questions, current_room_code
 from standalone.services.questions import (
     QuestionGenerationError,
@@ -53,6 +61,8 @@ from standalone.services.questions import (
     fallback_further_study_questions,
     further_study_questions_for_question,
     generate_question_pair_for_block,
+    normalize_explanation_text,
+    normalize_numeric_explanation_text,
 )
 
 
@@ -231,6 +241,118 @@ class StandaloneFlowTests(TestCase):
             summary, _objectives = summarize_block_content("Membrane transport regulates cell exchange.", max_items=3)
 
         self.assertEqual(summary, "Membrane transport.")
+
+    def test_normalize_explanation_text_decodes_literal_unicode_escapes(self):
+        explanation = normalize_explanation_text(
+            r"When two waves differ by \u03B4, the resultant amplitude is A_resultant = A * sqrt(2 + 2 cos \u03B4)."
+        )
+
+        self.assertIn("δ", explanation)
+        self.assertNotIn(r"\u03B4", explanation)
+
+    def test_numeric_normalize_text_decodes_literal_unicode_escapes(self):
+        normalized = normalize_numeric_text(r"A_resultant = A * sqrt(2 + 2 cos \u03B4)")
+
+        self.assertEqual(normalized, "A_resultant = A * sqrt(2 + 2 cos δ)")
+
+    def test_normalize_numeric_answer_text_uses_standard_form_for_scientific_notation(self):
+        formatted = normalize_numeric_answer_text(5e-8, "m", 2)
+
+        self.assertEqual(formatted, "5 × 10⁻⁸ m")
+
+    def test_normalize_numeric_answer_text_keeps_moderate_values_in_decimal_form(self):
+        formatted = normalize_numeric_answer_text(3000, "s", 3)
+
+        self.assertEqual(formatted, "3000 s")
+
+    def test_normalize_numeric_explanation_text_cleans_inline_formula_prose(self):
+        explanation = normalize_numeric_explanation_text(
+            (
+                r"The number of undecayed nuclei at time t is given law N = N0 × e(− \lambdat), "
+                r"where \lambda is the decay constant. This formula models the exact number of nuclei "
+                r"remaining after time t."
+                "\n\nFormula:\n\\[N0 \\times exp(-decay\\ constant \\times time)\\]"
+                "\n\nWorked solution:\n\\[5000 \\times exp(-0.693 \\times 2) = 1.25 \\times 10^{3}\\,\\mathrm{nuclei}\\]"
+            )
+        )
+
+        self.assertIn("is described by the key relationship, where λ is the decay constant.", explanation)
+        self.assertNotIn(r"\lambdat", explanation)
+        self.assertIn("Formula:\n\\[N0 \\times exp(-decay\\ constant \\times time)\\]", explanation)
+        self.assertIn("Worked solution:\n\\[5000 \\times exp(-0.693 \\times 2)", explanation)
+
+    def test_validate_numeric_candidate_rejects_giveaway_formula_stem(self):
+        with self.assertRaisesMessage(
+            NumericQuestionValidationError,
+            "Numeric question stem gives away the method too explicitly.",
+        ):
+            _validate_numeric_candidate(
+                {
+                    "question_type": "num",
+                    "stem_template": (
+                        "A Geiger-Muller tube measures a background radiation count rate of {background_count} counts per minute. "
+                        "When placed near a radioactive sample, the total count rate recorded is {total_count} counts per minute. "
+                        "Count rate = total count rate - background count rate. Calculate the net count rate from the radioactive sample."
+                    ),
+                    "variables": [
+                        {"name": "background_count", "value": 15, "unit": "counts per minute"},
+                        {"name": "total_count", "value": 120, "unit": "counts per minute"},
+                    ],
+                    "calculation_expression": "total_count - background_count",
+                    "answer_unit": "counts per minute",
+                    "significant_figures": 2,
+                    "explanation": "Net count rate is found by subtracting the background contribution from the total count rate.",
+                    "difficulty": "foundation",
+                    "further_study_questions": [
+                        "Why must background radiation be accounted for in count-rate measurements?",
+                        "How does source distance affect the recorded count rate?",
+                        "Why do repeated count measurements fluctuate?",
+                    ],
+                },
+                3,
+                "Measure and interpret count rate from a radioactive source.",
+                "Geiger-Muller tubes record total counts that include background radiation.",
+            )
+
+    def test_validate_numeric_candidate_uses_standard_form_in_worked_solution(self):
+        payload, _validation = _validate_numeric_candidate(
+            {
+                "question_type": "num",
+                "stem_template": (
+                    "In a Young double-slit experiment, the distance between the two slits is {slit_separation} m, "
+                    "the screen distance is {screen_distance} m, and the fringe spacing is {fringe_spacing} m. "
+                    "Calculate the wavelength."
+                ),
+                "variables": [
+                    {"name": "slit_separation", "value": 0.00025, "unit": "m"},
+                    {"name": "screen_distance", "value": 2, "unit": "m"},
+                    {"name": "fringe_spacing", "value": 0.004, "unit": "m"},
+                ],
+                "calculation_expression": "(slit_separation * fringe_spacing) / screen_distance",
+                "answer_unit": "m",
+                "significant_figures": 2,
+                "explanation": "The wavelength is slit separation times fringe spacing divided by screen distance.",
+                "difficulty": "core",
+                "further_study_questions": [
+                    "How does fringe spacing change when the slit separation changes?",
+                    "Why does increasing the screen distance affect the fringe spacing?",
+                    "How can the wavelength be inferred from an interference pattern?",
+                ],
+            },
+            3,
+            "Calculate wavelength in a Young double-slit experiment.",
+            "Young double-slit interference links slit separation, fringe spacing, screen distance, and wavelength.",
+        )
+
+        self.assertEqual(payload["correct_answer"], "5 × 10⁻⁷ m")
+        self.assertIn(r"= 5 \times 10^{-7}\,\mathrm{m}", payload["worked_solution_tex"])
+
+    def test_numeric_expression_to_tex_renders_degree_angles_without_radians_label(self):
+        _result, tree, _used_variables = _evaluate_expression("cos(radians(60))", {})
+        tex = _expression_to_tex(tree, {})
+
+        self.assertEqual(tex, r"\cos\left(60^{\circ}\right)")
+        self.assertNotIn("radians", tex)
 
     @override_settings(OPENAI_API_KEY="")
     def test_pdf_import_detects_chapters_from_page_headings(self):
@@ -521,6 +643,19 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(numeric_response.status_code, 200)
         course.config.refresh_from_db()
         self.assertEqual(course.config.numeric_ratio_percent, 30)
+
+        guidance_response = self.client.post(
+            reverse("standalone:update_course_config_field", args=[course.pk, "assistant_guidance"]),
+            {"assistant_guidance": " KS2 mathematics for 10-11 year olds.\n\nUse concrete, age-appropriate language. "},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(guidance_response.status_code, 200)
+        course.config.refresh_from_db()
+        self.assertEqual(
+            course.config.assistant_guidance,
+            "KS2 mathematics for 10-11 year olds.\n\nUse concrete, age-appropriate language.",
+        )
 
         checkbox_response = self.client.post(
             reverse("standalone:update_course_config_field", args=[course.pk, "show_validation_feedback_immediately"]),
@@ -1053,6 +1188,7 @@ class StandaloneFlowTests(TestCase):
         self.assertNotContains(response, "Allowed emails")
         self.assertContains(response, "Validation")
         self.assertContains(response, "Create validation session")
+        self.assertContains(response, "Assistant guidance")
         self.assertNotContains(response, "Regenerate descriptions and objectives")
         self.assertNotContains(response, "Generate question bank")
         self.assertNotContains(response, "Approve all draft questions")
@@ -1460,6 +1596,77 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(response.json()["display_value"], "Explain how membrane proteins regulate transport")
         objective.refresh_from_db()
         self.assertEqual(objective.text, "Explain how membrane proteins regulate transport")
+
+    def test_inline_learning_objective_guidance_update_saves_multiline_text(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", summary="Original summary", order=1)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile("notes.txt", b"Block notes", content_type="text/plain"),
+            original_filename="notes.txt",
+            extension=".txt",
+            include_in_generation=True,
+            processing_status=ContentAsset.ProcessingStatus.PROCESSED,
+            extracted_text="Describe Roman numerals.",
+        )
+        objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Calculate Roman numerals",
+        )
+        self.client.force_login(self.teacher)
+        response = self.client.post(
+            reverse("standalone:update_learning_objective", args=[objective.pk]),
+            {"assistant_guidance": " Use Roman numerals directly in stems.\n\nAvoid switching back to Arabic numerals unless comparing forms. "},
+        )
+        self.assertEqual(response.status_code, 200)
+        objective.refresh_from_db()
+        self.assertEqual(
+            objective.assistant_guidance,
+            "Use Roman numerals directly in stems.\n\nAvoid switching back to Arabic numerals unless comparing forms.",
+        )
+        self.assertEqual(
+            response.json()["display_value"],
+            "Use Roman numerals directly in stems.\n\nAvoid switching back to Arabic numerals unless comparing forms.",
+        )
+
+    def test_learning_objective_correction_can_be_deleted_from_course_dashboard(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", summary="Original summary", order=1)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile("notes.txt", b"Block notes", content_type="text/plain"),
+            original_filename="notes.txt",
+            extension=".txt",
+            include_in_generation=True,
+            processing_status=ContentAsset.ProcessingStatus.PROCESSED,
+            extracted_text="Describe Roman numerals.",
+        )
+        objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Calculate Roman numerals",
+        )
+        correction = LearningObjectiveCorrection.objects.create(
+            learning_objective=objective,
+            created_by=self.teacher,
+            instruction="Use Roman numerals directly in stems.",
+            question_stem_snapshot="What is XIV as a number?",
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:delete_learning_objective_correction", args=[correction.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(LearningObjectiveCorrection.objects.filter(pk=correction.pk).exists())
 
     def test_learning_objective_can_move_down_and_resequence(self):
         course = self.create_course()
@@ -2447,6 +2654,56 @@ print(result)""",
         self.assertIn("do not ask students to manually compute the value of a single variable", prompt)
         self.assertIn("keep the question entirely in R", prompt)
 
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_question_generation_prompt_includes_course_and_objective_guidance(self):
+        course = self.create_course()
+        course.config.assistant_guidance = "Audience is 10-11 years old. Keep wording age-appropriate."
+        course.config.save(update_fields=["assistant_guidance", "updated_at"])
+        block, _asset, objective, _chunk = self.create_preview_content_block(course)
+        objective.assistant_guidance = "Use Roman numerals directly when this objective is being tested."
+        objective.save(update_fields=["assistant_guidance", "updated_at"])
+        LearningObjectiveCorrection.objects.create(
+            learning_objective=objective,
+            created_by=self.teacher,
+            instruction="Do not switch all examples back into Arabic numerals.",
+            question_stem_snapshot="Which Arabic numeral matches XIV?",
+        )
+
+        prompts = []
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "Why might a cell membrane need selective transport?",
+                    "correct_answers": ["It controls what enters and leaves the cell."],
+                    "distractors": ["It stores DNA.", "It makes proteins.", "It replaces the nucleus."],
+                    "further_study_questions": [
+                        "Why does selective transport matter?",
+                        "How would you explain membrane transport simply?",
+                        "What mistake should I avoid about membranes?",
+                    ],
+                    "explanation": "Selective transport helps the cell regulate exchange.",
+                    "difficulty": "core",
+                }
+            )
+
+        def capture_create(*args, **kwargs):
+            prompts.append(kwargs["input"][1]["content"][0]["text"])
+            return DummyResponse()
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = capture_create
+            practice, _validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MCQ)
+
+        self.assertIsNotNone(practice)
+        self.assertTrue(prompts)
+        prompt = prompts[0]
+        self.assertIn("Audience is 10-11 years old", prompt)
+        self.assertIn("Use Roman numerals directly", prompt)
+        self.assertIn("Do not switch all examples back into Arabic numerals", prompt)
+        self.assertIn("Example flagged question: Which Arabic numeral matches XIV?", prompt)
+
     def test_preview_filters_out_mismatched_coding_language_questions(self):
         course = self.create_course()
         block, _asset, objective, chunk = self.create_coding_content_block(
@@ -2794,6 +3051,172 @@ print(result)""",
         )
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_numeric_prompt_includes_teacher_guidance(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.assistant_guidance = "Use language suitable for 10-11 year olds."
+        course.config.save(
+            update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "assistant_guidance", "updated_at"]
+        )
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        objective.assistant_guidance = "Use Roman numerals in the stem when testing Roman numeral fluency."
+        objective.save(update_fields=["assistant_guidance", "updated_at"])
+        LearningObjectiveCorrection.objects.create(
+            learning_objective=objective,
+            created_by=self.teacher,
+            instruction="Avoid adult exam phrasing.",
+            question_stem_snapshot="Using the formula above, convert XIV into an integer.",
+        )
+        chunk.text = "Calculate the speed when a body travels 20 m in 4 s."
+        chunk.save(update_fields=["text"])
+
+        captured_prompt = ""
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": "num",
+                    "stem_template": "An object travels {distance} m in {time} s. Calculate its speed.",
+                    "variables": [
+                        {"name": "distance", "value": 20, "unit": "m"},
+                        {"name": "time", "value": 4, "unit": "s"},
+                    ],
+                    "calculation_expression": "distance / time",
+                    "answer_unit": "m/s",
+                    "significant_figures": 2,
+                    "explanation": "Speed is distance divided by time.",
+                    "difficulty": "core",
+                    "further_study_questions": [
+                        "How does changing time affect speed?",
+                        "When should average speed be used?",
+                        "How can speed be represented graphically?",
+                    ],
+                }
+            )
+
+        def fake_create(*args, **kwargs):
+            nonlocal captured_prompt
+            captured_prompt = kwargs["input"][0]["content"][0]["text"]
+            return DummyResponse()
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = fake_create
+            practice, _validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM)
+
+        self.assertIsNotNone(practice)
+        self.assertIn("Use language suitable for 10-11 year olds", captured_prompt)
+        self.assertIn("Use Roman numerals in the stem", captured_prompt)
+        self.assertIn("Avoid adult exam phrasing", captured_prompt)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_numeric_generation_rejects_roman_numeral_conversion_before_openai(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, _asset, objective, chunk = self.create_preview_content_block(course, title="Historical dates")
+        objective.text = "Convert years between standard numbers and Roman numerals"
+        objective.save(update_fields=["text"])
+        chunk.text = "Pupils convert years between standard numbers and Roman numerals when reading inscriptions and dates."
+        chunk.save(update_fields=["text"])
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            with self.assertRaises(QuestionGenerationError) as exc:
+                generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM, raise_generation_errors=True)
+
+        mock_client.assert_not_called()
+        self.assertIn("suitable calculation-style path", str(exc.exception))
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_auto_generation_falls_back_from_numeric_when_block_is_not_numeric_schema_friendly(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, _asset, objective, chunk = self.create_preview_content_block(course, title="Roman numerals")
+        objective.text = "Convert years between standard numbers and Roman numerals"
+        objective.save(update_fields=["text"])
+        chunk.text = "Pupils convert years between standard numbers and Roman numerals in historical examples."
+        chunk.save(update_fields=["text"])
+
+        practice, validation = generate_question_pair_for_block(block)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(practice.question_type, QuestionBankItem.QuestionType.MCQ)
+        self.assertEqual(validation.question_type, QuestionBankItem.QuestionType.MCQ)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_numeric_generation_retries_after_placeholder_validation_failure(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, _asset, objective, chunk = self.create_preview_content_block(course, title="Motion")
+        objective.text = "Calculate average speed from distance and time"
+        objective.save(update_fields=["text"])
+        chunk.text = "Calculate average speed when distance and time are known."
+        chunk.save(update_fields=["text"])
+
+        invalid_payload = {
+            "question_type": "num",
+            "stem_template": "A runner travels 120 m in 12 s. Calculate the average speed.",
+            "variables": [
+                {"name": "distance", "value": 120, "unit": "m"},
+                {"name": "time", "value": 12, "unit": "s"},
+            ],
+            "calculation_expression": "distance / time",
+            "answer_unit": "m/s",
+            "significant_figures": 2,
+            "explanation": "Average speed is distance divided by time.",
+            "difficulty": "core",
+            "further_study_questions": [
+                "How does changing the time affect the speed?",
+                "How would you find the time from speed and distance?",
+                "When is average speed different from instantaneous speed?",
+            ],
+        }
+        valid_payload = {
+            "question_type": "num",
+            "stem_template": "A runner travels {distance} m in {time} s. Calculate the average speed.",
+            "variables": [
+                {"name": "distance", "value": 120, "unit": "m"},
+                {"name": "time", "value": 12, "unit": "s"},
+            ],
+            "calculation_expression": "distance / time",
+            "answer_unit": "m/s",
+            "significant_figures": 2,
+            "explanation": "Average speed is distance divided by time.",
+            "difficulty": "core",
+            "further_study_questions": [
+                "How does changing the time affect the speed?",
+                "How would you find the time from speed and distance?",
+                "When is average speed different from instantaneous speed?",
+            ],
+        }
+
+        class DummyResponse:
+            def __init__(self, payload):
+                self.output_text = json.dumps(payload)
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = [
+                DummyResponse(invalid_payload),
+                DummyResponse(valid_payload),
+            ]
+            practice, validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(mock_client.return_value.responses.create.call_count, 2)
+        self.assertEqual(practice.question_type, QuestionBankItem.QuestionType.NUM)
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_generate_question_pair_rejects_repeated_numeric_angle(self):
         course = self.create_course()
         course.config.numeric_ratio_percent = 100
@@ -2821,7 +3244,7 @@ print(result)""",
             is_numerical=True,
             numeric_metadata={
                 "output_snapshot": {
-                    "formula_tex": r"v = \frac{d}{t}",
+                    "formula_tex": r"\frac{\mathrm{distance}}{\mathrm{time}}",
                 }
             },
         )
@@ -2854,6 +3277,171 @@ print(result)""",
 
         self.assertIsNone(practice)
         self.assertIsNone(validation)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_generate_question_pair_retries_repeated_numeric_angle_and_recovers(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        objective.text = "Calculate speed and acceleration in motion problems"
+        objective.save(update_fields=["text"])
+        chunk.text = "Use distance and time to calculate speed in motion problems."
+        chunk.save(update_fields=["text"])
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=None,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="A cyclist travels 20 m in 4 s. Calculate the average speed.",
+            question_type=QuestionBankItem.QuestionType.NUM,
+            correct_answer="5 m/s",
+            distractors=["4 m/s", "10 m/s", "16 m/s"],
+            explanation="Use \\(v = d/t\\).",
+            question_hash="existing-speed-angle-retry-test",
+            is_numerical=True,
+            numeric_metadata={
+                "output_snapshot": {
+                    "formula_tex": r"\frac{\mathrm{distance}}{\mathrm{time}}",
+                }
+            },
+        )
+
+        class FirstResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": "num",
+                    "stem_template": "A runner covers {distance} m in {time} s. Calculate the average speed.",
+                    "variables": [
+                        {"name": "distance", "value": 24, "unit": "m"},
+                        {"name": "time", "value": 4, "unit": "s"},
+                    ],
+                    "calculation_expression": "distance / time",
+                    "answer_unit": "m/s",
+                    "significant_figures": 2,
+                    "explanation": "Average speed is distance divided by time.",
+                    "difficulty": "core",
+                    "further_study_questions": [
+                        "How does time affect average speed?",
+                        "When is average speed different from instantaneous speed?",
+                        "How can speed be represented graphically?",
+                    ],
+                }
+            )
+
+        class SecondResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": "num",
+                    "stem_template": "A car increases its speed from {initial_speed} m/s to {final_speed} m/s in {time} s. Calculate the average acceleration.",
+                    "variables": [
+                        {"name": "initial_speed", "value": 4, "unit": "m/s"},
+                        {"name": "final_speed", "value": 16, "unit": "m/s"},
+                        {"name": "time", "value": 4, "unit": "s"},
+                    ],
+                    "calculation_expression": "(final_speed - initial_speed) / time",
+                    "answer_unit": "m/s^2",
+                    "significant_figures": 2,
+                    "explanation": "Average acceleration is change in velocity divided by time.",
+                    "difficulty": "core",
+                    "further_study_questions": [
+                        "How does decreasing the time change the acceleration?",
+                        "What is the difference between average and instantaneous acceleration?",
+                        "How is acceleration shown on a velocity-time graph?",
+                    ],
+                }
+            )
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = [FirstResponse(), SecondResponse()]
+            practice, validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(practice.source_chunk_id, chunk.pk)
+        self.assertEqual(practice.correct_answer, "3 m/s^2")
+        self.assertIn("acceleration", practice.stem.lower())
+        self.assertEqual(mock_client.return_value.responses.create.call_count, 2)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_generate_question_pair_retries_giveaway_numeric_stem_and_recovers(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        objective.text = "Measure and interpret count rate from a radioactive source"
+        objective.save(update_fields=["text"])
+        chunk.text = "Geiger-Muller tubes measure count rate from a radioactive source and record background radiation from the environment."
+        chunk.save(update_fields=["text"])
+
+        class FirstResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": "num",
+                    "stem_template": (
+                        "A Geiger-Muller tube measures a background radiation count rate of {background_count} counts per minute. "
+                        "When placed near a radioactive sample, the total count rate recorded is {total_count} counts per minute. "
+                        "Count rate = total count rate - background count rate. Calculate the net count rate from the radioactive sample."
+                    ),
+                    "variables": [
+                        {"name": "background_count", "value": 15, "unit": "counts per minute"},
+                        {"name": "total_count", "value": 120, "unit": "counts per minute"},
+                    ],
+                    "calculation_expression": "total_count - background_count",
+                    "answer_unit": "counts per minute",
+                    "significant_figures": 2,
+                    "explanation": "Net count rate is found by subtracting the background contribution from the total count rate.",
+                    "difficulty": "foundation",
+                    "further_study_questions": [
+                        "Why must background radiation be accounted for in count-rate measurements?",
+                        "How does source distance affect the recorded count rate?",
+                        "Why do repeated count measurements fluctuate?",
+                    ],
+                }
+            )
+
+        class SecondResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": "num",
+                    "stem_template": (
+                        "A Geiger-Muller tube records {background_count} counts per minute with no source nearby. "
+                        "After a radioactive sample is introduced, the reading rises to {total_count} counts per minute. "
+                        "What count rate is due to the sample alone?"
+                    ),
+                    "variables": [
+                        {"name": "background_count", "value": 15, "unit": "counts per minute"},
+                        {"name": "total_count", "value": 120, "unit": "counts per minute"},
+                    ],
+                    "calculation_expression": "total_count - background_count",
+                    "answer_unit": "counts per minute",
+                    "significant_figures": 2,
+                    "explanation": "The sample contribution is the extra count rate above the background level.",
+                    "difficulty": "foundation",
+                    "further_study_questions": [
+                        "Why does background radiation vary from place to place?",
+                        "How would shielding affect the measured count rate?",
+                        "Why are repeated count measurements averaged?",
+                    ],
+                }
+            )
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = [FirstResponse(), SecondResponse()]
+            practice, validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(practice.question_type, QuestionBankItem.QuestionType.NUM)
+        self.assertNotIn("Count rate =", practice.stem)
+        self.assertTrue(practice.correct_answer.endswith("counts per minute"))
+        self.assertEqual(mock_client.return_value.responses.create.call_count, 2)
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_generate_question_pair_returns_none_when_numeric_openai_json_is_malformed(self):
@@ -4386,6 +4974,47 @@ print(result)""",
         self.assertEqual(len(assistant_messages[-1]["further_study_questions"]), 3)
         self.assertTrue(all(question.endswith("?") for question in assistant_messages[-1]["further_study_questions"]))
 
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_student_preview_chat_prompt_includes_matched_guidance(self):
+        course = self.create_course()
+        course.config.assistant_guidance = "Audience is 10-11 years old. Keep explanations concrete."
+        course.config.save(update_fields=["assistant_guidance", "updated_at"])
+        block, _, objective, _ = self.create_preview_content_block(course, title="Roman Numerals")
+        objective.text = "Calculate Roman numerals"
+        objective.assistant_guidance = "Use Roman numerals directly in examples and answers."
+        objective.save(update_fields=["text", "assistant_guidance", "updated_at"])
+        LearningObjectiveCorrection.objects.create(
+            learning_objective=objective,
+            created_by=self.teacher,
+            instruction="Do not turn every example back into plain Arabic numerals.",
+            question_stem_snapshot="What is XIV as a number?",
+        )
+        self.client.force_login(self.teacher)
+
+        prompts = []
+
+        class DummyResponse:
+            output_text = "Roman numerals use letters such as X, V, and I to represent values."
+
+        def capture_create(*args, **kwargs):
+            prompts.append(kwargs["input"][1]["content"][0]["text"])
+            return DummyResponse()
+
+        with patch("standalone.services.preview.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = capture_create
+            response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "chat"]),
+                data='{"question": "Can you explain Roman numerals?"}',
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(prompts)
+        prompt = prompts[0]
+        self.assertIn("Audience is 10-11 years old", prompt)
+        self.assertIn("Use Roman numerals directly in examples and answers", prompt)
+        self.assertIn("Do not turn every example back into plain Arabic numerals", prompt)
+
     def test_student_preview_chat_warns_on_inappropriate_message(self):
         course = self.create_course()
         block, _, _, _ = self.create_preview_content_block(course)
@@ -4838,6 +5467,204 @@ print(result)""",
         next_quiz = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"])).json()["preview"]
         next_question = [message for message in next_quiz["blocks"][0]["transcript"] if message["kind"] == "question"][-1]["question_id"]
         self.assertEqual(next_question, follow_on.pk)
+
+    def test_teacher_preview_flag_can_save_correction_note_against_learning_objective(self):
+        course = self.create_course()
+        block, _, objective, _ = self.create_preview_content_block(course)
+        validation = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Bad Roman numerals question? (validation)",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="flag-correction-validation-hash",
+        )
+        practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Bad Roman numerals question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Flag explanation.",
+            question_hash="flag-correction-practice-hash",
+            linked_question=validation,
+        )
+        validation.linked_question = practice
+        validation.save(update_fields=["linked_question", "updated_at"])
+        follow_on = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Follow on question after correction?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Follow on explanation.",
+            question_hash="follow-on-after-correction-hash",
+        )
+
+        self.client.force_login(self.teacher)
+        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        flag_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "flag"]),
+            data=json.dumps(
+                {
+                    "question_id": practice.pk,
+                    "instruction": "Use Roman numerals directly in stems for this objective.",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(flag_response.status_code, 200)
+        self.assertEqual(LearningObjectiveCorrection.objects.count(), 1)
+        correction = LearningObjectiveCorrection.objects.get()
+        self.assertEqual(correction.learning_objective, objective)
+        self.assertEqual(correction.question, practice)
+        self.assertEqual(correction.created_by, self.teacher)
+        self.assertEqual(correction.question_stem_snapshot, practice.stem)
+        self.assertIn("Use Roman numerals directly", correction.instruction)
+        self.assertEqual(QuestionFlag.objects.count(), 0)
+        next_quiz = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"])).json()["preview"]
+        next_question = [message for message in next_quiz["blocks"][0]["transcript"] if message["kind"] == "question"][-1]["question_id"]
+        self.assertEqual(next_question, follow_on.pk)
+
+    def test_teacher_preview_flag_requires_objective_when_saving_correction_for_unmapped_question(self):
+        course = self.create_course()
+        block, _, _objective, _ = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=None,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Unmapped practice question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Flag explanation.",
+            question_hash="flag-correction-unmapped-hash",
+        )
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "flag"]),
+            data=json.dumps(
+                {
+                    "question_id": question.pk,
+                    "instruction": "Use Roman numerals directly in stems for this objective.",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(LearningObjectiveCorrection.objects.count(), 0)
+
+    def test_teacher_preview_objective_regeneration_creates_requested_type_for_specific_objective(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        validation = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            stem="Generated validation question?",
+            correct_answer="A",
+            additional_correct_answers=["B"],
+            distractors=["C", "D"],
+            explanation="Validation explanation.",
+            question_hash="objective-regeneration-validation-hash",
+        )
+        practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            stem="Generated practice question?",
+            correct_answer="A",
+            additional_correct_answers=["B"],
+            distractors=["C", "D"],
+            explanation="Practice explanation.",
+            question_hash="objective-regeneration-practice-hash",
+            linked_question=validation,
+        )
+        validation.linked_question = practice
+        validation.save(update_fields=["linked_question", "updated_at"])
+
+        self.client.force_login(self.teacher)
+        with patch(
+            "standalone.services.preview.generate_question_pair_for_block",
+            return_value=(practice, validation),
+        ) as generate_mock:
+            response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+                data=json.dumps(
+                    {
+                        "question_type": QuestionBankItem.QuestionType.MAQ,
+                        "learning_objective_id": objective.pk,
+                        "force_new": True,
+                    }
+                ),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        generate_mock.assert_called_once_with(
+            block,
+            preferred_objective_ids=[objective.pk],
+            strict_preferred_objectives=True,
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            raise_generation_errors=True,
+        )
+        transcript = response.json()["preview"]["blocks"][0]["transcript"]
+        latest_question = [message for message in transcript if message["kind"] == "question"][-1]
+        self.assertEqual(latest_question["question_id"], practice.pk)
+        self.assertEqual(latest_question["learning_objective_id"], objective.pk)
+        self.assertEqual(latest_question["question_type"], QuestionBankItem.QuestionType.MAQ)
+
+    def test_teacher_preview_guardrail_action_appends_objective_guidance(self):
+        course = self.create_course()
+        block, _asset, objective, _chunk = self.create_preview_content_block(course)
+        objective.assistant_guidance = "Use age-appropriate language."
+        objective.save(update_fields=["assistant_guidance", "updated_at"])
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "guardrail"]),
+            data=json.dumps(
+                {
+                    "learning_objective_id": objective.pk,
+                    "instruction": "Use Roman numerals in stems and answer choices for this objective.",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        objective.refresh_from_db()
+        self.assertEqual(
+            objective.assistant_guidance,
+            "Use age-appropriate language.\n\nUse Roman numerals in stems and answer choices for this objective.",
+        )
+        last_message = response.json()["preview"]["blocks"][0]["transcript"][-1]
+        self.assertEqual(last_message["kind"], "text")
+        self.assertIn("student app", last_message["text"])
 
     def test_validation_booking_enforces_capacity_for_digital_session(self):
         course = self.create_course()

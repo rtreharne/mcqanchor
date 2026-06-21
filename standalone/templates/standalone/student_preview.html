@@ -163,6 +163,59 @@
       </div>
     </form>
   </section>
+  <div class="preview-flag-sheet" hidden data-preview-flag-sheet>
+    <button class="preview-flag-sheet-scrim" type="button" hidden data-preview-flag-sheet-scrim aria-label="Close correction panel"></button>
+    <section class="preview-flag-sheet-panel" aria-labelledby="preview-flag-sheet-title" role="dialog" aria-modal="true">
+      <div class="preview-flag-sheet-head">
+        <div>
+          <p class="preview-eyebrow">Teacher correction</p>
+          <h3 id="preview-flag-sheet-title">Flag question</h3>
+        </div>
+        <button class="preview-flag-sheet-close" type="button" aria-label="Close correction panel" data-preview-flag-sheet-close>&#10005;</button>
+      </div>
+      <p class="preview-flag-sheet-copy">Flag this question only, or save a correction note against the learning objective to steer future generation.</p>
+      <p class="preview-flag-sheet-question" data-preview-flag-sheet-question></p>
+      <div class="preview-flag-sheet-field" hidden data-preview-flag-objective-field>
+        <label for="preview-flag-objective-select">Learning objective</label>
+        <select id="preview-flag-objective-select" data-preview-flag-objective-select></select>
+      </div>
+      <div class="preview-flag-sheet-field">
+        <label for="preview-flag-instruction">Correction note</label>
+        <textarea id="preview-flag-instruction" rows="4" maxlength="700" placeholder="E.g. Use Roman numerals in stems and answer choices for this objective." data-preview-flag-instruction></textarea>
+      </div>
+      <p class="preview-flag-sheet-error" hidden data-preview-flag-error></p>
+      <div class="preview-flag-sheet-actions">
+        <button class="button secondary" type="button" data-preview-flag-only>Flag only</button>
+        <button class="button" type="button" data-preview-flag-save>Flag + save correction</button>
+      </div>
+    </section>
+  </div>
+  <div class="preview-objective-sheet" hidden data-preview-objective-sheet>
+    <button class="preview-objective-sheet-scrim" type="button" hidden data-preview-objective-sheet-scrim aria-label="Close guardrail panel"></button>
+    <section class="preview-objective-sheet-panel" aria-labelledby="preview-objective-sheet-title" role="dialog" aria-modal="true">
+      <div class="preview-objective-sheet-head">
+        <div>
+          <p class="preview-eyebrow">Teacher guardrail</p>
+          <h3 id="preview-objective-sheet-title">Add guardrail</h3>
+        </div>
+        <button class="preview-objective-sheet-close" type="button" aria-label="Close guardrail panel" data-preview-objective-sheet-close>&#10005;</button>
+      </div>
+      <p class="preview-objective-sheet-copy">Add an objective-specific rule to steer future question generation here and in the student app.</p>
+      <p class="preview-objective-sheet-objective" data-preview-objective-sheet-objective></p>
+      <div class="preview-objective-sheet-existing" hidden data-preview-objective-sheet-existing-wrap>
+        <span class="preview-objective-sheet-existing-label">Current guardrail</span>
+        <p data-preview-objective-sheet-existing></p>
+      </div>
+      <div class="preview-objective-sheet-field">
+        <label for="preview-objective-guardrail">Guardrail</label>
+        <textarea id="preview-objective-guardrail" rows="5" maxlength="700" placeholder="E.g. Use Roman numerals in stems, worked examples, and distractors for this objective." data-preview-objective-guardrail></textarea>
+      </div>
+      <p class="preview-objective-sheet-error" hidden data-preview-objective-sheet-error></p>
+      <div class="preview-objective-sheet-actions">
+        <button class="button" type="button" data-preview-objective-sheet-save>Save guardrail</button>
+      </div>
+    </section>
+  </div>
 </section>
 {{ preview_state|json_script:"student-preview-data" }}
 {% endblock %}

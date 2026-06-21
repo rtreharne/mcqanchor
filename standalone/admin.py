@@ -14,6 +14,7 @@ from standalone.models import (
     CourseMagicLink,
     Enrollment,
     LearningObjective,
+    LearningObjectiveCorrection,
     NotificationLog,
     PracticeAttempt,
     PracticeAttemptQuestion,
@@ -73,6 +74,7 @@ admin.site.register(BlockConfig)
 admin.site.register(ContentAsset)
 admin.site.register(ContentChunk)
 admin.site.register(LearningObjective)
+admin.site.register(LearningObjectiveCorrection)
 admin.site.register(QuestionBankItem)
 admin.site.register(ValidationPack)
 admin.site.register(ValidationSubmission)

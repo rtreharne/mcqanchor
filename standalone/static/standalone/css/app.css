@@ -841,6 +841,8 @@ button.button[disabled] {
 
 .objective-body {
   min-width: 0;
+  display: grid;
+  gap: 0.7rem;
 }
 
 .objective-code {
@@ -858,6 +860,69 @@ button.button[disabled] {
 
 .objective-text {
   line-height: 1.5;
+}
+
+.objective-guidance-group,
+.objective-corrections {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.objective-guidance-label,
+.objective-corrections-label {
+  margin: 0;
+  color: #5a7596;
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.objective-guidance-text {
+  margin: 0;
+  color: #31506f;
+  line-height: 1.5;
+  font-size: 0.95rem;
+}
+
+.objective-correction-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.objective-correction-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  align-items: start;
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.85rem;
+  background: rgba(246, 251, 255, 0.9);
+  border: 1px solid rgba(23, 48, 82, 0.08);
+}
+
+.objective-correction-copy {
+  min-width: 0;
+}
+
+.objective-correction-copy p,
+.objective-correction-copy span {
+  margin: 0;
+}
+
+.objective-correction-copy p {
+  color: #173052;
+  line-height: 1.45;
+}
+
+.objective-correction-copy span {
+  display: inline-block;
+  margin-top: 0.25rem;
+  color: #6a82a1;
+  font-size: 0.8rem;
 }
 
 .objective-actions {
@@ -1323,6 +1388,10 @@ button.button[disabled] {
   border-radius: 0.75rem;
   background: rgba(246, 251, 255, 0.78);
   transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+.course-setting-cell--full {
+  grid-column: 1 / -1;
 }
 
 .course-setting-cell[data-save-state="saving"] {

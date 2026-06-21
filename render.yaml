@@ -2,9 +2,13 @@ services:
   - type: web
     name: mcq-anchor
     runtime: docker
-    plan: free
+    plan: starter
     region: oregon
     dockerfilePath: ./Dockerfile
+    disk:
+      name: sqlite-data
+      mountPath: /app/data
+      sizeGB: 1
     domains:
       - mcqanchor.com
     healthCheckPath: /

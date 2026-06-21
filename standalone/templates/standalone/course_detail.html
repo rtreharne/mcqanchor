@@ -75,6 +75,12 @@
             <p>Control how students can join and which domains are allowed.</p>
           </div>
           <div class="course-settings-grid">
+            <div class="course-setting-cell course-setting-cell--full" data-course-config-row data-course-config-field="{{ course_config_form.assistant_guidance.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'assistant_guidance' %}">
+              <label class="course-setting-label" for="{{ course_config_form.assistant_guidance.id_for_label }}">{{ course_config_form.assistant_guidance.label }}</label>
+              {{ course_config_form.assistant_guidance }}
+              <p class="course-setting-help">{{ course_config_form.assistant_guidance.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
             <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.self_enrol_enabled.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'self_enrol_enabled' %}">
               <label class="course-setting-label course-setting-label-checkbox" for="{{ course_config_form.self_enrol_enabled.id_for_label }}">
                 {{ course_config_form.self_enrol_enabled }}
@@ -510,6 +516,42 @@
                               tabindex="0"
                               role="button"
                             >{{ objective.text }}</span>
+                            <div class="objective-guidance-group">
+                              <p class="objective-guidance-label">Assistant guidance</p>
+                              <p
+                                class="objective-guidance-text inline-editable"
+                                data-inline-edit
+                                data-inline-url="{% url 'standalone:update_learning_objective' objective.pk %}"
+                                data-inline-field="assistant_guidance"
+                                data-inline-label="Objective assistant guidance"
+                                data-inline-placeholder="No assistant guidance yet."
+                                data-inline-value="{{ objective.assistant_guidance|default:'' }}"
+                                data-inline-multiline="true"
+                                tabindex="0"
+                                role="button"
+                              >{{ objective.assistant_guidance|default:"No assistant guidance yet." }}</p>
+                            </div>
+                            {% if objective.corrections.all %}
+                              <div class="objective-corrections">
+                                <p class="objective-corrections-label">Recent correction notes</p>
+                                <ul class="objective-correction-list">
+                                  {% for correction in objective.corrections.all %}
+                                    <li class="objective-correction-item">
+                                      <div class="objective-correction-copy">
+                                        <p>{{ correction.instruction }}</p>
+                                        <span>{{ correction.created_at|date:"j M Y, H:i" }}{% if correction.created_by %} • {{ correction.created_by.email|default:correction.created_by.username }}{% endif %}</span>
+                                      </div>
+                                      <form method="post" action="{% url 'standalone:delete_learning_objective_correction' correction.pk %}" data-async-refresh data-confirm="Delete this correction note?">
+                                        {% csrf_token %}
+                                        <button class="objective-action-button objective-action-icon objective-action-delete" type="submit" aria-label="Delete correction note" title="Delete">
+                                          <span aria-hidden="true">&#10005;</span>
+                                        </button>
+                                      </form>
+                                    </li>
+                                  {% endfor %}
+                                </ul>
+                              </div>
+                            {% endif %}
                           </div>
                           <div class="objective-actions">
                             <form method="post" action="{% url 'standalone:move_learning_objective' objective.pk 'up' %}" data-async-refresh>

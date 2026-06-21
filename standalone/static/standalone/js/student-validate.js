@@ -322,6 +322,23 @@ if (validationRoot && validationDataNode) {
     ) || null;
   }
 
+  function updateQuestionOverflowState(activeQuestion) {
+    if (!transcriptNode || !activeQuestion || !activeQuestion.isConnected) {
+      return;
+    }
+    const hint = activeQuestion.querySelector(".preview-question-overflow-hint");
+    if (!hint) {
+      return;
+    }
+    const answerRegion = activeQuestion.querySelector(".preview-message-options") || activeQuestion;
+    const transcriptRect = transcriptNode.getBoundingClientRect();
+    const answerRect = answerRegion.getBoundingClientRect();
+    const visibilityTolerance = 6;
+    const isFullyVisible = answerRect.bottom <= transcriptRect.bottom + visibilityTolerance;
+    activeQuestion.classList.toggle("is-overflowing-question", !isFullyVisible);
+    hint.hidden = isFullyVisible;
+  }
+
   function syncQuestionViewport() {
     if (!transcriptNode) {
       return;
@@ -341,22 +358,21 @@ if (validationRoot && validationDataNode) {
 
     const activeQuestion = latestPendingQuestionCard();
     if (activeQuestion) {
-      const hint = activeQuestion.querySelector(".preview-question-overflow-hint");
       const isTallerThanViewport = activeQuestion.offsetHeight > transcriptNode.clientHeight - 16;
       if (mobileChatMedia.matches || isTallerThanViewport) {
         transcriptNode.scrollTo({ top: Math.max(activeQuestion.offsetTop, 0), behavior: "auto" });
-      }
-      const transcriptRect = transcriptNode.getBoundingClientRect();
-      const questionRect = activeQuestion.getBoundingClientRect();
-      const isFullyVisible = (
-        questionRect.top >= transcriptRect.top + 1
-        && questionRect.bottom <= transcriptRect.bottom - 1
-      );
-      if (!isFullyVisible) {
-        activeQuestion.classList.add("is-overflowing-question");
-        if (hint) {
-          hint.hidden = false;
-        }
+        window.requestAnimationFrame(() => {
+          if (latestPendingQuestionCard() === activeQuestion) {
+            updateQuestionOverflowState(activeQuestion);
+          }
+        });
+      } else {
+        updateQuestionOverflowState(activeQuestion);
+        window.requestAnimationFrame(() => {
+          if (latestPendingQuestionCard() === activeQuestion) {
+            updateQuestionOverflowState(activeQuestion);
+          }
+        });
       }
       return;
     }
