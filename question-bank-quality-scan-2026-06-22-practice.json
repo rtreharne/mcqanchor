@@ -1,0 +1,862 @@
+{
+  "scan_scope": {
+    "course_id": null,
+    "bank_type": "practice"
+  },
+  "flagged_count": 47,
+  "scanned_count": 73,
+  "course_count": 3,
+  "flagged_course_ids": [
+    5,
+    7,
+    8
+  ],
+  "flagged_rows": [
+    {
+      "question_id": 501,
+      "linked_question_id": 502,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 11,
+      "block_title": "Printing and Manipulating Text",
+      "learning_objective_id": 110,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is text manipulation important in biological computing when dealing with DNA and protein sequences?",
+      "correct_answer": "It allows programmers to process and analyze biological sequences represented as strings of characters.",
+      "distractors": [
+        "It replaces the need to use programming functions in biological research.",
+        "It enables direct chemical modification of DNA and proteins.",
+        "It converts biological sequences into numerical data for calculations."
+      ]
+    },
+    {
+      "question_id": 507,
+      "linked_question_id": 508,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 11,
+      "block_title": "Printing and Manipulating Text",
+      "learning_objective_id": 112,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is it important to use comments in Python code?",
+      "correct_answer": "To provide explanations of what the code does next to the relevant lines",
+      "distractors": [
+        "To make the computer execute the commented instructions",
+        "To increase the runtime speed of the program",
+        "To replace the need for writing readable code"
+      ]
+    },
+    {
+      "question_id": 533,
+      "linked_question_id": 534,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 122,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Which of the following best describes a file object in programming?",
+      "correct_answer": "A variable representing an open connection to a file that allows reading or writing operations",
+      "distractors": [
+        "The text stored inside a file as a string",
+        "The name of the file used to identify it on the computer",
+        "The physical location of the file on the disk"
+      ]
+    },
+    {
+      "question_id": 535,
+      "linked_question_id": 536,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 123,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why do we interact with file objects primarily through methods rather than using the variable name directly?",
+      "correct_answer": "Because file objects have specialized methods that allow reading and writing operations, unlike simple variables.",
+      "distractors": [
+        "Because file objects cannot be stored in variables.",
+        "Because file objects are immutable like strings.",
+        "Because variable names are only used for numbers and strings."
+      ]
+    },
+    {
+      "question_id": 539,
+      "linked_question_id": 540,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 125,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is the rstrip method used immediately after reading the contents of a file?",
+      "correct_answer": "To remove the trailing newline character from the string read from the file",
+      "distractors": [
+        "To split the file contents into a list of strings",
+        "To convert the file contents into uppercase letters",
+        "To count the number of characters in the file contents"
+      ]
+    },
+    {
+      "question_id": 541,
+      "linked_question_id": 542,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 126,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is it beneficial for a Python program to read from or write to files in a format understood by other programs?",
+      "correct_answer": "It allows Python to integrate smoothly into workflows involving multiple tools by sharing data through compatible file formats.",
+      "distractors": [
+        "It improves the program's execution speed significantly.",
+        "It prevents the file from being corrupted during reading or writing.",
+        "It ensures that the file size is minimized for storage efficiency."
+      ]
+    },
+    {
+      "question_id": 543,
+      "linked_question_id": 544,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 127,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is it important to close a file after reading or writing data in a program?",
+      "correct_answer": "To ensure data integrity and complete all pending file operations",
+      "distractors": [
+        "To free up memory used by the program",
+        "To speed up the program's execution",
+        "To automatically delete the file from the system"
+      ]
+    },
+    {
+      "question_id": 549,
+      "linked_question_id": 550,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 130,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What is the correct order of lines when writing multiple DNA sequences in FASTA format?",
+      "correct_answer": "A header line starting with > followed by the sequence line, repeated for each sequence",
+      "distractors": [
+        "Multiple sequence lines followed by a single header line",
+        "All header lines first, then all sequence lines",
+        "Sequence lines only, without any header lines"
+      ]
+    },
+    {
+      "question_id": 517,
+      "linked_question_id": 518,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 147,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What is the purpose of the return statement in a Python function?",
+      "correct_answer": "It sends back the output value from the function to the place where it was called",
+      "distractors": [
+        "It defines the input arguments the function accepts",
+        "It indicates the start of the function block",
+        "It prints the output value to the screen"
+      ]
+    },
+    {
+      "question_id": 519,
+      "linked_question_id": 520,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 148,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is using functions important when writing complex programs?",
+      "correct_answer": "They break down programs into smaller, manageable parts that are easier to understand.",
+      "distractors": [
+        "They automatically improve the program's execution speed.",
+        "They eliminate the need to write any additional code.",
+        "They force programs to use fewer lines of code overall."
+      ]
+    },
+    {
+      "question_id": 521,
+      "linked_question_id": 522,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 149,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is it beneficial to write a custom function like get_at_content to calculate the AT content of DNA sequences?",
+      "correct_answer": "It allows reuse of code for AT content calculation without rewriting the same lines each time",
+      "distractors": [
+        "It automatically corrects errors in DNA sequences",
+        "It provides built-in visualization of DNA sequences",
+        "It reduces the length of the DNA sequence"
+      ]
+    },
+    {
+      "question_id": 523,
+      "linked_question_id": 524,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 150,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What is the purpose of the return statement in a function?",
+      "correct_answer": "To send back the output value from the function to where it was called",
+      "distractors": [
+        "To stop the function from running further lines of code",
+        "To define the function name and arguments",
+        "To indent the lines inside the function body"
+      ]
+    },
+    {
+      "question_id": 525,
+      "linked_question_id": 526,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 151,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What is the difference between defining a function and calling a function in programming?",
+      "correct_answer": "Defining a function provides the code that specifies what the function does, while calling a function executes that code with specific inputs.",
+      "distractors": [
+        "Defining a function means running it to see the output, while calling a function saves the function for later use.",
+        "Defining a function changes variables outside the function, while calling a function only works with constants.",
+        "Defining a function uses the function’s output, while calling a function creates the function structure."
+      ]
+    },
+    {
+      "question_id": 529,
+      "linked_question_id": 530,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 152,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is it generally a bad practice for a function to use a variable defined outside its own code block without passing it as an argument?",
+      "correct_answer": "Because it creates a dependency on a specific external variable, reducing the function's independence and reusability",
+      "distractors": [
+        "Because it prevents the function from being called multiple times",
+        "Because it makes the function run slower",
+        "Because it causes syntax errors in the code"
+      ]
+    },
+    {
+      "question_id": 531,
+      "linked_question_id": 532,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 153,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What is a key benefit of using keyword arguments when calling a function in Python?",
+      "correct_answer": "They allow the arguments to be passed in any order without affecting the function call",
+      "distractors": [
+        "They require arguments to be passed in a strict order",
+        "They prevent the use of default argument values",
+        "They make the function run faster by optimizing the code"
+      ]
+    },
+    {
+      "question_id": 559,
+      "linked_question_id": 560,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 19,
+      "block_title": "Oscillations",
+      "learning_objective_id": 207,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What is the direction of the acceleration of an object undergoing simple harmonic motion relative to its displacement?",
+      "correct_answer": "The acceleration is always directed opposite to the displacement, towards the equilibrium position.",
+      "distractors": [
+        "The acceleration is always in the same direction as the displacement.",
+        "The acceleration direction is random and does not relate to displacement.",
+        "The acceleration is perpendicular to the displacement."
+      ]
+    },
+    {
+      "question_id": 565,
+      "linked_question_id": 566,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 19,
+      "block_title": "Oscillations",
+      "learning_objective_id": 210,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "How is the angular frequency of an oscillating object related to the angular velocity of an object in circular motion?",
+      "correct_answer": "Angular frequency of oscillation is equivalent to the angular velocity of circular motion and describes the rate of change of phase angle over time.",
+      "distractors": [
+        "Angular frequency is the square of the angular velocity in circular motion.",
+        "Angular frequency is unrelated to angular velocity and only describes linear speed.",
+        "Angular frequency is the reciprocal of the angular velocity in circular motion."
+      ]
+    },
+    {
+      "question_id": 567,
+      "linked_question_id": 568,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 19,
+      "block_title": "Oscillations",
+      "learning_objective_id": 211,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What does the constant total energy in an oscillating system indicate about the relationship between kinetic and potential energy?",
+      "correct_answer": "There is a continuous interchange between kinetic and potential energy while the total energy remains constant",
+      "distractors": [
+        "Kinetic energy remains constant while potential energy fluctuates",
+        "Potential energy remains constant while kinetic energy fluctuates",
+        "Both kinetic and potential energy remain constant throughout the motion"
+      ]
+    },
+    {
+      "question_id": 569,
+      "linked_question_id": 570,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 19,
+      "block_title": "Oscillations",
+      "learning_objective_id": 212,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What is the main difference between light damping and heavy damping in an oscillating system?",
+      "correct_answer": "Light damping causes the amplitude to decrease gradually with an almost unchanged period, while heavy damping causes a significant decrease in amplitude and a slight increase in the period.",
+      "distractors": [
+        "Light damping causes the period to increase significantly, while heavy damping leaves the period unchanged.",
+        "Heavy damping results in no decrease in amplitude, while light damping causes amplitude to decrease rapidly.",
+        "Light damping causes the oscillator to stop immediately, while heavy damping allows oscillations to continue indefinitely."
+      ]
+    },
+    {
+      "question_id": 595,
+      "linked_question_id": 596,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 19,
+      "block_title": "Oscillations",
+      "learning_objective_id": 215,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Which statement best explains knowledge of resonance to real-world including structural vibrations musical instruments radio tuning and medical imagin?",
+      "correct_answer": "Apply knowledge of resonance to real-world examples including structural vibrations, music",
+      "distractors": [
+        "Alternative interpretation 1",
+        "Alternative interpretation 2",
+        "Alternative interpretation 3"
+      ]
+    },
+    {
+      "question_id": 597,
+      "linked_question_id": 598,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 19,
+      "block_title": "Oscillations",
+      "learning_objective_id": 216,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Which statement best explains calculate the maximum speed and acceleration of oscillators and evaluate conditions causing loss of contact in vibrating?",
+      "correct_answer": "Calculate the maximum speed and acceleration of oscillators and evaluate conditions causin",
+      "distractors": [
+        "Alternative interpretation 1",
+        "Alternative interpretation 2",
+        "Alternative interpretation 3"
+      ]
+    },
+    {
+      "question_id": 571,
+      "linked_question_id": 572,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 218,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What defines an electric field in physics?",
+      "correct_answer": "A region around a charged object where other charged objects experience a force",
+      "distractors": [
+        "A region where magnetic forces are strongest",
+        "A path that electrons follow inside a conductor",
+        "A field created only by uncharged objects"
+      ]
+    },
+    {
+      "question_id": 573,
+      "linked_question_id": 574,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 219,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why does the electrostatic force experienced by the charged gold foil decrease as it moves further from the charged ball?",
+      "correct_answer": "Because the electric field created by the ball is stronger closer to the ball and weaker at greater distances",
+      "distractors": [
+        "Because the positive charge on the gold foil diminishes over distance",
+        "Because the gold foil loses its charge when it moves away from the insulator",
+        "Because the force depends on the mass of the gold foil rather than distance"
+      ]
+    },
+    {
+      "question_id": 575,
+      "linked_question_id": 576,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 220,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "How does the electric field strength change as the distance from the centre of a charged metal sphere increases?",
+      "correct_answer": "It decreases following an inverse square law with distance",
+      "distractors": [
+        "It remains constant regardless of the distance",
+        "It increases linearly with distance",
+        "It decreases linearly with the distance"
+      ]
+    },
+    {
+      "question_id": 581,
+      "linked_question_id": 582,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 222,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What is a key difference between the electric field produced by a positive point charge and the gravitational field produced by a point mass?",
+      "correct_answer": "The electric field can be repulsive or attractive depending on the charge, while the gravitational field is always attractive",
+      "distractors": [
+        "Both electric and gravitational fields are always repulsive",
+        "The gravitational field can repel masses, while the electric field only attracts charges",
+        "Electric fields only affect neutral objects, while gravitational fields affect all masses"
+      ]
+    },
+    {
+      "question_id": 583,
+      "linked_question_id": 584,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 223,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What is the vertical acceleration of a charged particle moving in a uniform electric field between parallel plates?",
+      "correct_answer": "It is equal to the electric force divided by the particle's mass.",
+      "distractors": [
+        "It is zero because the plates are uncharged.",
+        "It depends only on the particle's initial vertical velocity.",
+        "It is equal to the horizontal velocity divided by time."
+      ]
+    },
+    {
+      "question_id": 585,
+      "linked_question_id": 586,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 224,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Which statement best explains for plates in a vacuum (or air), experiments show that the capacitance is proportional to the area (c « a) and inversely proportional to the separation between the plates (c 4?",
+      "correct_answer": "Derive and calculate capacitance of parallel plate capacitors considering plate area, sepa",
+      "distractors": [
+        "Alternative interpretation 1",
+        "Alternative interpretation 2",
+        "Alternative interpretation 3"
+      ]
+    },
+    {
+      "question_id": 587,
+      "linked_question_id": 588,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 224,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Which statement best explains across the plates was 1?",
+      "correct_answer": "Derive and calculate capacitance of parallel plate capacitors considering plate area, sepa",
+      "distractors": [
+        "Alternative interpretation 1",
+        "Alternative interpretation 2",
+        "Alternative interpretation 3"
+      ]
+    },
+    {
+      "question_id": 589,
+      "linked_question_id": 590,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 224,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Which statement best explains le worked example: accelerating particles figure 3 shows an arrangement used to accelerate electrons?",
+      "correct_answer": "Derive and calculate capacitance of parallel plate capacitors considering plate area, sepa",
+      "distractors": [
+        "Alternative interpretation 1",
+        "Alternative interpretation 2",
+        "Alternative interpretation 3"
+      ]
+    },
+    {
+      "question_id": 635,
+      "linked_question_id": 636,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 286,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is DNA sequencing particularly useful in constructing accurate evolutionary trees?",
+      "correct_answer": "Because it helps distinguish between shared derived characters and traits arising from convergent evolution",
+      "distractors": [
+        "Because it can estimate the exact age of all fossils",
+        "Because it shows that all biological forms are evolutionary units",
+        "Because it proves that evolution occurs at an inconsistent rate"
+      ]
+    },
+    {
+      "question_id": 639,
+      "linked_question_id": 640,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 287,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "How do microevolution and macroevolution primarily differ in terms of evolutionary time scale?",
+      "correct_answer": "Microevolution occurs over short time periods within species, while macroevolution happens over long time periods affecting multiple species or clades",
+      "distractors": [
+        "Microevolution results in new species, while macroevolution only causes minor genetic changes",
+        "Microevolution involves changes in physical traits only, whereas macroevolution involves changes in behavior only",
+        "Microevolution is driven by environmental factors, but macroevolution is driven solely by genetic mutations"
+      ]
+    },
+    {
+      "question_id": 641,
+      "linked_question_id": 642,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 244,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why was the concept of geological time crucial for the development of evolutionary biology?",
+      "correct_answer": "Because it provided a much longer timeframe than a few thousand years, allowing for the accumulation of biodiversity through evolutionary processes",
+      "distractors": [
+        "Because it disproved the existence of Roman emperors, which influenced biological theories",
+        "Because it showed that historical texts were unreliable for scientific study",
+        "Because it confirmed a literal interpretation of religious texts necessary for evolution"
+      ]
+    },
+    {
+      "question_id": 649,
+      "linked_question_id": 650,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 245,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is DNA sequencing preferred over morphological traits when reconstructing evolutionary relationships among species?",
+      "correct_answer": "DNA sequences provide thousands of characters that help distinguish true homologies from traits arising due to convergent evolution",
+      "distractors": [
+        "Morphological traits are always unreliable due to environmental influences",
+        "DNA sequencing is faster and less expensive than analyzing morphology",
+        "Morphological traits cannot show any evolutionary relationships"
+      ]
+    },
+    {
+      "question_id": 653,
+      "linked_question_id": 654,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 246,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why can relying solely on morphological similarities be misleading when determining evolutionary relationships?",
+      "correct_answer": "Because similar traits can evolve independently in unrelated species due to convergent evolution",
+      "distractors": [
+        "Because all similar-looking traits always indicate close evolutionary relationships",
+        "Because morphological traits never change over evolutionary time",
+        "Because genetic data is always less reliable than morphology"
+      ]
+    },
+    {
+      "question_id": 659,
+      "linked_question_id": 660,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 247,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is it important to consider diverse religious perspectives when discussing evolution in an educational setting?",
+      "correct_answer": "Because students bring different faith views that influence their understanding and acceptance of evolutionary concepts",
+      "distractors": [
+        "Because religious views provide scientific evidence that contradicts evolution",
+        "Because evolution disproves all religious beliefs universally",
+        "Because only one religious perspective accurately aligns with evolutionary theory"
+      ]
+    },
+    {
+      "question_id": 661,
+      "linked_question_id": 662,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 291,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is understanding evolutionary biology important for biomedical research?",
+      "correct_answer": "Because it helps reveal how model organisms relate to humans, enabling insights into human anatomy and drug development",
+      "distractors": [
+        "Because it allows predicting future evolutionary changes in pathogens with certainty",
+        "Because it replaces the need for biochemical studies in understanding human physiology",
+        "Because it focuses primarily on microbial metabolism without relevance to human medicine"
+      ]
+    },
+    {
+      "question_id": 667,
+      "linked_question_id": 668,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 250,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is the concept of the tree of life important when selecting model organisms for biological research?",
+      "correct_answer": "Because it shows shared evolutionary relationships that allow discoveries in model organisms to be applicable to humans",
+      "distractors": [
+        "Because it ranks organisms by their complexity to prioritize the most advanced species",
+        "Because it groups organisms based on their habitat rather than genetic similarity",
+        "Because it excludes organisms that do not have medical relevance"
+      ]
+    },
+    {
+      "question_id": 671,
+      "linked_question_id": 672,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 283,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "What is the primary ethical principle behind choosing the simplest model organism that can adequately answer a biological research question?",
+      "correct_answer": "To minimize animal suffering by using organisms with lower complexity whenever possible",
+      "distractors": [
+        "To ensure faster genetic divergence for better comparative studies",
+        "To increase research costs by using more complex organisms",
+        "To prioritize species with the least genetic homology to humans"
+      ]
+    },
+    {
+      "question_id": 675,
+      "linked_question_id": 676,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 282,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why must researchers be cautious when extrapolating genetic physiology findings from mice to humans?",
+      "correct_answer": "Because genetic and physiological differences can cause discrepancies in how diseases, like inflammation, manifest between mice and humans",
+      "distractors": [
+        "Because mice have a completely different set of genes unrelated to humans",
+        "Because humans do not have inflammatory diseases similar to those in mice",
+        "Because mice research is only useful for studying cancer and not other diseases"
+      ]
+    },
+    {
+      "question_id": 683,
+      "linked_question_id": 684,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 278,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why are model organisms like E. coli used to study fundamental biological processes relevant to humans?",
+      "correct_answer": "Because many molecular processes are conserved across species, allowing insights from simpler organisms to apply to humans",
+      "distractors": [
+        "Because simpler organisms have entirely different molecular pathways that provide new perspectives",
+        "Because model organisms have completely unique cellular structures compared to humans",
+        "Because only model organisms have DNA and RNA that can be studied"
+      ]
+    },
+    {
+      "question_id": 685,
+      "linked_question_id": 686,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 251,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why are model organisms selected to study human traits in biological research?",
+      "correct_answer": "Because they share specific traits with humans while being simpler and more ethical to study",
+      "distractors": [
+        "Because they are more genetically complex than humans",
+        "Because they always provide exact results that directly translate to humans",
+        "Because they are completely unrelated to humans but easier to manipulate"
+      ]
+    },
+    {
+      "question_id": 695,
+      "linked_question_id": 696,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 283,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why are the 'three R's' (replacement, reduction, refinement) important in designing experiments involving vertebrate model organisms?",
+      "correct_answer": "They help minimize animal suffering and the number of animals used while improving the quality of experiments.",
+      "distractors": [
+        "They focus primarily on increasing the number of animals to improve statistical power.",
+        "They encourage using more invasive procedures to better study disease mechanisms.",
+        "They advocate replacing vertebrate models with more complex organisms to obtain human-like results."
+      ]
+    },
+    {
+      "question_id": 689,
+      "linked_question_id": 690,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 266,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why are amino acids considered important in studies investigating the origins of life?",
+      "correct_answer": "Because they are basic building blocks that can be formed through prebiotic chemical processes.",
+      "distractors": [
+        "Because they directly form living cells without additional steps.",
+        "Because they are the only molecules necessary to create life.",
+        "Because they can only be produced by living organisms."
+      ]
+    },
+    {
+      "question_id": 691,
+      "linked_question_id": 692,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 259,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why can molecular clocks be used to estimate the timing of evolutionary events such as the origin of mitochondria?",
+      "correct_answer": "Because the rate of molecular change accumulates steadily over time, allowing divergence to be correlated with elapsed time",
+      "distractors": [
+        "Because molecular clocks measure the physical size changes of cells in fossils",
+        "Because molecular clocks identify changes in environmental oxygen levels",
+        "Because molecular clocks track the fossil record to determine species age"
+      ]
+    },
+    {
+      "question_id": 693,
+      "linked_question_id": 694,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 263,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is the traditional tree of life metaphor limited when representing the evolutionary history of mitochondria?",
+      "correct_answer": "Because mitochondria originated through symbiotic merging and horizontal gene transfer, which do not follow strictly branching lineages",
+      "distractors": [
+        "Because mitochondria evolved independently in multiple unrelated eukaryotic lineages",
+        "Because mitochondria lack their own genetic material and dependence on host cells",
+        "Because mitochondria are more closely related to archaea than bacteria"
+      ]
+    },
+    {
+      "question_id": 697,
+      "linked_question_id": 698,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 261,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why is oxygen-dependent cellular respiration more energy-efficient than anaerobic metabolism?",
+      "correct_answer": "Because oxygen allows more complete breaking of carbon bonds, releasing significantly more energy",
+      "distractors": [
+        "Because anaerobic metabolism requires photosynthesis to occur simultaneously",
+        "Because oxygen-dependent respiration produces less waste products",
+        "Because anaerobic metabolism cannot use glucose as an energy source"
+      ]
+    },
+    {
+      "question_id": 703,
+      "linked_question_id": 704,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 268,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes the correct answer obviously longer than every distractor.",
+      "stem": "Why did atmospheric oxygen only begin to accumulate significantly after the oxidation of certain Earth materials?",
+      "correct_answer": "Because early oxygen produced was consumed by oxidizing abundant reduced minerals like iron before free oxygen could accumulate",
+      "distractors": [
+        "Because photosynthesis did not evolve until after atmospheric oxygen started to accumulate",
+        "Because oxygen was being constantly removed by volcanic emissions",
+        "Because cyanobacteria were not present in the early Earth environment"
+      ]
+    }
+  ]
+}

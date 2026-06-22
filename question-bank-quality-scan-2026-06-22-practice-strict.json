@@ -1,0 +1,700 @@
+{
+  "scan_scope": {
+    "course_id": null,
+    "bank_type": "practice"
+  },
+  "flagged_count": 38,
+  "scanned_count": 78,
+  "course_count": 3,
+  "flagged_course_ids": [
+    5,
+    7,
+    8
+  ],
+  "flagged_rows": [
+    {
+      "question_id": 713,
+      "linked_question_id": 714,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 11,
+      "block_title": "Printing and Manipulating Text",
+      "learning_objective_id": 110,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the significance of text manipulation in biological computing?",
+      "correct_answer": "Explain the significance of text manipulation in biological computing",
+      "distractors": [
+        "It focuses on a related detail in the significance of text manipulation in biological computing, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the significance of text manipulation in biological computing, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the significance of text manipulation in biological computing, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 715,
+      "linked_question_id": 716,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 11,
+      "block_title": "Printing and Manipulating Text",
+      "learning_objective_id": 112,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains write clear comments in python code to document purpose and logic?",
+      "correct_answer": "Write clear comments in Python code to document purpose and logic",
+      "distractors": [
+        "It focuses on a related detail in write clear comments in python code to document purpose and logic, but it does not explain the main relationship being tested.",
+        "It describes a different effect within write clear comments in python code to document purpose and logic, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in write clear comments in python code to document purpose and logic, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 551,
+      "linked_question_id": 552,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 131,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "When splitting genomic DNA read from a file into coding and noncoding sequences, what is a correct way to save the results into separate output files?",
+      "correct_answer": "Write the concatenated exon sequences to one file and the intron sequence to another file",
+      "distractors": [
+        "Write all sequences to a single output file without separation",
+        "Write intron sequences to the coding DNA file and exon sequences to the noncoding DNA file",
+        "Do not write any sequences to files and only print them to the console"
+      ]
+    },
+    {
+      "question_id": 717,
+      "linked_question_id": 718,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 122,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the difference between a file name a file object and the contents of a file?",
+      "correct_answer": "Explain the difference between a file name, a file object, and the contents of a file",
+      "distractors": [
+        "It focuses on a related detail in the difference between a file name a file object and the contents of a file, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the difference between a file name a file object and the contents of a file, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the difference between a file name a file object and the contents of a file, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 719,
+      "linked_question_id": 720,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 123,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains use the open function to create file objects and read their contents using appropriate methods?",
+      "correct_answer": "Use the open function to create file objects and read their contents using appropriate met",
+      "distractors": [
+        "It focuses on a related detail in use the open function to create file objects and read their contents using appropriate methods, but it does not explain the main relationship being tested.",
+        "It describes a different effect within use the open function to create file objects and read their contents using appropriate methods, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in use the open function to create file objects and read their contents using appropriate methods, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 721,
+      "linked_question_id": 722,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 125,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains string methods like rstrip to clean newline characters from file data?",
+      "correct_answer": "Apply string methods like rstrip to clean newline characters from file data",
+      "distractors": [
+        "It focuses on a related detail in string methods like rstrip to clean newline characters from file data, but it does not explain the main relationship being tested.",
+        "It describes a different effect within string methods like rstrip to clean newline characters from file data, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in string methods like rstrip to clean newline characters from file data, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 723,
+      "linked_question_id": 724,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 126,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "What is the correct way to open a file for writing text data so that previous content is overwritten?",
+      "correct_answer": "Use the open function with the filename and the mode 'w' as the second argument",
+      "distractors": [
+        "Use the open function with the filename and the mode 'r' as the second argument",
+        "Use the open function with the filename and the mode 'a' as the second argument",
+        "Use the open function with the filename and no mode argument"
+      ]
+    },
+    {
+      "question_id": 727,
+      "linked_question_id": 728,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 130,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains write cleaned dna sequences and headers to single or multiple fasta files with correct formatting?",
+      "correct_answer": "Write cleaned DNA sequences and headers to single or multiple FASTA files with correct for",
+      "distractors": [
+        "It focuses on a related detail in write cleaned dna sequences and headers to single or multiple fasta files with correct formatting, but it does not explain the main relationship being tested.",
+        "It describes a different effect within write cleaned dna sequences and headers to single or multiple fasta files with correct formatting, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in write cleaned dna sequences and headers to single or multiple fasta files with correct formatting, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 729,
+      "linked_question_id": 730,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 147,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains a python function using the def keyword with arguments and return values?",
+      "correct_answer": "Define a Python function using the def keyword with arguments and return values",
+      "distractors": [
+        "It focuses on a related detail in a python function using the def keyword with arguments and return values, but it does not explain the main relationship being tested.",
+        "It describes a different effect within a python function using the def keyword with arguments and return values, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in a python function using the def keyword with arguments and return values, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 733,
+      "linked_question_id": 734,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 148,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains appropriate inputs and outputs when designing functions?",
+      "correct_answer": "Identify appropriate inputs and outputs when designing functions",
+      "distractors": [
+        "It focuses on a related detail in appropriate inputs and outputs when designing functions, but it does not explain the main relationship being tested.",
+        "It describes a different effect within appropriate inputs and outputs when designing functions, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in appropriate inputs and outputs when designing functions, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 735,
+      "linked_question_id": 736,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 149,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains write functions that calculate the at content of dna sequences?",
+      "correct_answer": "Write functions that calculate the AT content of DNA sequences",
+      "distractors": [
+        "It focuses on a related detail in write functions that calculate the at content of dna sequences, but it does not explain the main relationship being tested.",
+        "It describes a different effect within write functions that calculate the at content of dna sequences, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in write functions that calculate the at content of dna sequences, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 737,
+      "linked_question_id": 738,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 150,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains return statements to output results from functions?",
+      "correct_answer": "Apply return statements to output results from functions",
+      "distractors": [
+        "It focuses on a related detail in return statements to output results from functions, but it does not explain the main relationship being tested.",
+        "It describes a different effect within return statements to output results from functions, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in return statements to output results from functions, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 743,
+      "linked_question_id": 744,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 153,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains use keyword arguments to call functions more clearly and flexibly?",
+      "correct_answer": "Use keyword arguments to call functions more clearly and flexibly",
+      "distractors": [
+        "It focuses on a related detail in use keyword arguments to call functions more clearly and flexibly, but it does not explain the main relationship being tested.",
+        "It describes a different effect within use keyword arguments to call functions more clearly and flexibly, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in use keyword arguments to call functions more clearly and flexibly, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 745,
+      "linked_question_id": 746,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 19,
+      "block_title": "Oscillations",
+      "learning_objective_id": 207,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains simple harmonic motion and identify its defining characteristics?",
+      "correct_answer": "Describe simple harmonic motion and identify its defining characteristics",
+      "distractors": [
+        "It focuses on a related detail in simple harmonic motion and identify its defining characteristics, but it does not explain the main relationship being tested.",
+        "It describes a different effect within simple harmonic motion and identify its defining characteristics, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in simple harmonic motion and identify its defining characteristics, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 747,
+      "linked_question_id": 748,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 19,
+      "block_title": "Oscillations",
+      "learning_objective_id": 210,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the relationship between oscillatory motion and circular motion in terms of angular frequency and phase?",
+      "correct_answer": "Analyze the relationship between oscillatory motion and circular motion in terms of angula",
+      "distractors": [
+        "It focuses on a related detail in the relationship between oscillatory motion and circular motion in terms of angular frequency and phase, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the relationship between oscillatory motion and circular motion in terms of angular frequency and phase, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the relationship between oscillatory motion and circular motion in terms of angular frequency and phase, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 753,
+      "linked_question_id": 754,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 19,
+      "block_title": "Oscillations",
+      "learning_objective_id": 215,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains knowledge of resonance to real-world including structural vibrations musical instruments radio tuning and medical imagin (variant 2)?",
+      "correct_answer": "Apply knowledge of resonance to real-world examples including structural vibrations, music",
+      "distractors": [
+        "It focuses on a related detail in knowledge of resonance to real-world including structural vibrations musical instruments radio tuning and medical imagin, but it does not explain the main relationship being tested.",
+        "It describes a different effect within knowledge of resonance to real-world including structural vibrations musical instruments radio tuning and medical imagin, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in knowledge of resonance to real-world including structural vibrations musical instruments radio tuning and medical imagin, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 759,
+      "linked_question_id": 760,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 219,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains electric field lines to visualize the direction and strength of electric fields?",
+      "correct_answer": "Interpret electric field lines to visualize the direction and strength of electric fields",
+      "distractors": [
+        "It focuses on a related detail in electric field lines to visualize the direction and strength of electric fields, but it does not explain the main relationship being tested.",
+        "It describes a different effect within electric field lines to visualize the direction and strength of electric fields, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in electric field lines to visualize the direction and strength of electric fields, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 767,
+      "linked_question_id": 768,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 224,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses generic templated distractors instead of real alternatives.",
+      "stem": "Which statement best explains derive and calculate capacitance of parallel plate capacitors considering plate area separation and permittivity?",
+      "correct_answer": "Derive and calculate capacitance of parallel plate capacitors considering plate area, sepa",
+      "distractors": [
+        "It focuses on a related detail in derive and calculate capacitance of parallel plate capacitors considering plate area separation and permittivity, but it does not explain the main relationship being tested.",
+        "It describes a different effect within derive and calculate capacitance of parallel plate capacitors considering plate area separation and permittivity, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in derive and calculate capacitance of parallel plate capacitors considering plate area separation and permittivity, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 769,
+      "linked_question_id": 770,
+      "course_id": 7,
+      "course_title": "A-Level Physics OCR",
+      "block_id": 20,
+      "block_title": "Electric Fields",
+      "learning_objective_id": 224,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses generic templated distractors instead of real alternatives.",
+      "stem": "Which statement best explains derive and calculate capacitance of parallel plate capacitors considering plate area separation and permittivity (variant 2)?",
+      "correct_answer": "Derive and calculate capacitance of parallel plate capacitors considering plate area, sepa",
+      "distractors": [
+        "It focuses on a related detail in derive and calculate capacitance of parallel plate capacitors considering plate area separation and permittivity, but it does not explain the main relationship being tested.",
+        "It describes a different effect within derive and calculate capacitance of parallel plate capacitors considering plate area separation and permittivity, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in derive and calculate capacitance of parallel plate capacitors considering plate area separation and permittivity, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 775,
+      "linked_question_id": 776,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 286,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains major evolutionary milestones from early life to the rise of mammals and humans?",
+      "correct_answer": "Describe major evolutionary milestones from early life to the rise of mammals and humans",
+      "distractors": [
+        "It focuses on a related detail in major evolutionary milestones from early life to the rise of mammals and humans, but it does not explain the main relationship being tested.",
+        "It describes a different effect within major evolutionary milestones from early life to the rise of mammals and humans, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in major evolutionary milestones from early life to the rise of mammals and humans, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 777,
+      "linked_question_id": 778,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 287,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains microevolution and macroevolution with of biodiversity change over time?",
+      "correct_answer": "Compare microevolution and macroevolution with examples of biodiversity change over time",
+      "distractors": [
+        "It focuses on a related detail in microevolution and macroevolution with of biodiversity change over time, but it does not explain the main relationship being tested.",
+        "It describes a different effect within microevolution and macroevolution with of biodiversity change over time, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in microevolution and macroevolution with of biodiversity change over time, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 781,
+      "linked_question_id": 782,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 245,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains molecular biology principles to demonstrate common ancestry across all life forms?",
+      "correct_answer": "Apply molecular biology principles to demonstrate common ancestry across all life forms",
+      "distractors": [
+        "It focuses on a related detail in molecular biology principles to demonstrate common ancestry across all life forms, but it does not explain the main relationship being tested.",
+        "It describes a different effect within molecular biology principles to demonstrate common ancestry across all life forms, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in molecular biology principles to demonstrate common ancestry across all life forms, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 783,
+      "linked_question_id": 784,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 246,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the effects of convergent evolution on evolutionary relationships and classification?",
+      "correct_answer": "Analyze the effects of convergent evolution on evolutionary relationships and classificati",
+      "distractors": [
+        "It focuses on a related detail in the effects of convergent evolution on evolutionary relationships and classification, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the effects of convergent evolution on evolutionary relationships and classification, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the effects of convergent evolution on evolutionary relationships and classification, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 785,
+      "linked_question_id": 786,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 247,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains diverse religious perspectives on evolution and how they relate to scientific understanding?",
+      "correct_answer": "Explain diverse religious perspectives on evolution and how they relate to scientific unde",
+      "distractors": [
+        "It focuses on a related detail in diverse religious perspectives on evolution and how they relate to scientific understanding, but it does not explain the main relationship being tested.",
+        "It describes a different effect within diverse religious perspectives on evolution and how they relate to scientific understanding, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in diverse religious perspectives on evolution and how they relate to scientific understanding, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 787,
+      "linked_question_id": 788,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 291,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the importance of evolutionary biology for biomedical research and human anatomy?",
+      "correct_answer": "Evaluate the importance of evolutionary biology for biomedical research and human anatomy",
+      "distractors": [
+        "It focuses on a related detail in the importance of evolutionary biology for biomedical research and human anatomy, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the importance of evolutionary biology for biomedical research and human anatomy, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the importance of evolutionary biology for biomedical research and human anatomy, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 711,
+      "linked_question_id": 712,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 252,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms?",
+      "correct_answer": "Explain how yeast mutants have elucidated the genetic control of the cell cycle and cancer",
+      "distractors": [
+        "It focuses on a related detail in how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, but it does not explain the main relationship being tested.",
+        "It describes a different effect within how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 731,
+      "linked_question_id": 732,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 252,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms (variant 2)?",
+      "correct_answer": "Explain how yeast mutants have elucidated the genetic control of the cell cycle and cancer",
+      "distractors": [
+        "It focuses on a related detail in how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, but it does not explain the main relationship being tested.",
+        "It describes a different effect within how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 789,
+      "linked_question_id": 790,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 250,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the concept of the tree of life and its significance in selecting model organisms for biological research?",
+      "correct_answer": "Explain the concept of the tree of life and its significance in selecting model organisms",
+      "distractors": [
+        "It focuses on a related detail in the concept of the tree of life and its significance in selecting model organisms for biological research, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the concept of the tree of life and its significance in selecting model organisms for biological research, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the concept of the tree of life and its significance in selecting model organisms for biological research, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 791,
+      "linked_question_id": 792,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 283,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains ethical principles such as replacement reduction and refinement to model organism research to minimize animal use and su?",
+      "correct_answer": "Apply ethical principles such as replacement, reduction, and refinement to model organism",
+      "distractors": [
+        "It focuses on a related detail in ethical principles such as replacement reduction and refinement to model organism research to minimize animal use and su, but it does not explain the main relationship being tested.",
+        "It describes a different effect within ethical principles such as replacement reduction and refinement to model organism research to minimize animal use and su, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in ethical principles such as replacement reduction and refinement to model organism research to minimize animal use and su, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 795,
+      "linked_question_id": 796,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 282,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the evolutionary and physiological differences between animals and humans that impact translational research?",
+      "correct_answer": "Discuss the evolutionary and physiological differences between animals and humans that imp",
+      "distractors": [
+        "It focuses on a related detail in the evolutionary and physiological differences between animals and humans that impact translational research, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the evolutionary and physiological differences between animals and humans that impact translational research, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the evolutionary and physiological differences between animals and humans that impact translational research, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 799,
+      "linked_question_id": 800,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 251,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains major model organisms and describe their unique features and research applications?",
+      "correct_answer": "Identify major model organisms and describe their unique features and research application",
+      "distractors": [
+        "It focuses on a related detail in major model organisms and describe their unique features and research applications, but it does not explain the main relationship being tested.",
+        "It describes a different effect within major model organisms and describe their unique features and research applications, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in major model organisms and describe their unique features and research applications, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 773,
+      "linked_question_id": 774,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 266,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the chemical and biological origins of life including abiogenesis and the formation of life s building blocks?",
+      "correct_answer": "Describe the chemical and biological origins of life including abiogenesis and the formati",
+      "distractors": [
+        "It focuses on a related detail in the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 793,
+      "linked_question_id": 794,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 259,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the dual informational and catalytic roles of rna in early molecular evolution?",
+      "correct_answer": "Analyze the dual informational and catalytic roles of RNA in early molecular evolution",
+      "distractors": [
+        "It focuses on a related detail in the dual informational and catalytic roles of rna in early molecular evolution, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the dual informational and catalytic roles of rna in early molecular evolution, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the dual informational and catalytic roles of rna in early molecular evolution, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 805,
+      "linked_question_id": 806,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 266,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the chemical and biological origins of life including abiogenesis and the formation of life s building blocks?",
+      "correct_answer": "Describe the chemical and biological origins of life including abiogenesis and the formati",
+      "distractors": [
+        "It focuses on a related detail in the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 807,
+      "linked_question_id": 808,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 259,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the dual informational and catalytic roles of rna in early molecular evolution?",
+      "correct_answer": "Analyze the dual informational and catalytic roles of RNA in early molecular evolution",
+      "distractors": [
+        "It focuses on a related detail in the dual informational and catalytic roles of rna in early molecular evolution, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the dual informational and catalytic roles of rna in early molecular evolution, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the dual informational and catalytic roles of rna in early molecular evolution, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 809,
+      "linked_question_id": 810,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 263,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses generic templated distractors instead of real alternatives.",
+      "stem": "Which statement best explains assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events?",
+      "correct_answer": "Assess the limitations of the traditional tree of life metaphor due to symbiotic and horiz",
+      "distractors": [
+        "It focuses on a related detail in assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, but it does not explain the main relationship being tested.",
+        "It describes a different effect within assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 811,
+      "linked_question_id": 812,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 261,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance?",
+      "correct_answer": "Compare anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary si",
+      "distractors": [
+        "It focuses on a related detail in anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, but it does not explain the main relationship being tested.",
+        "It describes a different effect within anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 813,
+      "linked_question_id": 814,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 268,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events?",
+      "correct_answer": "Evaluate geological and fossil evidence supporting the rise of atmospheric oxygen and the",
+      "distractors": [
+        "It focuses on a related detail in geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, but it does not explain the main relationship being tested.",
+        "It describes a different effect within geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, so it does not fully answer the question."
+      ]
+    }
+  ]
+}

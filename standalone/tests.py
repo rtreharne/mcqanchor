@@ -6,6 +6,7 @@ import tempfile
 
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -58,13 +59,17 @@ from standalone.services.numeric_questions import (
 from standalone.services.validation_flow import _pick_locked_questions, current_room_code
 from standalone.services.questions import (
     QuestionGenerationError,
+    _create_question_pair,
     _normalize_generated_payload,
+    _single_answer_option_balance_error,
+    _single_answer_length_signal_error,
     coding_signal_for_text,
     fallback_further_study_questions,
     further_study_questions_for_question,
     generate_question_pair_for_block,
     normalize_explanation_text,
     normalize_numeric_explanation_text,
+    question_quality_issue,
 )
 
 
@@ -2463,6 +2468,244 @@ class StandaloneFlowTests(TestCase):
         self.assertNotIn("textbook", practice.stem.lower())
         self.assertNotIn("content covers", practice.explanation.lower())
 
+    def test_normalized_mcq_payload_rejects_obviously_longest_correct_answer(self):
+        with self.assertRaisesMessage(ValueError, "obviously longer"):
+            _normalize_generated_payload(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "Which statement best explains membrane transport?",
+                    "correct_answers": [
+                        "It regulates what enters and leaves the cell by coordinating selective movement across the membrane in context."
+                    ],
+                    "distractors": [
+                        "It stores DNA.",
+                        "It produces ATP.",
+                        "It digests proteins.",
+                    ],
+                    "further_study_questions": [
+                        "Why does selective transport matter?",
+                        "How does active transport differ?",
+                        "What common membrane mistake should I avoid?",
+                    ],
+                    "explanation": "The membrane controls selective movement.",
+                    "difficulty": "core",
+                },
+                QuestionBankItem.QuestionType.MCQ,
+                distractor_count=3,
+            )
+
+    def test_length_signal_helper_allows_balanced_mcq_options(self):
+        error = _single_answer_length_signal_error(
+            "It regulates what enters and leaves the cell.",
+            [
+                "It stores and copies the cell's DNA.",
+                "It releases energy from respiration.",
+                "It packages proteins for transport.",
+            ],
+        )
+
+        self.assertEqual(error, "")
+
+    def test_option_balance_helper_rejects_correct_answer_that_is_only_qualified_option(self):
+        error = _single_answer_option_balance_error(
+            "It controls exchange by selectively regulating movement across the membrane.",
+            [
+                "It stores genetic material inside the nucleus of the cell.",
+                "It releases energy during aerobic respiration in mitochondria.",
+                "It modifies proteins before transport out of the cell.",
+            ],
+        )
+
+        self.assertTrue(error)
+
+    def test_question_quality_issue_rejects_objective_echo_with_templated_distractors(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem="Which statement best explains how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms?",
+            correct_answer="Explain how yeast mutants have elucidated the genetic control of the cell cycle and cancer",
+            distractors=[
+                "It confuses the cause and effect involved in how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, so it does not fully answer the question.",
+                "It focuses on a related detail in how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, but it does not explain the main relationship being tested.",
+                "It describes a different effect within how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, rather than the best explanation for this question.",
+            ],
+            question_hash="style-echo-test",
+        )
+
+        error = question_quality_issue(question)
+
+        self.assertTrue(error)
+        self.assertRegex(error.lower(), r"objective phrase|templated distractors|same opening word")
+
+    def test_option_balance_rejects_shared_distractor_opening_phrase(self):
+        with self.assertRaisesMessage(
+            ValueError,
+            "Single-answer payload makes every distractor share the same opening phrase while the correct answer does not.",
+        ):
+            _normalize_generated_payload(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "Why is diffusion important in gas exchange?",
+                    "correct_answers": ["Because diffusion allows oxygen to move from the alveoli into the blood."],
+                    "distractors": [
+                        "It allows cells to produce glucose during respiration in the lungs.",
+                        "It allows blood vessels to contract so gases are pushed into the alveoli.",
+                        "It allows red blood cells to create oxygen before carrying it around the body.",
+                    ],
+                    "further_study_questions": [
+                        "How does surface area affect diffusion?",
+                        "Why does concentration gradient matter?",
+                        "What limits gas exchange efficiency?",
+                    ],
+                    "explanation": "Diffusion moves gases down concentration gradients.",
+                    "difficulty": "core",
+                },
+                QuestionBankItem.QuestionType.MCQ,
+                distractor_count=3,
+            )
+
+    def test_create_question_pair_rejects_objective_misalignment(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        objective.text = "Explain diverse religious perspectives on evolution and their relationship to scientific understanding"
+        objective.save(update_fields=["text", "updated_at"])
+
+        with self.assertRaisesMessage(
+            ValueError,
+            "Generated question does not stay aligned with the target learning objective.",
+        ):
+            _create_question_pair(
+                course=course,
+                block=block,
+                chunk=chunk,
+                objective=objective,
+                question_type=QuestionBankItem.QuestionType.MCQ,
+                payload={
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "How does the molecular clock method estimate divergence time between species?",
+                    "correct_answers": [
+                        "It compares genetic differences and assumes a roughly constant mutation rate."
+                    ],
+                    "distractors": [
+                        "It counts the number of organs shared by two species.",
+                        "It measures only fossil depth to determine exact ancestry.",
+                        "It compares habitat temperature to predict evolutionary distance.",
+                    ],
+                    "further_study_questions": [
+                        "How do mutation rates vary?",
+                        "Why are calibration points needed?",
+                        "What limits the molecular clock method?",
+                    ],
+                    "explanation": "The molecular clock uses genetic change over time.",
+                    "difficulty": "core",
+                },
+                existing_hashes=set(),
+            )
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_length_biased_ai_mcq_is_rejected_instead_of_falling_back(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "Which statement best explains membrane transport?",
+                    "correct_answers": [
+                        "It regulates what enters and leaves the cell by coordinating selective movement across the membrane in a way that directly determines exchange with the environment."
+                    ],
+                    "distractors": [
+                        "It stores DNA.",
+                        "It produces ATP.",
+                        "It digests proteins.",
+                    ],
+                    "further_study_questions": [
+                        "Why does selective transport matter?",
+                        "How does active transport differ?",
+                        "What common membrane mistake should I avoid?",
+                    ],
+                    "explanation": "The membrane controls selective movement.",
+                    "difficulty": "core",
+                }
+            )
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            with self.assertRaisesMessage(QuestionGenerationError, "Could not generate a high-quality question for this block."):
+                generate_question_pair_for_block(
+                    block,
+                    question_type=QuestionBankItem.QuestionType.MCQ,
+                    raise_generation_errors=True,
+                )
+
+        self.assertFalse(course.question_bank_items.exists())
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_bad_ai_mcq_does_not_persist_generic_fallback_when_quality_fails(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+
+        class DummyResponse:
+            output_text = "not valid json"
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            with self.assertRaisesMessage(QuestionGenerationError, "Could not generate a high-quality question for this block."):
+                generate_question_pair_for_block(
+                    block,
+                    question_type=QuestionBankItem.QuestionType.MCQ,
+                    raise_generation_errors=True,
+                )
+
+        self.assertFalse(course.question_bank_items.exists())
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_specificity_biased_ai_mcq_is_rejected_instead_of_falling_back(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "Which statement best explains membrane transport?",
+                    "correct_answers": [
+                        "It regulates what enters and leaves the cell by selectively controlling movement across the membrane."
+                    ],
+                    "distractors": [
+                        "It stores the cell's genetic material.",
+                        "It releases energy for respiration.",
+                        "It packages proteins for secretion.",
+                    ],
+                    "further_study_questions": [
+                        "Why does selective transport matter?",
+                        "How does active transport differ?",
+                        "What common membrane mistake should I avoid?",
+                    ],
+                    "explanation": "The membrane controls selective movement.",
+                    "difficulty": "core",
+                }
+            )
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            with self.assertRaisesMessage(QuestionGenerationError, "Could not generate a high-quality question for this block."):
+                generate_question_pair_for_block(
+                    block,
+                    question_type=QuestionBankItem.QuestionType.MCQ,
+                    raise_generation_errors=True,
+                )
+
+        self.assertFalse(course.question_bank_items.exists())
+
     @override_settings(OPENAI_API_KEY="")
     def test_coding_question_generation_can_use_existing_answer_types(self):
         for index, question_type in enumerate((
@@ -4093,6 +4336,224 @@ print(result)""",
         question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
         self.assertEqual(question_messages[-1]["question_id"], practice.pk)
         self.assertEqual(course.question_bank_items.filter(block=block).count(), 2)
+
+    def test_student_preview_skips_existing_mcq_with_obvious_option_balance_bias(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        biased_validation = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why must researchers be cautious when extrapolating findings from mice to humans?",
+            correct_answer="Because genetic and physiological differences can cause discrepancies in how diseases, like inflammation, manifest between mice and humans.",
+            distractors=[
+                "Because mice research is only useful for cancer.",
+                "Because mice have unrelated genes.",
+                "Because humans do not have similar inflammatory diseases.",
+            ],
+            question_hash="biased-mcq-validation",
+        )
+        biased_practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why must researchers be cautious when extrapolating findings from mice to humans?",
+            correct_answer=biased_validation.correct_answer,
+            distractors=list(biased_validation.distractors),
+            explanation="The models are not identical.",
+            question_hash="biased-mcq-practice",
+            linked_question=biased_validation,
+        )
+        biased_validation.linked_question = biased_practice
+        biased_validation.save(update_fields=["linked_question", "updated_at"])
+
+        balanced_validation = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why must researchers be cautious when extrapolating findings from mice to humans?",
+            correct_answer="Because mouse models can mirror many mechanisms while still differing in important disease responses.",
+            distractors=[
+                "Because mouse studies only apply to one disease category despite matching human responses elsewhere.",
+                "Because mice and humans share no useful biology when researchers compare disease mechanisms carefully.",
+                "Because human inflammation never overlaps with mouse inflammation in any meaningful experimental setting.",
+            ],
+            question_hash="balanced-mcq-validation",
+        )
+        balanced_practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why must researchers be cautious when extrapolating findings from mice to humans?",
+            correct_answer=balanced_validation.correct_answer,
+            distractors=list(balanced_validation.distractors),
+            explanation="Similarity does not remove important model differences.",
+            question_hash="balanced-mcq-practice",
+            linked_question=balanced_validation,
+        )
+        balanced_validation.linked_question = balanced_practice
+        balanced_validation.save(update_fields=["linked_question", "updated_at"])
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        block_payload = next(item for item in preview["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_id"], balanced_practice.pk)
+        self.assertNotEqual(question_messages[-1]["question_id"], biased_practice.pk)
+
+    def test_scan_question_bank_quality_reports_biased_mcqs(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why must researchers be cautious when extrapolating findings from mice to humans?",
+            correct_answer="Because genetic and physiological differences can cause discrepancies in how diseases, like inflammation, manifest between mice and humans.",
+            distractors=[
+                "Because mice research is only useful for cancer.",
+                "Because mice have unrelated genes.",
+                "Because humans do not have similar inflammatory diseases.",
+            ],
+            question_hash="scan-biased-mcq-practice",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why must researchers be cautious when extrapolating findings from mice to humans?",
+            correct_answer="Because mouse models can mirror many mechanisms while still differing in important disease responses.",
+            distractors=[
+                "Because mouse studies only apply to one disease category despite matching human responses elsewhere.",
+                "Because mice and humans share no useful biology when researchers compare disease mechanisms carefully.",
+                "Because human inflammation never overlaps with mouse inflammation in any meaningful experimental setting.",
+            ],
+            question_hash="scan-balanced-mcq-practice",
+        )
+
+        output = io.StringIO()
+        call_command("scan_question_bank_quality", "--course-id", str(course.pk), stdout=output)
+        report = output.getvalue()
+
+        self.assertIn("Flagged 1 rows", report)
+        self.assertIn("Why must researchers be cautious when extrapolating findings from mice to humans?", report)
+        self.assertIn("Because genetic and physiological differences can cause discrepancies", report)
+        self.assertIn("question_id=", report)
+
+    def test_clean_question_bank_quality_flags_bad_pair_and_creates_replacement(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        validation = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why must researchers be cautious when extrapolating findings from mice to humans?",
+            correct_answer="Because genetic and physiological differences can cause discrepancies in how diseases, like inflammation, manifest between mice and humans.",
+            distractors=[
+                "Because mice research is only useful for cancer.",
+                "Because mice have unrelated genes.",
+                "Because humans do not have similar inflammatory diseases.",
+            ],
+            question_hash="cleanup-biased-mcq-validation",
+        )
+        practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem=validation.stem,
+            correct_answer=validation.correct_answer,
+            distractors=list(validation.distractors),
+            explanation="The models differ.",
+            question_hash="cleanup-biased-mcq-practice",
+            linked_question=validation,
+        )
+        validation.linked_question = practice
+        validation.save(update_fields=["linked_question", "updated_at"])
+
+        def fake_generate(block_arg, **kwargs):
+            replacement_practice = QuestionBankItem.objects.create(
+                course=course,
+                block=block_arg,
+                learning_objective=objective,
+                source_chunk=chunk,
+                bank_type=QuestionBankItem.BankType.PRACTICE,
+                status=QuestionBankItem.Status.APPROVED,
+                stem="Why should researchers be cautious when using mouse models to infer human disease responses?",
+                correct_answer="Because mouse models can mirror many mechanisms while still differing in important disease responses.",
+                distractors=[
+                    "Because mouse studies only apply to one disease category despite matching human responses elsewhere.",
+                    "Because mice and humans share no useful biology when researchers compare disease mechanisms carefully.",
+                    "Because human inflammation never overlaps with mouse inflammation in any meaningful experimental setting.",
+                ],
+                explanation="Similarity does not remove important model differences.",
+                question_hash="cleanup-replacement-practice",
+            )
+            replacement_validation = QuestionBankItem.objects.create(
+                course=course,
+                block=block_arg,
+                learning_objective=objective,
+                source_chunk=chunk,
+                bank_type=QuestionBankItem.BankType.VALIDATION,
+                status=QuestionBankItem.Status.APPROVED,
+                stem=replacement_practice.stem,
+                correct_answer=replacement_practice.correct_answer,
+                distractors=list(replacement_practice.distractors),
+                explanation=replacement_practice.explanation,
+                question_hash="cleanup-replacement-validation",
+                linked_question=replacement_practice,
+            )
+            replacement_practice.linked_question = replacement_validation
+            replacement_practice.save(update_fields=["linked_question", "updated_at"])
+            return replacement_practice, replacement_validation
+
+        output = io.StringIO()
+        with patch("standalone.management.commands.clean_question_bank_quality.generate_question_pair_for_block", side_effect=fake_generate):
+            call_command(
+                "clean_question_bank_quality",
+                "--course-id",
+                str(course.pk),
+                "--apply",
+                stdout=output,
+            )
+
+        practice.refresh_from_db()
+        validation.refresh_from_db()
+        self.assertEqual(practice.status, QuestionBankItem.Status.FLAGGED)
+        self.assertEqual(validation.status, QuestionBankItem.Status.FLAGGED)
+        self.assertTrue(
+            QuestionBankItem.objects.filter(
+                course=course,
+                bank_type=QuestionBankItem.BankType.PRACTICE,
+                status=QuestionBankItem.Status.APPROVED,
+            ).exclude(pk=practice.pk).exists()
+        )
 
     def test_student_preview_quiz_generates_question_pair_when_bank_is_exhausted(self):
         course = self.create_course()
@@ -8155,7 +8616,8 @@ print(result)""",
             content_type="application/json",
         )
         self.assertEqual(submit_alpha.status_code, 200)
-        self.assertEqual(submit_alpha.json()["session"]["progress"]["answered_count"], 1)
+        alpha_state = submit_alpha.json()["session"]
+        self.assertEqual(alpha_state["progress"]["answered_count"], 1)
 
         reload_alpha = self.client.get(session_url_alpha)
         self.assertEqual(reload_alpha.context["session_state"]["progress"]["answered_count"], 1)
@@ -8165,6 +8627,81 @@ print(result)""",
         self.assertEqual(page_beta.status_code, 200)
         self.assertEqual(page_beta.context["session_state"]["progress"]["answered_count"], 0)
         self.assertEqual(CourseDemoValidationSession.objects.count(), 2)
+
+        for _step in range(25):
+            if alpha_state["completed"]:
+                break
+            if alpha_state.get("next_available"):
+                next_response = self.client.post(
+                    f"{reverse('standalone:demo_validation_practice_action', args=[access.token, 'next'])}?visitor=alphademo01",
+                    data=json.dumps({}),
+                    content_type="application/json",
+                )
+                self.assertEqual(next_response.status_code, 200)
+                alpha_state = next_response.json()["session"]
+                continue
+            pending = alpha_state.get("pending_question")
+            self.assertIsNotNone(pending)
+            pending_question = QuestionBankItem.objects.get(pk=pending["question_id"])
+            answer_response = self.client.post(
+                f"{reverse('standalone:demo_validation_practice_action', args=[access.token, 'submit'])}?visitor=alphademo01",
+                data=json.dumps({"question_id": pending_question.pk, "answer": pending_question.correct_answer}),
+                content_type="application/json",
+            )
+            self.assertEqual(answer_response.status_code, 200)
+            alpha_state = answer_response.json()["session"]
+
+        self.assertTrue(alpha_state["completed"])
+        self.assertEqual(
+            alpha_state["practice_return_url"],
+            reverse("standalone:demo_practice", args=[access.token]),
+        )
+        return_message = next(
+            message
+            for message in alpha_state["transcript"]
+            if message.get("id") == "demo-validation-return-to-practice"
+        )
+        self.assertEqual(return_message["actions"][0]["label"], "Return to practice")
+        self.assertEqual(
+            return_message["actions"][0]["url"],
+            reverse("standalone:demo_practice", args=[access.token]),
+        )
+        completed_review = self.client.get(session_url_alpha)
+        self.assertEqual(
+            completed_review.context["session_state"]["practice_return_url"],
+            reverse("standalone:demo_practice", args=[access.token]),
+        )
+        self.assertContains(completed_review, "data-validation-top-cta", html=False)
+        self.assertContains(
+            completed_review,
+            reverse("standalone:demo_practice", args=[access.token]),
+            html=False,
+        )
+
+        course.config.demo_iframe_allowed_origins = "https://canvas.example.com"
+        course.config.save(update_fields=["demo_iframe_allowed_origins", "updated_at"])
+        embed_review = self.client.get(
+            f"{reverse('standalone:demo_validation_practice', args=[access.token])}?embed=1&visitor=alphademo01",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        embed_return_message = next(
+            message
+            for message in embed_review.context["session_state"]["transcript"]
+            if message.get("id") == "demo-validation-return-to-practice"
+        )
+        self.assertEqual(
+            embed_return_message["actions"][0]["url"],
+            f"{reverse('standalone:demo_practice', args=[access.token])}?embed=1",
+        )
+        self.assertEqual(
+            embed_review.context["session_state"]["practice_return_url"],
+            f"{reverse('standalone:demo_practice', args=[access.token])}?embed=1",
+        )
+        self.assertContains(
+            embed_review,
+            f"{reverse('standalone:demo_practice', args=[access.token])}?embed=1",
+            html=False,
+        )
 
     def test_public_demo_embed_respects_allowed_origins(self):
         course = self.create_course()

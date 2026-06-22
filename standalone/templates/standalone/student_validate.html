@@ -162,6 +162,22 @@
         </div>
       {% endif %}
     </div>
+    <div
+      class="validation-chat-top-cta"
+      {% if not session_state.practice_return_url %}hidden{% endif %}
+      data-validation-top-cta
+    >
+      <p class="validation-chat-top-cta-copy" data-validation-top-cta-copy>
+        Practice validation complete. Return to practice mode when you're ready to continue.
+      </p>
+      <a
+        class="button secondary preview-cta-action"
+        href="{{ session_state.practice_return_url|default:'#' }}"
+        data-validation-top-cta-link
+      >
+        Return to practice
+      </a>
+    </div>
     <div class="preview-chat-transcript validation-chat-transcript" aria-live="polite" aria-label="Validation transcript"></div>
     <form class="preview-chat-form validation-chat-form">
       <p class="preview-chat-status" role="status" aria-live="polite"></p>

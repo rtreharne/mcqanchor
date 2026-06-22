@@ -29,6 +29,9 @@ if (validationRoot && validationDataNode) {
   const nextButton = validationRoot.querySelector("[data-validation-next]");
   const answerRow = validationRoot.querySelector("[data-validation-answer-row]");
   const nextRow = validationRoot.querySelector("[data-validation-next-row]");
+  const topCtaNode = validationRoot.querySelector("[data-validation-top-cta]");
+  const topCtaCopyNode = validationRoot.querySelector("[data-validation-top-cta-copy]");
+  const topCtaLinkNode = validationRoot.querySelector("[data-validation-top-cta-link]");
   const statusNode = validationRoot.querySelector(".preview-chat-status");
   const timerNode = validationRoot.querySelector("[data-validation-timer]");
   const progressNode = validationRoot.querySelector("[data-validation-progress-label]");
@@ -546,6 +549,23 @@ if (validationRoot && validationDataNode) {
     );
   }
 
+  function renderTopCta() {
+    if (!topCtaNode || !topCtaLinkNode) {
+      return;
+    }
+    const returnUrl = String(sessionState.practice_return_url || "").trim();
+    const showReturnAction = !!returnUrl;
+    topCtaNode.hidden = !showReturnAction;
+    if (!showReturnAction) {
+      topCtaLinkNode.href = "#";
+      return;
+    }
+    if (topCtaCopyNode) {
+      topCtaCopyNode.textContent = "Practice validation complete. Return to practice mode when you're ready to continue.";
+    }
+    topCtaLinkNode.href = returnUrl;
+  }
+
   function currentServerTimeMs() {
     return Date.now() + roomCodeClockOffsetMs;
   }
@@ -1061,6 +1081,7 @@ if (validationRoot && validationDataNode) {
     }
     const roomCodeClient = sessionState.room_code_client || {};
     roomCodeClockOffsetMs = roomCodeClient.server_now_ms ? roomCodeClient.server_now_ms - Date.now() : 0;
+    renderTopCta();
     renderTranscript();
     updateTimer();
     updateProgress();

@@ -1,0 +1,93 @@
+{
+  "course_id": 5,
+  "apply": true,
+  "flagged_practice_count": 3,
+  "retired_question_count": 6,
+  "retired_question_ids": [
+    819,
+    820,
+    831,
+    832,
+    741,
+    742
+  ],
+  "replacement_pair_count": 3,
+  "generation_failure_count": 0,
+  "processed_rows": [
+    {
+      "practice_question_id": 819,
+      "validation_question_id": 820,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 131,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is it beneficial for programs to accept file names specified by the user rather than having file names hard-coded?"
+    },
+    {
+      "practice_question_id": 831,
+      "validation_question_id": 832,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 130,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "What does opening a file in a program return, and what does this object represent?"
+    },
+    {
+      "practice_question_id": 741,
+      "validation_question_id": 742,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 152,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is it beneficial to create functions in a program instead of copying the same code multiple times?"
+    }
+  ],
+  "regenerated_pairs": [
+    {
+      "practice_question_id": 819,
+      "validation_question_id": 820,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 131,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is it beneficial for programs to accept file names specified by the user rather than having file names hard-coded?",
+      "replacement_practice_question_id": 889,
+      "replacement_validation_question_id": 890
+    },
+    {
+      "practice_question_id": 831,
+      "validation_question_id": 832,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 130,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "What does opening a file in a program return, and what does this object represent?",
+      "replacement_practice_question_id": 891,
+      "replacement_validation_question_id": 892
+    },
+    {
+      "practice_question_id": 741,
+      "validation_question_id": 742,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 152,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is it beneficial to create functions in a program instead of copying the same code multiple times?",
+      "replacement_practice_question_id": 893,
+      "replacement_validation_question_id": 894
+    }
+  ],
+  "generation_failures": []
+}

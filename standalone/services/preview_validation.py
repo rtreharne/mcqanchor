@@ -2,7 +2,7 @@ from django.utils import timezone
 
 from standalone.models import Course, QuestionBankItem
 from standalone.services.preview import PREVIEW_SESSION_KEY, PREVIEW_WAQ_MIN_SUBSTANTIVE_WORDS, serialize_preview_state
-from standalone.services.questions import generate_question_pair_for_block
+from standalone.services.questions import generate_question_pair_for_block, question_quality_sort_key
 from standalone.services.validation_flow import (
     VALIDATION_SKIPPED_TEXT,
     ValidationFlowError,
@@ -160,6 +160,7 @@ def _pick_preview_validation_practice_questions(request, course: Course, questio
         question
         for question in _practice_question_queryset(course)
         if question.pk not in seen_ids and int(question.linked_question_id or 0) not in seen_ids
+        and not question_quality_sort_key(question)[0]
     ]
     seed_key = f"preview-validation:{course.pk}:pool"
 
@@ -209,7 +210,7 @@ def _initial_preview_state(request, course: Course) -> dict:
 def _initial_preview_student_validate_state(course: Course, event) -> dict:
     question_count = int(getattr(event, "question_count", 0) or PREVIEW_VALIDATION_DEFAULT_QUESTION_COUNT)
     released_blocks = _released_blocks(course)
-    available = list(_question_queryset(course))
+    available = [question for question in _question_queryset(course) if not question_quality_sort_key(question)[0]]
     seed_key = f"preview-validate:{course.pk}:event:{int(event.pk)}"
 
     def generator(block, objective_id, question_type, *, preferred_objective_ids=None, strict_preferred_objectives=False):

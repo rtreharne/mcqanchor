@@ -149,6 +149,28 @@ body {
   padding-top: 0.15rem;
 }
 
+.validation-chat-top-cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid rgba(21, 91, 200, 0.12);
+  border-radius: 1.1rem;
+  background: rgba(228, 241, 255, 0.64);
+}
+
+.validation-chat-top-cta[hidden] {
+  display: none !important;
+}
+
+.validation-chat-top-cta-copy {
+  margin: 0;
+  color: #244167;
+  font-size: 0.95rem;
+}
+
 .validation-chat-composer {
   justify-content: flex-end;
 }

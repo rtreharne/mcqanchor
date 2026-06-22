@@ -688,6 +688,38 @@ def _demo_validation_practice_url(
     )
 
 
+def _demo_validation_state_with_practice_return(
+    session_state: dict,
+    access: CourseDemoAccess,
+    *,
+    embed: bool = False,
+) -> dict:
+    if not session_state.get("completed"):
+        return session_state
+    return_url = _demo_practice_url(access, embed=embed)
+    transcript = [
+        message
+        for message in list(session_state.get("transcript") or [])
+        if str(message.get("id") or "") != "demo-validation-return-to-practice"
+    ]
+    transcript.append(
+        {
+            "id": "demo-validation-return-to-practice",
+            "role": "assistant",
+            "kind": "cta",
+            "text": "Practice validation complete. Return to practice mode when you're ready to continue.",
+            "actions": [
+                {
+                    "label": "Return to practice",
+                    "url": return_url,
+                    "style": "button",
+                }
+            ],
+        }
+    )
+    return {**session_state, "transcript": transcript, "practice_return_url": return_url}
+
+
 def _demo_iframe_snippet(request: HttpRequest, access: CourseDemoAccess) -> str:
     src = request.build_absolute_uri(_demo_practice_url(access, embed=True))
     return (
@@ -1602,10 +1634,14 @@ def demo_validation_practice(request: HttpRequest, token) -> HttpResponse:
             )
         )
     validation_session = get_or_create_demo_validation_session(access, visitor_key)
-    session_state = serialize_demo_validation_practice_state(
+    session_state = _demo_validation_state_with_practice_return(
+        serialize_demo_validation_practice_state(
+            access,
+            validation_session,
+            restart=request.GET.get("restart") == "1",
+        ),
         access,
-        validation_session,
-        restart=request.GET.get("restart") == "1",
+        embed=embed_mode,
     )
     sidebar_preview_state = serialize_demo_preview_state(access)
     response = render(
@@ -1653,6 +1689,11 @@ def demo_validation_practice_action(request: HttpRequest, token, action: str) ->
     try:
         if action == "next":
             payload = reveal_demo_validation_practice_next(access, validation_session)
+            payload = _demo_validation_state_with_practice_return(
+                payload,
+                access,
+                embed=_demo_embed_mode(request),
+            )
             return JsonResponse({"ok": True, "session": payload})
         if action == "draft_answer":
             payload = draft_demo_validation_practice_answer(
@@ -1670,12 +1711,22 @@ def demo_validation_practice_action(request: HttpRequest, token, action: str) ->
                 data.get("answers") or ([str(data.get("answer", "")).strip()] if data.get("answer") else []),
                 answer_text=str(data.get("answer_text", "")).strip(),
             )
+            payload = _demo_validation_state_with_practice_return(
+                payload,
+                access,
+                embed=_demo_embed_mode(request),
+            )
             return JsonResponse({"ok": True, "session": payload})
         if action == "skip":
             payload = skip_demo_validation_practice_question(
                 access,
                 validation_session,
                 int(data.get("question_id") or 0),
+            )
+            payload = _demo_validation_state_with_practice_return(
+                payload,
+                access,
+                embed=_demo_embed_mode(request),
             )
             return JsonResponse({"ok": True, "session": payload})
     except ValidationFlowError as error:

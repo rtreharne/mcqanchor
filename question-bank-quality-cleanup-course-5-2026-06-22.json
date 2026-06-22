@@ -1,0 +1,41 @@
+{
+  "course_id": 5,
+  "apply": true,
+  "flagged_practice_count": 1,
+  "retired_question_count": 2,
+  "retired_question_ids": [
+    817,
+    818
+  ],
+  "replacement_pair_count": 1,
+  "generation_failure_count": 0,
+  "processed_rows": [
+    {
+      "practice_question_id": 817,
+      "validation_question_id": 818,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 11,
+      "block_title": "Printing and Manipulating Text",
+      "learning_objective_id": 112,
+      "issue": "Single-answer payload makes every distractor share the same opening phrase while the correct answer does not.",
+      "stem": "Why is it important to understand how data types work in programming?"
+    }
+  ],
+  "regenerated_pairs": [
+    {
+      "practice_question_id": 817,
+      "validation_question_id": 818,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 11,
+      "block_title": "Printing and Manipulating Text",
+      "learning_objective_id": 112,
+      "issue": "Single-answer payload makes every distractor share the same opening phrase while the correct answer does not.",
+      "stem": "Why is it important to understand how data types work in programming?",
+      "replacement_practice_question_id": 857,
+      "replacement_validation_question_id": 858
+    }
+  ],
+  "generation_failures": []
+}

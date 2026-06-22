@@ -6,7 +6,7 @@ from collections import defaultdict
 from django.conf import settings
 from django.db.models import Count, Q
 from django.utils import timezone
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 from standalone.models import ContentChunk, Course, CourseBlock, LearningObjective, QuestionBankItem
 from standalone.services.guidance import build_generation_guidance_prompt
@@ -657,6 +657,305 @@ def _normalize_answer_list(items) -> list[str]:
     return normalized
 
 
+def _option_length_profile(text: str) -> tuple[int, int]:
+    cleaned = re.sub(r"\s+", " ", str(text or "").strip())
+    return len(cleaned), len(re.findall(r"[A-Za-z0-9]+", cleaned))
+
+
+def _option_specificity_profile(text: str) -> dict[str, int]:
+    cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    words = re.findall(r"[a-z0-9']+", cleaned)
+    clause_markers = (
+        "because",
+        "therefore",
+        "which",
+        "while",
+        "whereas",
+        "although",
+        "through",
+        "across",
+        "within",
+        "rather than",
+        "depends on",
+        "results in",
+        "results from",
+        "leads to",
+        "allows",
+        "enables",
+        "by",
+    )
+    content_words = [
+        word for word in words
+        if len(word) >= 5 and word not in OBJECTIVE_MATCH_STOPWORDS
+    ]
+    clause_score = sum(1 for marker in clause_markers if marker in cleaned)
+    punctuation_score = len(re.findall(r"[,;:()]", cleaned))
+    return {
+        "word_count": len(words),
+        "content_word_count": len(content_words),
+        "clause_score": clause_score,
+        "punctuation_score": punctuation_score,
+    }
+
+
+def _single_answer_length_signal_error(correct_answer: str, distractors: list[str]) -> str:
+    if not correct_answer or not distractors:
+        return ""
+    correct_chars, correct_words = _option_length_profile(correct_answer)
+    distractor_profiles = [_option_length_profile(distractor) for distractor in distractors if str(distractor).strip()]
+    if not distractor_profiles:
+        return ""
+
+    distractor_char_lengths = [profile[0] for profile in distractor_profiles]
+    distractor_word_lengths = [profile[1] for profile in distractor_profiles]
+    longest_distractor_chars = max(distractor_char_lengths)
+    longest_distractor_words = max(distractor_word_lengths)
+    average_distractor_chars = sum(distractor_char_lengths) / len(distractor_char_lengths)
+    average_distractor_words = sum(distractor_word_lengths) / len(distractor_word_lengths)
+
+    if correct_chars <= longest_distractor_chars or correct_words <= longest_distractor_words:
+        return ""
+
+    char_gap = correct_chars - longest_distractor_chars
+    word_gap = correct_words - longest_distractor_words
+    longest_char_ratio = correct_chars / max(longest_distractor_chars, 1)
+    average_char_ratio = correct_chars / max(average_distractor_chars, 1)
+
+    if (
+        (char_gap >= 18 and longest_char_ratio >= 1.2)
+        or (char_gap >= 12 and average_char_ratio >= 1.35)
+        or (word_gap >= 3 and correct_words >= average_distractor_words + 3 and average_char_ratio >= 1.2)
+    ):
+        return "Single-answer payload makes the correct answer obviously longer than every distractor."
+    return ""
+
+
+def _single_answer_specificity_signal_error(correct_answer: str, distractors: list[str]) -> str:
+    if not correct_answer or not distractors:
+        return ""
+    correct_profile = _option_specificity_profile(correct_answer)
+    distractor_profiles = [
+        _option_specificity_profile(distractor)
+        for distractor in distractors
+        if str(distractor).strip()
+    ]
+    if not distractor_profiles:
+        return ""
+
+    max_distractor_clause_score = max(profile["clause_score"] for profile in distractor_profiles)
+    max_distractor_punctuation = max(profile["punctuation_score"] for profile in distractor_profiles)
+    max_distractor_content_words = max(profile["content_word_count"] for profile in distractor_profiles)
+    max_distractor_words = max(profile["word_count"] for profile in distractor_profiles)
+    average_distractor_words = sum(profile["word_count"] for profile in distractor_profiles) / len(distractor_profiles)
+
+    if (
+        correct_profile["clause_score"] >= 2
+        and max_distractor_clause_score == 0
+        and (
+            (
+                correct_profile["content_word_count"] >= max_distractor_content_words + 1
+                and correct_profile["word_count"] >= average_distractor_words
+            )
+            or max_distractor_punctuation == 0
+        )
+    ):
+        return "Single-answer payload makes the correct answer much more qualified or multi-clause than every distractor."
+
+    if (
+        correct_profile["punctuation_score"] >= 1
+        and max_distractor_punctuation == 0
+        and correct_profile["word_count"] >= average_distractor_words + 3
+        and correct_profile["clause_score"] >= 1
+    ):
+        return "Single-answer payload makes the correct answer much more qualified or multi-clause than every distractor."
+
+    if (
+        correct_profile["content_word_count"] >= max_distractor_content_words + 3
+        and correct_profile["clause_score"] >= 1
+        and max_distractor_clause_score == 0
+        and correct_profile["word_count"] >= max_distractor_words + 1
+    ):
+        return "Single-answer payload makes the correct answer much more specific than every distractor."
+
+    return ""
+
+
+def _single_answer_option_balance_error(correct_answer: str, distractors: list[str]) -> str:
+    return (
+        _single_answer_length_signal_error(correct_answer, distractors)
+        or _single_answer_specificity_signal_error(correct_answer, distractors)
+    )
+
+
+def _single_answer_style_signal_error(correct_answer: str, distractors: list[str]) -> str:
+    cleaned_correct = re.sub(r"\s+", " ", str(correct_answer or "").strip())
+    cleaned_distractors = [re.sub(r"\s+", " ", str(distractor or "").strip()) for distractor in distractors if str(distractor).strip()]
+    if not cleaned_correct or not cleaned_distractors:
+        return ""
+
+    imperative_verbs = set(STUDY_FOCUS_ACTION_VERBS) | {"calculate", "determine", "state", "use", "write"}
+    correct_first_word = re.findall(r"[A-Za-z]+", cleaned_correct.lower()[:24])
+    if correct_first_word and correct_first_word[0] in imperative_verbs:
+        return "Single-answer payload uses an instructional objective phrase as the correct answer."
+
+    generic_distractor_starts = (
+        "It focuses on a related detail",
+        "It describes a different effect",
+        "It confuses the cause and effect",
+        "It gives a partially relevant fact",
+        "It sounds plausible",
+    )
+    if all(any(distractor.startswith(prefix) for prefix in generic_distractor_starts) for distractor in cleaned_distractors):
+        return "Single-answer payload uses generic templated distractors instead of real alternatives."
+
+    meta_distractor_patterns = (
+        r"\bdoes not fully answer the question\b",
+        r"\bdoes not explain the main relationship being tested\b",
+        r"\brather than the best explanation for this question\b",
+        r"\bpartially relevant fact\b",
+        r"\bsounds plausible\b",
+        r"\bcentral mechanism or role\b",
+    )
+    if any(
+        any(re.search(pattern, distractor, flags=re.IGNORECASE) for pattern in meta_distractor_patterns)
+        for distractor in cleaned_distractors
+    ):
+        return "Single-answer payload uses meta-commentary distractors instead of direct content alternatives."
+
+    distractor_first_words = []
+    for distractor in cleaned_distractors:
+        words = re.findall(r"[A-Za-z]+", distractor.lower())
+        if words:
+            distractor_first_words.append(words[0])
+    if (
+        len(distractor_first_words) == len(cleaned_distractors)
+        and len(set(distractor_first_words)) == 1
+        and distractor_first_words[0] in {"it", "because", "the", "this"}
+    ):
+        correct_chars, _correct_words = _option_length_profile(cleaned_correct)
+        distractor_char_lengths = [_option_length_profile(distractor)[0] for distractor in cleaned_distractors]
+        if all(length >= correct_chars + 10 for length in distractor_char_lengths):
+            return "Single-answer payload uses distractors with the same opening word and noticeably longer phrasing than the answer."
+
+    distractor_opening_phrases = []
+    for distractor in cleaned_distractors:
+        words = re.findall(r"[A-Za-z]+", distractor.lower())
+        if len(words) >= 2:
+            distractor_opening_phrases.append(" ".join(words[:2]))
+    correct_opening_words = re.findall(r"[A-Za-z]+", cleaned_correct.lower())
+    correct_opening_phrase = " ".join(correct_opening_words[:2]) if len(correct_opening_words) >= 2 else ""
+    if (
+        len(distractor_opening_phrases) == len(cleaned_distractors)
+        and len(set(distractor_opening_phrases)) == 1
+        and distractor_opening_phrases[0]
+        and distractor_opening_phrases[0] != correct_opening_phrase
+    ):
+        return "Single-answer payload makes every distractor share the same opening phrase while the correct answer does not."
+
+    return ""
+
+
+def single_answer_question_balance_error(question: QuestionBankItem) -> str:
+    if getattr(question, "question_type", "") != QuestionBankItem.QuestionType.MCQ:
+        return ""
+    correct_answer = str(getattr(question, "correct_answer", "")).strip()
+    distractors = [str(option).strip() for option in getattr(question, "distractors", []) if str(option).strip()]
+    return (
+        _single_answer_option_balance_error(correct_answer, distractors)
+        or _single_answer_style_signal_error(correct_answer, distractors)
+    )
+
+
+def question_quality_issue(question: QuestionBankItem) -> str:
+    return (
+        single_answer_question_balance_error(question)
+        or _objective_alignment_error(
+            stem=str(getattr(question, "stem", "") or ""),
+            correct_answers=[
+                answer
+                for answer in [
+                    str(getattr(question, "correct_answer", "") or ""),
+                    *[str(answer or "") for answer in getattr(question, "additional_correct_answers", []) or []],
+                ]
+                if answer.strip()
+            ],
+            objective=getattr(question, "learning_objective", None),
+        )
+    )
+
+
+def question_quality_sort_key(question: QuestionBankItem) -> tuple[int, int]:
+    balance_error = question_quality_issue(question)
+    return (
+        1 if balance_error else 0,
+        1 if getattr(question, "question_type", "") == QuestionBankItem.QuestionType.MCQ and not getattr(question, "distractors", []) else 0,
+    )
+
+
+def _keywords_overlap_count(left: set[str], right: set[str]) -> int:
+    if not left or not right:
+        return 0
+    matched_right: set[str] = set()
+    overlap = 0
+    for left_token in sorted(left):
+        for right_token in sorted(right):
+            if right_token in matched_right:
+                continue
+            shorter, longer = (left_token, right_token) if len(left_token) <= len(right_token) else (right_token, left_token)
+            if (
+                left_token == right_token
+                or (len(shorter) >= 5 and longer.startswith(shorter))
+                or (min(len(left_token), len(right_token)) >= 6 and left_token[:6] == right_token[:6])
+            ):
+                matched_right.add(right_token)
+                overlap += 1
+                break
+    return overlap
+
+
+def _objective_alignment_error(
+    *,
+    stem: str,
+    correct_answers: list[str],
+    objective: LearningObjective | None,
+) -> str:
+    if objective is None:
+        return ""
+    objective_tokens = _keyword_set(objective.text)
+    if not objective_tokens:
+        return ""
+    question_tokens = _keyword_set(" ".join([stem, *correct_answers]))
+    overlap = _keywords_overlap_count(objective_tokens, question_tokens)
+    required_overlap = 2 if len(objective_tokens) >= 5 else 1
+    if overlap < required_overlap:
+        return "Generated question does not stay aligned with the target learning objective."
+    return ""
+
+
+def _trace_generation_rejection(block: CourseBlock, question_type: str, error: str, *, chunk: ContentChunk | None = None, objective: LearningObjective | None = None) -> None:
+    _trace_generation(
+        "question_generation_rejected",
+        requested_type=QuestionBankItem.display_label_for_question_type(question_type),
+        block=block.title,
+        block_id=block.pk,
+        chunk_id=(chunk.pk if chunk else None),
+        objective=(objective.text if objective else ""),
+        error=error,
+    )
+
+
+def _fallback_concept_distractors(topic: str, distractor_count: int) -> list[str]:
+    cleaned_topic = re.sub(r"\s+", " ", str(topic or "").strip(" ?.!")).lower() or "this topic"
+    templates = [
+        "It focuses on a related detail in {topic}, but it does not explain the main relationship being tested.",
+        "It describes a different effect within {topic}, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in {topic}, so it does not fully answer the question.",
+        "It gives a partially relevant fact about {topic}, but it misses the key concept needed here.",
+        "It sounds plausible for {topic}, yet it does not address the central mechanism or role in the scenario.",
+    ]
+    return [template.format(topic=cleaned_topic) for template in templates[:distractor_count]]
+
+
 def _fallback_written_answer_keywords(*texts: str, limit: int = 6) -> list[str]:
     keywords: list[str] = []
     seen: set[str] = set()
@@ -951,7 +1250,7 @@ def _fallback_question_payload(
             "difficulty": "core",
         }
 
-    distractors = [f"Alternative interpretation {index}" for index in range(1, distractor_count + 1)]
+    distractors = _fallback_concept_distractors(summary_for_stem, distractor_count)
     correct_answers = [correct_answer]
     if question_type == QuestionBankItem.QuestionType.MAQ:
         fallback_candidates = [sentence[:90].strip() for sentence in source_sentences if sentence[:90].strip()]
@@ -1256,7 +1555,12 @@ def _payload_for_generation_attempt(
                 )
                 if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
                     raise ValueError("Question stem depends on source/meta phrasing.")
-                _normalize_generated_payload(payload, question_type, distractor_count)
+                _normalize_generated_payload(
+                    payload,
+                    question_type,
+                    distractor_count,
+                    expected_coding_language=coding_signal.get("language", ""),
+                )
             except (ValueError, json.JSONDecodeError, KeyError, TypeError):
                 payload = _fallback_coding_question_payload(
                     chunk,
@@ -1276,24 +1580,16 @@ def _payload_for_generation_attempt(
         question_variant_index=question_variant_index,
     )
     if settings.OPENAI_API_KEY:
-        try:
-            payload = _openai_question_payload(
-                chunk,
-                objective,
-                distractor_count,
-                question_type,
-                avoid_question_angles=avoid_question_angles,
-            )
-            if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
-                raise ValueError("Question stem depends on source/meta phrasing.")
-        except (ValueError, json.JSONDecodeError, KeyError, TypeError):
-            payload = _fallback_question_payload(
-                chunk,
-                objective,
-                distractor_count,
-                question_type,
-                question_variant_index=question_variant_index,
-            )
+        payload = _openai_question_payload(
+            chunk,
+            objective,
+            distractor_count,
+            question_type,
+            avoid_question_angles=avoid_question_angles,
+        )
+        if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
+            raise ValueError("Question stem depends on source/meta phrasing.")
+        _normalize_generated_payload(payload, question_type, distractor_count)
     return payload, question_type, ""
 
 
@@ -1382,6 +1678,10 @@ Rules:
 - {"the question must require the student to type an answer in their own words" if is_waq else ("the question must require selecting more than one correct answer" if is_maq else "the question must have only one correct answer")}
 - {"written_answer_keywords must be an array of 3 to 6 short concept phrases or key terms needed for a strong answer" if is_waq else f"use exactly {distractor_count} distractors"}
 - {"do not return distractors for a written-answer question" if is_waq else "distractors must be plausible and distinct from the correct answer(s)"}
+- {"n/a" if is_waq else "keep all answer options similar in length, specificity, and qualification; do not make the correct answer obviously identifiable because it is the longest, most detailed, or only multi-clause option"}
+- {"n/a" if is_waq else "keep each answer option concise: usually one clause or short sentence fragment, roughly 5 to 16 words unless the concept genuinely requires slightly more"}
+- {"n/a" if is_waq else "each answer option must be a direct substantive claim, not commentary about whether another option is relevant, partial, plausible, or complete"}
+- {"n/a" if is_waq else "do not make all distractors start with the same stock opener such as Because, It, This, or The unless the correct answer uses the same opener and comparable phrasing"}
 - further_study_questions must be an array of exactly 3 concise student-facing follow-up questions
 - further_study_questions should invite deeper understanding, examples, comparison, application, or common mistakes when helpful
 - each further_study_questions item must be phrased as a question a student could click to ask next
@@ -1454,6 +1754,10 @@ Rules:
 - {"written_answer_keywords must be an array of 3 to 6 short concept phrases or key terms needed for a strong answer" if is_waq else f"use exactly {distractor_count} distractors"}
 - {"do not return distractors for a written-answer question" if is_waq else "distractors must be plausible and distinct from the correct answer(s)"}
 - {"the written-answer prompt should ask the student to interpret the code or identify the key issue in their own words" if is_waq else "the answer choices should test misconceptions about scope, indexing, mutation, return values, control flow, or API semantics where appropriate"}
+- {"n/a" if is_waq else "keep all answer options similar in length, specificity, and qualification; do not make the correct answer obviously identifiable because it is the longest, most detailed, or only multi-clause option"}
+- {"n/a" if is_waq else "keep each answer option concise: usually one clause or short sentence fragment, roughly 5 to 16 words unless the concept genuinely requires slightly more"}
+- {"n/a" if is_waq else "each answer option must be a direct substantive claim about the code, not commentary about whether another option is relevant, partial, plausible, or complete"}
+- {"n/a" if is_waq else "do not make all distractors start with the same stock opener such as Because, It, This, or The unless the correct answer uses the same opener and comparable phrasing"}
 - further_study_questions must be an array of exactly 3 concise student-facing follow-up questions{avoidance_prompt}
 
 Learning objective:
@@ -1874,6 +2178,20 @@ def _normalize_generated_payload(
     else:
         numeric_metadata = {}
 
+    if normalized_type == QuestionBankItem.QuestionType.MCQ:
+        option_balance_error = (
+            _single_answer_option_balance_error(
+                correct_answers[0] if correct_answers else "",
+                distractors,
+            )
+            or _single_answer_style_signal_error(
+                correct_answers[0] if correct_answers else "",
+                distractors,
+            )
+        )
+        if option_balance_error:
+            raise ValueError(option_balance_error)
+
     further_study_questions = further_study_questions or fallback_further_study_questions(
         stem=stem,
         objective_text="",
@@ -1941,6 +2259,13 @@ def _create_question_pair(
         course.config.distractor_count,
         expected_coding_language=expected_coding_language,
     )
+    objective_alignment_error = _objective_alignment_error(
+        stem=normalized_payload["stem"],
+        correct_answers=normalized_payload["correct_answers"],
+        objective=objective,
+    )
+    if objective_alignment_error:
+        raise ValueError(objective_alignment_error)
     stem = _normalize_question_stem(normalized_payload["stem"])
     if (
         normalized_payload["question_type"] != QuestionBankItem.QuestionType.NUM
@@ -2137,8 +2462,10 @@ def generate_question_pair_for_block(
             question_type_chunk_counts=question_type_chunk_counts,
             question_type_objective_chunk_counts=question_type_objective_chunk_counts,
         )
+        target_keywords = objective_keywords.get(objective.pk, set())
+        if strict_preferred_objectives and target_keywords:
+            ranked_chunks = [chunk for chunk in ranked_chunks if (_keyword_set(chunk.text) & target_keywords)]
         if question_type == QuestionBankItem.QuestionType.NUM:
-            target_keywords = objective_keywords.get(objective.pk, set())
             ranked_chunks = [
                 chunk
                 for chunk in ranked_chunks
@@ -2170,26 +2497,31 @@ def generate_question_pair_for_block(
                 if numeric_error:
                     last_generation_error = numeric_error
                 continue
-            coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
-            payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
-                chunk,
-                objective,
-                course.config.distractor_count,
-                question_type,
-                coding_signal=coding_signal,
-                avoid_question_angles=avoid_question_angles,
-                question_variant_index=question_variant_index,
-            )
-            practice, validation = _create_question_pair(
-                course=course,
-                block=block,
-                chunk=chunk,
-                objective=objective,
-                question_type=effective_question_type,
-                payload=payload,
-                existing_hashes=existing_hashes,
-                expected_coding_language=expected_coding_language,
-            )
+            try:
+                coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
+                payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
+                    chunk,
+                    objective,
+                    course.config.distractor_count,
+                    question_type,
+                    coding_signal=coding_signal,
+                    avoid_question_angles=avoid_question_angles,
+                    question_variant_index=question_variant_index,
+                )
+                practice, validation = _create_question_pair(
+                    course=course,
+                    block=block,
+                    chunk=chunk,
+                    objective=objective,
+                    question_type=effective_question_type,
+                    payload=payload,
+                    existing_hashes=existing_hashes,
+                    expected_coding_language=expected_coding_language,
+                )
+            except (ValueError, OpenAIError) as exc:
+                last_generation_error = str(exc)
+                _trace_generation_rejection(block, question_type, last_generation_error, chunk=chunk, objective=objective)
+                continue
             if practice is not None and validation is not None:
                 return practice, validation
 
@@ -2204,6 +2536,10 @@ def generate_question_pair_for_block(
             chunk_index_by_block[chunk.block_id] - 1,
             total_chunks_by_block[chunk.block_id],
         )
+        if strict_preferred_objectives and objective is not None:
+            target_keywords = objective_keywords.get(objective.pk, set())
+            if target_keywords and not (_keyword_set(chunk.text) & target_keywords):
+                continue
         if question_type == QuestionBankItem.QuestionType.NUM and (
             objective is None
             or (
@@ -2234,36 +2570,44 @@ def generate_question_pair_for_block(
             if numeric_error:
                 last_generation_error = numeric_error
             continue
-        coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
-        payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
-            chunk,
-            objective,
-            course.config.distractor_count,
-            question_type,
-            coding_signal=coding_signal,
-            avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
-            question_variant_index=question_variant_index,
-        )
-        practice, validation = _create_question_pair(
-            course=course,
-            block=block,
-            chunk=chunk,
-            objective=objective,
-            question_type=effective_question_type,
-            payload=payload,
-            existing_hashes=existing_hashes,
-            expected_coding_language=expected_coding_language,
-        )
+        try:
+            coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
+            payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
+                chunk,
+                objective,
+                course.config.distractor_count,
+                question_type,
+                coding_signal=coding_signal,
+                avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
+                question_variant_index=question_variant_index,
+            )
+            practice, validation = _create_question_pair(
+                course=course,
+                block=block,
+                chunk=chunk,
+                objective=objective,
+                question_type=effective_question_type,
+                payload=payload,
+                existing_hashes=existing_hashes,
+                expected_coding_language=expected_coding_language,
+            )
+        except (ValueError, OpenAIError) as exc:
+            last_generation_error = str(exc)
+            _trace_generation_rejection(block, question_type, last_generation_error, chunk=chunk, objective=objective)
+            continue
         if practice is not None and validation is not None:
             return practice, validation
 
     if question_type == QuestionBankItem.QuestionType.NUM and not found_numeric_candidate_path and not last_generation_error:
         last_generation_error = "This block does not contain a suitable calculation-style path for a numerical MCQ."
-    if raise_generation_errors and question_type == QuestionBankItem.QuestionType.NUM:
+    if raise_generation_errors and last_generation_error:
         detail = f" {last_generation_error}" if last_generation_error else ""
-        raise QuestionGenerationError(
-            f"Could not generate a numerical MCQ for this block.{detail}"
+        message = (
+            "Could not generate a numerical MCQ for this block."
+            if question_type == QuestionBankItem.QuestionType.NUM
+            else "Could not generate a high-quality question for this block."
         )
+        raise QuestionGenerationError(f"{message}{detail}")
     return None, None
 
 

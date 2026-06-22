@@ -1,0 +1,357 @@
+{
+  "scan_scope": {
+    "course_id": null,
+    "bank_type": "practice"
+  },
+  "flagged_count": 19,
+  "scanned_count": 77,
+  "course_count": 2,
+  "flagged_course_ids": [
+    5,
+    8
+  ],
+  "flagged_rows": [
+    {
+      "question_id": 817,
+      "linked_question_id": 818,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 11,
+      "block_title": "Printing and Manipulating Text",
+      "learning_objective_id": 112,
+      "bank_type": "practice",
+      "issue": "Single-answer payload makes every distractor share the same opening phrase while the correct answer does not.",
+      "stem": "Why is it important to understand how data types work in programming?",
+      "correct_answer": "Because understanding data types helps prevent common programming frustrations and errors",
+      "distractors": [
+        "Because data types allow you to write code without using variables",
+        "Because data types automatically fix mistakes in your code",
+        "Because data types let you execute code faster without any debugging"
+      ]
+    },
+    {
+      "question_id": 777,
+      "linked_question_id": 778,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 287,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains microevolution and macroevolution with of biodiversity change over time?",
+      "correct_answer": "Compare microevolution and macroevolution with examples of biodiversity change over time",
+      "distractors": [
+        "It focuses on a related detail in microevolution and macroevolution with of biodiversity change over time, but it does not explain the main relationship being tested.",
+        "It describes a different effect within microevolution and macroevolution with of biodiversity change over time, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in microevolution and macroevolution with of biodiversity change over time, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 781,
+      "linked_question_id": 782,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 245,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains molecular biology principles to demonstrate common ancestry across all life forms?",
+      "correct_answer": "Apply molecular biology principles to demonstrate common ancestry across all life forms",
+      "distractors": [
+        "It focuses on a related detail in molecular biology principles to demonstrate common ancestry across all life forms, but it does not explain the main relationship being tested.",
+        "It describes a different effect within molecular biology principles to demonstrate common ancestry across all life forms, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in molecular biology principles to demonstrate common ancestry across all life forms, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 783,
+      "linked_question_id": 784,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 246,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the effects of convergent evolution on evolutionary relationships and classification?",
+      "correct_answer": "Analyze the effects of convergent evolution on evolutionary relationships and classificati",
+      "distractors": [
+        "It focuses on a related detail in the effects of convergent evolution on evolutionary relationships and classification, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the effects of convergent evolution on evolutionary relationships and classification, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the effects of convergent evolution on evolutionary relationships and classification, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 785,
+      "linked_question_id": 786,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 247,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains diverse religious perspectives on evolution and how they relate to scientific understanding?",
+      "correct_answer": "Explain diverse religious perspectives on evolution and how they relate to scientific unde",
+      "distractors": [
+        "It focuses on a related detail in diverse religious perspectives on evolution and how they relate to scientific understanding, but it does not explain the main relationship being tested.",
+        "It describes a different effect within diverse religious perspectives on evolution and how they relate to scientific understanding, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in diverse religious perspectives on evolution and how they relate to scientific understanding, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 787,
+      "linked_question_id": 788,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 291,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the importance of evolutionary biology for biomedical research and human anatomy?",
+      "correct_answer": "Evaluate the importance of evolutionary biology for biomedical research and human anatomy",
+      "distractors": [
+        "It focuses on a related detail in the importance of evolutionary biology for biomedical research and human anatomy, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the importance of evolutionary biology for biomedical research and human anatomy, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the importance of evolutionary biology for biomedical research and human anatomy, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 711,
+      "linked_question_id": 712,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 252,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms?",
+      "correct_answer": "Explain how yeast mutants have elucidated the genetic control of the cell cycle and cancer",
+      "distractors": [
+        "It focuses on a related detail in how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, but it does not explain the main relationship being tested.",
+        "It describes a different effect within how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 731,
+      "linked_question_id": 732,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 252,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms (variant 2)?",
+      "correct_answer": "Explain how yeast mutants have elucidated the genetic control of the cell cycle and cancer",
+      "distractors": [
+        "It focuses on a related detail in how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, but it does not explain the main relationship being tested.",
+        "It describes a different effect within how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in how yeast mutants have elucidated the genetic control of the cell cycle and cancer mechanisms, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 789,
+      "linked_question_id": 790,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 250,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the concept of the tree of life and its significance in selecting model organisms for biological research?",
+      "correct_answer": "Explain the concept of the tree of life and its significance in selecting model organisms",
+      "distractors": [
+        "It focuses on a related detail in the concept of the tree of life and its significance in selecting model organisms for biological research, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the concept of the tree of life and its significance in selecting model organisms for biological research, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the concept of the tree of life and its significance in selecting model organisms for biological research, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 791,
+      "linked_question_id": 792,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 283,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains ethical principles such as replacement reduction and refinement to model organism research to minimize animal use and su?",
+      "correct_answer": "Apply ethical principles such as replacement, reduction, and refinement to model organism",
+      "distractors": [
+        "It focuses on a related detail in ethical principles such as replacement reduction and refinement to model organism research to minimize animal use and su, but it does not explain the main relationship being tested.",
+        "It describes a different effect within ethical principles such as replacement reduction and refinement to model organism research to minimize animal use and su, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in ethical principles such as replacement reduction and refinement to model organism research to minimize animal use and su, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 795,
+      "linked_question_id": 796,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 282,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the evolutionary and physiological differences between animals and humans that impact translational research?",
+      "correct_answer": "Discuss the evolutionary and physiological differences between animals and humans that imp",
+      "distractors": [
+        "It focuses on a related detail in the evolutionary and physiological differences between animals and humans that impact translational research, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the evolutionary and physiological differences between animals and humans that impact translational research, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the evolutionary and physiological differences between animals and humans that impact translational research, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 799,
+      "linked_question_id": 800,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 251,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains major model organisms and describe their unique features and research applications?",
+      "correct_answer": "Identify major model organisms and describe their unique features and research application",
+      "distractors": [
+        "It focuses on a related detail in major model organisms and describe their unique features and research applications, but it does not explain the main relationship being tested.",
+        "It describes a different effect within major model organisms and describe their unique features and research applications, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in major model organisms and describe their unique features and research applications, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 773,
+      "linked_question_id": 774,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 266,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the chemical and biological origins of life including abiogenesis and the formation of life s building blocks?",
+      "correct_answer": "Describe the chemical and biological origins of life including abiogenesis and the formati",
+      "distractors": [
+        "It focuses on a related detail in the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 793,
+      "linked_question_id": 794,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 259,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the dual informational and catalytic roles of rna in early molecular evolution?",
+      "correct_answer": "Analyze the dual informational and catalytic roles of RNA in early molecular evolution",
+      "distractors": [
+        "It focuses on a related detail in the dual informational and catalytic roles of rna in early molecular evolution, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the dual informational and catalytic roles of rna in early molecular evolution, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the dual informational and catalytic roles of rna in early molecular evolution, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 805,
+      "linked_question_id": 806,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 266,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the chemical and biological origins of life including abiogenesis and the formation of life s building blocks?",
+      "correct_answer": "Describe the chemical and biological origins of life including abiogenesis and the formati",
+      "distractors": [
+        "It focuses on a related detail in the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the chemical and biological origins of life including abiogenesis and the formation of life s building blocks, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 807,
+      "linked_question_id": 808,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 259,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains the dual informational and catalytic roles of rna in early molecular evolution?",
+      "correct_answer": "Analyze the dual informational and catalytic roles of RNA in early molecular evolution",
+      "distractors": [
+        "It focuses on a related detail in the dual informational and catalytic roles of rna in early molecular evolution, but it does not explain the main relationship being tested.",
+        "It describes a different effect within the dual informational and catalytic roles of rna in early molecular evolution, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in the dual informational and catalytic roles of rna in early molecular evolution, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 809,
+      "linked_question_id": 810,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 263,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses generic templated distractors instead of real alternatives.",
+      "stem": "Which statement best explains assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events?",
+      "correct_answer": "Assess the limitations of the traditional tree of life metaphor due to symbiotic and horiz",
+      "distractors": [
+        "It focuses on a related detail in assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, but it does not explain the main relationship being tested.",
+        "It describes a different effect within assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 811,
+      "linked_question_id": 812,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 261,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance?",
+      "correct_answer": "Compare anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary si",
+      "distractors": [
+        "It focuses on a related detail in anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, but it does not explain the main relationship being tested.",
+        "It describes a different effect within anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 813,
+      "linked_question_id": 814,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 268,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events?",
+      "correct_answer": "Evaluate geological and fossil evidence supporting the rise of atmospheric oxygen and the",
+      "distractors": [
+        "It focuses on a related detail in geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, but it does not explain the main relationship being tested.",
+        "It describes a different effect within geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, so it does not fully answer the question."
+      ]
+    }
+  ]
+}

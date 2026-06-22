@@ -1,0 +1,194 @@
+{
+  "scan_scope": {
+    "course_id": 8,
+    "bank_type": "practice"
+  },
+  "flagged_count": 10,
+  "scanned_count": 30,
+  "course_count": 1,
+  "flagged_course_ids": [
+    8
+  ],
+  "flagged_rows": [
+    {
+      "question_id": 651,
+      "linked_question_id": 652,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 289,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why does the presence of a nearly universal genetic code across different organisms support the concept of a common evolutionary origin?",
+      "correct_answer": "Because it indicates deep conservation of fundamental molecular processes inherited from a shared ancestor",
+      "distractors": [
+        "Because it shows that different species independently evolved the same genetic code by chance",
+        "Because it means all organisms have identical cellular structures and functions",
+        "Because it suggests that the genetic code changes rapidly over evolutionary time"
+      ]
+    },
+    {
+      "question_id": 779,
+      "linked_question_id": 780,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 244,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is understanding the history of biochemical innovation important for comprehending the evolution of life on Earth?",
+      "correct_answer": "Because biochemical innovations like photosynthesis have fundamentally shaped the development and complexity of life on our planet",
+      "distractors": [
+        "Because biochemical innovations primarily affect individual organism behaviors rather than evolutionary history",
+        "Because biochemical changes occur independently from evolutionary processes and do not influence life development",
+        "Because biochemical innovation is only relevant to the study of chemistry, not biology or evolution"
+      ]
+    },
+    {
+      "question_id": 859,
+      "linked_question_id": 860,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 287,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Which theistic view integrates the idea that God established natural laws which then allowed evolutionary processes to proceed without further direct intervention?",
+      "correct_answer": "Theistic evolution, where God invented the rules and let natural processes run",
+      "distractors": [
+        "Young earth creationism, which holds species were created separately about 6000 years ago",
+        "Gap creationism, which believes the Earth is old but biodiversity appeared suddenly",
+        "Progressive creationism, involving mutations and selection combined with occasional divine interventions"
+      ]
+    },
+    {
+      "question_id": 865,
+      "linked_question_id": 866,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 247,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "How does the molecular clock method estimate the time of a common ancestor between species?",
+      "correct_answer": "By measuring genetic differences and assuming a relatively constant rate of evolution to approximate divergence time",
+      "distractors": [
+        "By comparing physical features and assuming species with similar traits share a recent common ancestor",
+        "By dating the age of fossils directly associated with each species to determine when they coexisted",
+        "By calculating the rate of environmental change and correlating it with species divergence times"
+      ]
+    },
+    {
+      "question_id": 877,
+      "linked_question_id": 878,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 23,
+      "block_title": "Model Organisms",
+      "learning_objective_id": 282,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why are human-based in vitro models increasingly preferred over animal models in some areas of biomedical testing?",
+      "correct_answer": "Because they can better replicate human physiology and avoid species differences that limit animal model relevance",
+      "distractors": [
+        "Because animal models are no longer legally permitted for any type of biomedical testing",
+        "Because in vitro models are always more cost-effective and easier to use than animal models",
+        "Because animal models never share any genetic or physiological similarities with humans"
+      ]
+    },
+    {
+      "question_id": 809,
+      "linked_question_id": 810,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 263,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses generic templated distractors instead of real alternatives.",
+      "stem": "Which statement best explains assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events?",
+      "correct_answer": "Assess the limitations of the traditional tree of life metaphor due to symbiotic and horiz",
+      "distractors": [
+        "It focuses on a related detail in assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, but it does not explain the main relationship being tested.",
+        "It describes a different effect within assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 811,
+      "linked_question_id": 812,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 261,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance?",
+      "correct_answer": "Compare anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary si",
+      "distractors": [
+        "It focuses on a related detail in anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, but it does not explain the main relationship being tested.",
+        "It describes a different effect within anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 813,
+      "linked_question_id": 814,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 268,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events?",
+      "correct_answer": "Evaluate geological and fossil evidence supporting the rise of atmospheric oxygen and the",
+      "distractors": [
+        "It focuses on a related detail in geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, but it does not explain the main relationship being tested.",
+        "It describes a different effect within geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 883,
+      "linked_question_id": 884,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 259,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why are electrical sparks used in laboratory simulations of early Earth conditions when studying the origins of life?",
+      "correct_answer": "Because electrical sparks simulate lightning which provides energy to drive chemical reactions forming organic molecules",
+      "distractors": [
+        "Because electrical sparks sterilize the experimental setup to avoid contamination",
+        "Because electrical sparks represent volcanic activity responsible for generating early atmospheric gases",
+        "Because electrical sparks mimic the ultraviolet radiation from the early sun that breaks down complex molecules"
+      ]
+    },
+    {
+      "question_id": 885,
+      "linked_question_id": 886,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 266,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is the concept of homologous traits important in understanding the Tree of Life?",
+      "correct_answer": "Because homologous traits indicate shared ancestry by showing features inherited from a common ancestor",
+      "distractors": [
+        "Because homologous traits are characteristics that evolve independently in unrelated species due to similar environments",
+        "Because homologous traits identify traits that appear only in the latest branches of the Tree of Life",
+        "Because homologous traits emphasize differences that are more important than common ancestry in classification"
+      ]
+    }
+  ]
+}
