@@ -21,6 +21,7 @@ from standalone.models import (
     ValidationEvent,
 )
 from standalone.services.content import SUPPORTED_EXTENSIONS, sanitize_learning_objective, sanitize_summary
+from standalone.services.demo_mode import normalize_demo_iframe_origins
 from standalone.services.guidance import sanitize_assistant_guidance
 
 
@@ -173,6 +174,20 @@ class CourseConfigForm(forms.ModelForm):
         self.fields["self_enrol_domain"].help_text = (
             "Optional. Enter a domain such as example.ac.uk. It applies to both self-enrol allowlist signups and magic links."
         )
+        self.fields["demo_enabled"].label = "Enable public demo mode"
+        self.fields["demo_enabled"].help_text = (
+            "Publishes a no-login student demo link for this course. Demo practice is shared across all visitors."
+        )
+        self.fields["demo_iframe_allowed_origins"].label = "Allowed iframe origins"
+        self.fields["demo_iframe_allowed_origins"].help_text = (
+            "Optional. Enter exact origins such as https://yourinstitution.instructure.com, separated by commas or new lines."
+        )
+        self.fields["demo_iframe_allowed_origins"].widget = forms.Textarea(
+            attrs={
+                "rows": 3,
+                "placeholder": "https://yourinstitution.instructure.com",
+            }
+        )
         self.fields["assistant_guidance"].label = "Assistant guidance"
         self.fields["assistant_guidance"].help_text = (
             "Optional. Add free-text steering notes for question generation and student course chat, such as audience age, notation rules, or preferred wording."
@@ -232,6 +247,9 @@ class CourseConfigForm(forms.ModelForm):
 
     def clean_assistant_guidance(self):
         return sanitize_assistant_guidance(self.cleaned_data.get("assistant_guidance", ""))
+
+    def clean_demo_iframe_allowed_origins(self):
+        return normalize_demo_iframe_origins(self.cleaned_data.get("demo_iframe_allowed_origins", ""))
 
 
 class CourseAllowedEmailForm(forms.ModelForm):

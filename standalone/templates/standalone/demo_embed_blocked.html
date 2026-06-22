@@ -1,0 +1,10 @@
+{% extends "standalone/base.html" %}
+{% block title %}Demo unavailable | {{ course.title }}{% endblock %}
+{% block app_shell_class %} preview-app-shell{% endblock %}
+{% block content %}
+  <section class="panel narrow">
+    <h1>{{ course.title }}</h1>
+    <p class="lead">{{ blocked_reason }}</p>
+    <p class="help-text">Ask the course owner to add your Canvas origin to the allowed iframe list for this demo.</p>
+  </section>
+{% endblock %}

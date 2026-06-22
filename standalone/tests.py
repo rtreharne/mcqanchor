@@ -22,6 +22,8 @@ from standalone.models import (
     CourseAllowedEmail,
     CourseBlock,
     CourseConfig,
+    CourseDemoAccess,
+    CourseDemoValidationSession,
     CourseImport,
     CourseImportChapter,
     CourseMagicLink,
@@ -1077,6 +1079,17 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, "Logged in as: teacher@example.com")
         self.assertContains(response, "Log out")
         self.assertNotContains(response, ">Dashboard<", html=False)
+
+    def test_teacher_dashboard_recreates_missing_course_config_for_legacy_course(self):
+        course = self.create_course()
+        course.config.delete()
+
+        self.client.force_login(self.teacher)
+        response = self.client.get(reverse("standalone:teacher_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(CourseConfig.objects.filter(course=course).exists())
+        self.assertContains(response, course.title)
 
     def test_student_invitation_acceptance_creates_enrollment(self):
         course = self.create_course()
@@ -7073,7 +7086,8 @@ print(result)""",
         )
         self.client.force_login(self.teacher)
 
-        start_response = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+        with patch("standalone.services.preview_validation.generate_question_pair_for_block", return_value=(None, None)):
+            start_response = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
         served_question_id = start_response.context["session_state"]["pending_question"]["question_id"]
         self.assertEqual(served_question_id, question.pk)
 
@@ -7088,11 +7102,12 @@ print(result)""",
         self.assertFalse(any(message["kind"] == "feedback" for message in session["transcript"]))
         self.assertTrue(any(message["role"] == "user" and "Nutrient restriction sets the growth rate" in message["text"] for message in session["transcript"]))
 
-        final_response = self.client.post(
-            reverse("standalone:preview_validation_practice_action", args=[course.pk, "next"]),
-            data=json.dumps({}),
-            content_type="application/json",
-        )
+        with patch("standalone.services.preview_validation.generate_question_pair_for_block", return_value=(None, None)):
+            final_response = self.client.post(
+                reverse("standalone:preview_validation_practice_action", args=[course.pk, "next"]),
+                data=json.dumps({}),
+                content_type="application/json",
+            )
         final_session = final_response.json()["session"]
         self.assertTrue(final_session["completed"])
         self.assertFalse(any(message["role"] == "user" and message.get("question_type") == QuestionBankItem.QuestionType.WAQ for message in final_session["transcript"]))
@@ -7262,6 +7277,263 @@ print(result)""",
         self.assertContains(validation_response, "I have read and understood these instructions")
         self.assertContains(validation_response, "validation-session-data")
         self.assertNotContains(validation_response, "Time left")
+
+    def test_official_validation_sampling_stratifies_across_blocks_and_objectives(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block_one, asset_one, objective_one, chunk_one = self.create_preview_content_block(course, title="Block One", order=1)
+        block_two, asset_two, objective_two, chunk_two = self.create_preview_content_block(course, title="Block Two", order=2)
+        objective_three = LearningObjective.objects.create(
+            course=course,
+            block=block_two,
+            source_asset=asset_two,
+            position=2,
+            code="2.2",
+            text="Interpret the second idea in block two",
+        )
+        objective_four = LearningObjective.objects.create(
+            course=course,
+            block=block_two,
+            source_asset=asset_two,
+            position=3,
+            code="2.3",
+            text="Interpret the third idea in block two",
+        )
+        for index, (block, objective, chunk) in enumerate(
+            [
+                (block_one, objective_one, chunk_one),
+                (block_two, objective_two, chunk_two),
+                (block_two, objective_three, chunk_two),
+                (block_two, objective_four, chunk_two),
+            ],
+            start=1,
+        ):
+            QuestionBankItem.objects.create(
+                course=course,
+                block=block,
+                learning_objective=objective,
+                source_chunk=chunk,
+                bank_type=QuestionBankItem.BankType.VALIDATION,
+                status=QuestionBankItem.Status.APPROVED,
+                stem=f"Validation stratified question {index}?",
+                correct_answer="A",
+                distractors=["B", "C", "D"],
+                explanation="A.",
+                question_hash=f"validation-stratified-{index}",
+            )
+
+        selected = _pick_locked_questions(
+            course,
+            enrollment,
+            4,
+            seed_key="validation-stratified-seed",
+            blocks=[block_one, block_two],
+        )
+
+        self.assertEqual(len(selected), 4)
+        self.assertEqual(sum(1 for question in selected if question.block_id == block_one.pk), 1)
+        self.assertEqual(sum(1 for question in selected if question.block_id == block_two.pk), 3)
+        self.assertEqual(len({question.learning_objective_id for question in selected}), 4)
+
+    def test_official_validation_generates_missing_block_coverage_before_locking(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block_one, asset_one, objective_one, chunk_one = self.create_preview_content_block(course, title="Coverage One", order=1)
+        block_two, asset_two, objective_two, chunk_two = self.create_preview_content_block(course, title="Coverage Two", order=2)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block_one,
+            learning_objective=objective_one,
+            source_chunk=chunk_one,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Existing validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="existing-validation-coverage-question",
+        )
+
+        def fake_generate(block, *, preferred_objective_ids=None, strict_preferred_objectives=False, question_type=None, **kwargs):
+            objective = None
+            if preferred_objective_ids:
+                objective = LearningObjective.objects.get(pk=preferred_objective_ids[0])
+            else:
+                objective = block.learning_objectives.order_by("position", "pk").first()
+            practice = QuestionBankItem.objects.create(
+                course=course,
+                block=block,
+                learning_objective=objective,
+                source_chunk=chunk_two if block.pk == block_two.pk else chunk_one,
+                bank_type=QuestionBankItem.BankType.PRACTICE,
+                status=QuestionBankItem.Status.APPROVED,
+                question_type=question_type or QuestionBankItem.QuestionType.MCQ,
+                stem=f"Generated practice coverage for {block.title}?",
+                correct_answer="A",
+                distractors=["B", "C", "D"],
+                explanation="A.",
+                question_hash=f"generated-practice-coverage-{block.pk}-{objective.pk}-{question_type or 'mcq'}",
+            )
+            validation = QuestionBankItem.objects.create(
+                course=course,
+                block=block,
+                learning_objective=objective,
+                source_chunk=chunk_two if block.pk == block_two.pk else chunk_one,
+                bank_type=QuestionBankItem.BankType.VALIDATION,
+                status=QuestionBankItem.Status.APPROVED,
+                question_type=question_type or QuestionBankItem.QuestionType.MCQ,
+                stem=f"Generated validation coverage for {block.title}?",
+                correct_answer="A",
+                distractors=["B", "C", "D"],
+                explanation="A.",
+                question_hash=f"generated-validation-coverage-{block.pk}-{objective.pk}-{question_type or 'mcq'}",
+            )
+            practice.linked_question = validation
+            practice.save(update_fields=["linked_question", "updated_at"])
+            return practice, validation
+
+        with patch("standalone.services.validation_flow.generate_question_pair_for_block", side_effect=fake_generate):
+            selected = _pick_locked_questions(
+                course,
+                enrollment,
+                2,
+                seed_key="validation-generated-coverage-seed",
+                blocks=[block_one, block_two],
+            )
+
+        self.assertEqual(len(selected), 2)
+        self.assertEqual({question.block_id for question in selected}, {block_one.pk, block_two.pk})
+        self.assertTrue(any(question.block_id == block_two.pk and question.learning_objective_id == objective_two.pk for question in selected))
+
+    def test_student_practice_validation_sampling_stratifies_across_blocks(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block_one, asset_one, objective_one, chunk_one = self.create_preview_content_block(course, title="Practice One", order=1)
+        block_two, asset_two, objective_two, chunk_two = self.create_preview_content_block(course, title="Practice Two", order=2)
+        objective_three = LearningObjective.objects.create(
+            course=course,
+            block=block_two,
+            source_asset=asset_two,
+            position=2,
+            code="2.2",
+            text="Practice second objective",
+        )
+        for index, (block, objective, chunk) in enumerate(
+            [
+                (block_one, objective_one, chunk_one),
+                (block_two, objective_two, chunk_two),
+                (block_two, objective_three, chunk_two),
+            ],
+            start=1,
+        ):
+            QuestionBankItem.objects.create(
+                course=course,
+                block=block,
+                learning_objective=objective,
+                source_chunk=chunk,
+                bank_type=QuestionBankItem.BankType.PRACTICE,
+                status=QuestionBankItem.Status.APPROVED,
+                stem=f"Practice validation stratified question {index}?",
+                correct_answer="A",
+                distractors=["B", "C", "D"],
+                explanation="A.",
+                question_hash=f"practice-validation-stratified-{index}",
+            )
+        ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Upcoming practice sampler",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() + timedelta(days=1),
+            ends_at=timezone.now() + timedelta(days=1, hours=1),
+            location="Room P",
+            capacity=20,
+            freeze_at=timezone.now() + timedelta(days=1, minutes=40),
+            question_count=3,
+            time_limit_minutes=20,
+            late_booking_cutoff_minutes=20,
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.get(f"{reverse('standalone:validation_practice_session', args=[course.pk])}?restart=1")
+
+        self.assertEqual(response.status_code, 200)
+        attempt = PracticeAttempt.objects.get(
+            enrollment=enrollment,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+            completed_at__isnull=True,
+        )
+        locked_questions = [
+            attempt_question.question
+            for attempt_question in attempt.attempt_questions.select_related("question").order_by("order", "created_at")
+        ]
+        self.assertEqual(len(locked_questions), 3)
+        self.assertEqual(sum(1 for question in locked_questions if question.block_id == block_one.pk), 1)
+        self.assertEqual(sum(1 for question in locked_questions if question.block_id == block_two.pk), 2)
+        self.assertEqual(len({question.learning_objective_id for question in locked_questions}), 3)
+        self.assertEqual(response.context["session_state"]["pending_question"]["block_label"], locked_questions[0].block.title)
+
+    def test_teacher_preview_validation_sampling_uses_all_released_blocks(self):
+        course = self.create_course()
+        block_one, asset_one, objective_one, chunk_one = self.create_preview_content_block(course, title="Preview One", order=1)
+        block_two, asset_two, objective_two, chunk_two = self.create_preview_content_block(course, title="Preview Two", order=2)
+        objective_three = LearningObjective.objects.create(
+            course=course,
+            block=block_two,
+            source_asset=asset_two,
+            position=2,
+            code="2.2",
+            text="Preview second objective",
+        )
+        for index, (block, objective, chunk) in enumerate(
+            [
+                (block_one, objective_one, chunk_one),
+                (block_two, objective_two, chunk_two),
+                (block_two, objective_three, chunk_two),
+            ],
+            start=1,
+        ):
+            QuestionBankItem.objects.create(
+                course=course,
+                block=block,
+                learning_objective=objective,
+                source_chunk=chunk,
+                bank_type=QuestionBankItem.BankType.VALIDATION,
+                status=QuestionBankItem.Status.APPROVED,
+                stem=f"Preview validation sampler {index}?",
+                correct_answer="A",
+                distractors=["B", "C", "D"],
+                explanation="A.",
+                question_hash=f"preview-validation-sampler-{index}",
+            )
+        event = ValidationEvent.objects.create(
+            course=course,
+            created_by=self.teacher,
+            title="Preview multi-block session",
+            mode=ValidationEvent.Mode.DIGITAL_INVIGILATION,
+            starts_at=timezone.now() - timedelta(minutes=2),
+            ends_at=timezone.now() + timedelta(minutes=58),
+            location="Preview Centre",
+            capacity=10,
+            freeze_at=timezone.now() + timedelta(minutes=15),
+            question_count=3,
+            time_limit_minutes=18,
+            audit_prompt_count=2,
+        )
+
+        self.client.force_login(self.teacher)
+        self.client.get(reverse("standalone:preview_student_validate", args=[course.pk]), {"book_event": event.pk}, follow=True)
+        response = self.client.get(reverse("standalone:preview_student_validate", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        preview_state = self.client.session["standalone_preview_student_validate"][str(course.pk)]
+        questions = list(
+            QuestionBankItem.objects.filter(pk__in=preview_state["question_ids"]).select_related("block", "learning_objective")
+        )
+        self.assertEqual(len(questions), 3)
+        self.assertEqual(sum(1 for question in questions if question.block_id == block_one.pk), 1)
+        self.assertEqual(sum(1 for question in questions if question.block_id == block_two.pk), 2)
+        self.assertEqual(len({question.learning_objective_id for question in questions}), 3)
 
     def test_digital_validation_schedules_audits_and_room_display(self):
         course = self.create_course()
@@ -7767,3 +8039,151 @@ print(result)""",
         self.assertIsNotNone(started_session["pending_question"])
         self.assertEqual(started_session["pending_question"]["question_id"], question.pk)
         self.assertEqual(started_session["time_remaining_seconds"], 0)
+
+    def test_course_detail_shows_demo_mode_controls(self):
+        course = self.create_course()
+        course.config.demo_enabled = True
+        course.config.save(update_fields=["demo_enabled", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+
+        self.client.force_login(self.teacher)
+        response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
+
+        self.assertContains(response, "Demo mode")
+        self.assertContains(response, reverse("standalone:demo_link_regenerate", args=[course.pk]), html=False)
+        self.assertContains(response, reverse("standalone:demo_practice", args=[access.token]), html=False)
+        self.assertContains(response, "Canvas iframe snippet")
+
+    def test_public_demo_practice_is_shared_and_does_not_touch_real_student_persistence(self):
+        course = self.create_course()
+        course.config.demo_enabled = True
+        course.config.save(update_fields=["demo_enabled", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Question one?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="demo-shared-practice-question",
+        )
+
+        demo_url = reverse("standalone:demo_practice", args=[access.token])
+        page = self.client.get(demo_url)
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "Demo mode")
+        self.assertNotContains(page, "Sign in")
+
+        quiz_response = self.client.post(reverse("standalone:demo_practice_action", args=[access.token, block.pk, "quiz"]))
+        self.assertEqual(quiz_response.status_code, 200)
+        block_payload = next(item for item in quiz_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_id"], question.pk)
+
+        answer_response = self.client.post(
+            reverse("standalone:demo_practice_action", args=[access.token, block.pk, "answer"]),
+            data=json.dumps({"question_id": question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+        self.assertEqual(answer_response.status_code, 200)
+        self.assertEqual(PracticeAttempt.objects.count(), 0)
+        self.assertEqual(PracticeMessage.objects.count(), 0)
+        self.assertEqual(EnrollmentQuestionState.objects.count(), 0)
+
+        other_client = self.client_class()
+        reload_response = other_client.get(demo_url)
+        self.assertContains(reload_response, "Question one?")
+        self.assertContains(reload_response, "Correct.")
+
+    def test_public_demo_practice_get_does_not_rewrite_unchanged_shared_state(self):
+        course = self.create_course()
+        course.config.demo_enabled = True
+        course.config.save(update_fields=["demo_enabled", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+        self.create_preview_content_block(course)
+
+        demo_url = reverse("standalone:demo_practice", args=[access.token])
+        first_response = self.client.get(demo_url)
+        self.assertEqual(first_response.status_code, 200)
+        access.refresh_from_db()
+        initial_updated_at = access.updated_at
+
+        second_response = self.client.get(demo_url)
+        self.assertEqual(second_response.status_code, 200)
+        access.refresh_from_db()
+
+        self.assertEqual(access.updated_at, initial_updated_at)
+
+    def test_public_demo_validation_practice_is_private_per_browser(self):
+        course = self.create_course()
+        course.config.demo_enabled = True
+        course.config.save(update_fields=["demo_enabled", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+
+        for index in range(10):
+            QuestionBankItem.objects.create(
+                course=course,
+                block=block,
+                learning_objective=objective,
+                source_chunk=chunk,
+                bank_type=QuestionBankItem.BankType.PRACTICE,
+                status=QuestionBankItem.Status.APPROVED,
+                stem=f"Demo validation question {index + 1}?",
+                correct_answer=f"Correct {index + 1}",
+                distractors=[f"Wrong {index + 1}A", f"Wrong {index + 1}B", f"Wrong {index + 1}C"],
+                question_hash=f"demo-validation-private-{index + 1}",
+            )
+
+        session_url_alpha = f"{reverse('standalone:demo_validation_practice', args=[access.token])}?visitor=alphademo01"
+        session_url_beta = f"{reverse('standalone:demo_validation_practice', args=[access.token])}?visitor=betademo02"
+        page_alpha = self.client.get(session_url_alpha)
+        self.assertEqual(page_alpha.status_code, 200)
+        alpha_pending = page_alpha.context["session_state"]["pending_question"]
+        self.assertIsNotNone(alpha_pending)
+        alpha_question = QuestionBankItem.objects.get(pk=alpha_pending["question_id"])
+        alpha_answer = alpha_question.correct_answer
+
+        submit_alpha = self.client.post(
+            f"{reverse('standalone:demo_validation_practice_action', args=[access.token, 'submit'])}?visitor=alphademo01",
+            data=json.dumps({"question_id": alpha_question.pk, "answer": alpha_answer}),
+            content_type="application/json",
+        )
+        self.assertEqual(submit_alpha.status_code, 200)
+        self.assertEqual(submit_alpha.json()["session"]["progress"]["answered_count"], 1)
+
+        reload_alpha = self.client.get(session_url_alpha)
+        self.assertEqual(reload_alpha.context["session_state"]["progress"]["answered_count"], 1)
+
+        other_client = self.client_class()
+        page_beta = other_client.get(session_url_beta)
+        self.assertEqual(page_beta.status_code, 200)
+        self.assertEqual(page_beta.context["session_state"]["progress"]["answered_count"], 0)
+        self.assertEqual(CourseDemoValidationSession.objects.count(), 2)
+
+    def test_public_demo_embed_respects_allowed_origins(self):
+        course = self.create_course()
+        course.config.demo_enabled = True
+        course.config.demo_iframe_allowed_origins = "https://canvas.example.com"
+        course.config.save(update_fields=["demo_enabled", "demo_iframe_allowed_origins", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+        self.create_preview_content_block(course)
+
+        allowed_response = self.client.get(
+            f"{reverse('standalone:demo_practice', args=[access.token])}?embed=1",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(allowed_response.status_code, 200)
+        self.assertIn("frame-ancestors 'self' https://canvas.example.com", allowed_response.headers["Content-Security-Policy"])
+
+        blocked_response = self.client.get(
+            f"{reverse('standalone:demo_practice', args=[access.token])}?embed=1",
+            HTTP_ORIGIN="https://evil.example.com",
+        )
+        self.assertEqual(blocked_response.status_code, 403)
+        self.assertContains(blocked_response, "not allowed", status_code=403)

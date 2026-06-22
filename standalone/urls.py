@@ -44,6 +44,7 @@ urlpatterns = [
     path("teacher/courses/<int:course_id>/allowed-emails/new/", views.add_allowed_email, name="allowed_email_add"),
     path("teacher/courses/<int:course_id>/invite-student/", views.student_invite_create, name="student_invite"),
     path("teacher/courses/<int:course_id>/magic-link/", views.magic_link_create, name="magic_link_create"),
+    path("teacher/courses/<int:course_id>/demo/regenerate/", views.demo_link_regenerate, name="demo_link_regenerate"),
     path("teacher/courses/<int:course_id>/import-pdf/", views.course_import_upload, name="course_import_upload"),
     path("teacher/course-imports/<int:import_id>/", views.course_import_review, name="course_import_review"),
     path("teacher/courses/<int:course_id>/blocks/new/", views.block_create, name="block_create"),
@@ -96,4 +97,16 @@ urlpatterns = [
         name="student_practice_action",
     ),
     path("student/courses/<int:course_id>/practice/", views.practice_quiz, name="practice_quiz"),
+    path("courses/demo/<uuid:token>/", views.demo_practice, name="demo_practice"),
+    path(
+        "courses/demo/<uuid:token>/blocks/<int:block_id>/<str:action>/",
+        views.demo_practice_action,
+        name="demo_practice_action",
+    ),
+    path("courses/demo/<uuid:token>/validation-practice/", views.demo_validation_practice, name="demo_validation_practice"),
+    path(
+        "courses/demo/<uuid:token>/validation-practice/<str:action>/",
+        views.demo_validation_practice_action,
+        name="demo_validation_practice_action",
+    ),
 ]

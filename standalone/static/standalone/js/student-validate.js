@@ -20,6 +20,8 @@ const validationSidebarDataNode = document.getElementById("validation-sidebar-da
 
 if (validationRoot && validationDataNode) {
   const actionUrlTemplate = validationRoot.dataset.sessionActionUrl || "";
+  const isDemoMode = validationRoot.dataset.demoMode === "true";
+  const demoVisitorKeyFromPage = String(validationRoot.dataset.demoVisitorKey || "").trim();
   const transcriptNode = validationRoot.querySelector(".validation-chat-transcript");
   const form = validationRoot.querySelector(".validation-chat-form");
   const input = validationRoot.querySelector("#validation-chat-input");
@@ -119,6 +121,49 @@ if (validationRoot && validationDataNode) {
     }
   }
 
+  function demoValidationVisitorStorageKey() {
+    const courseKey = String(validationRoot.dataset.demoCourseKey || "");
+    return courseKey ? `quizanchor:demo-validation-visitor:${courseKey}` : "";
+  }
+
+  function demoValidationVisitorKey() {
+    const storageKey = demoValidationVisitorStorageKey();
+    if (!storageKey) {
+      return "";
+    }
+    try {
+      let value = window.localStorage.getItem(storageKey) || "";
+      if (!value) {
+        value = demoVisitorKeyFromPage || (window.crypto?.randomUUID ? window.crypto.randomUUID().replace(/-/g, "") : `${Date.now()}${Math.random().toString(16).slice(2)}`);
+        window.localStorage.setItem(storageKey, value);
+      }
+      return value;
+    } catch (_error) {
+      return demoVisitorKeyFromPage;
+    }
+  }
+
+  function demoValidationUrl(url) {
+    if (!isDemoMode || !url) {
+      return url;
+    }
+    try {
+      const nextUrl = new URL(url, window.location.origin);
+      if (!nextUrl.pathname.includes("/validation-practice/")) {
+        return nextUrl.toString();
+      }
+      if (!nextUrl.searchParams.get("visitor")) {
+        const visitorKey = demoValidationVisitorKey();
+        if (visitorKey) {
+          nextUrl.searchParams.set("visitor", visitorKey);
+        }
+      }
+      return nextUrl.toString();
+    } catch (_error) {
+      return url;
+    }
+  }
+
   function beginPracticeValidationLaunch(link) {
     if (!link || practiceValidationNavigationTimer) {
       return;
@@ -130,7 +175,7 @@ if (validationRoot && validationDataNode) {
       }, practiceValidationMobileSidebarDelayMs);
     }
     practiceValidationNavigationTimer = window.setTimeout(() => {
-      window.location.assign(link.href);
+      window.location.assign(demoValidationUrl(link.href));
     }, practiceValidationLaunchDelayMs);
   }
 
@@ -256,7 +301,7 @@ if (validationRoot && validationDataNode) {
         return "Written answer";
       case "mcq":
       default:
-        return "Standard MCQ";
+        return "MCQ";
     }
   }
 
@@ -759,6 +804,13 @@ if (validationRoot && validationDataNode) {
       callout.textContent = questionTypeLabel(message);
       article.appendChild(callout);
 
+      if (message.block_label) {
+        const blockLabel = document.createElement("div");
+        blockLabel.className = "preview-question-block-label";
+        blockLabel.textContent = String(message.block_label);
+        article.appendChild(blockLabel);
+      }
+
       if (message.review_visible && message.answered && message.is_correct !== null && message.is_correct !== undefined) {
         const grade = document.createElement("div");
         grade.className = `preview-question-grade${message.is_correct ? " is-correct" : " is-incorrect"}`;
@@ -1046,6 +1098,7 @@ if (validationRoot && validationDataNode) {
         "Content-Type": "application/json",
         "X-CSRFToken": getCsrfToken(),
         "X-Requested-With": "XMLHttpRequest",
+        ...(isDemoMode && demoValidationVisitorKey() ? { "X-Demo-Visitor-Key": demoValidationVisitorKey() } : {}),
       },
       body: JSON.stringify(payload || {}),
       credentials: "same-origin",
@@ -1071,6 +1124,10 @@ if (validationRoot && validationDataNode) {
         setComposerDisabled(false);
         syncControls();
       });
+  }
+
+  if (isDemoMode) {
+    demoValidationVisitorKey();
   }
 
   function reportAwayDuration(millisecondsAway) {

@@ -11,10 +11,14 @@
 <body>
   <header class="app-header">
     <nav class="app-nav">
-      <a class="app-brand" href="{% if user.is_authenticated %}{% url 'standalone:dashboard' %}{% else %}{% url 'website:home' %}{% endif %}" aria-label="MCQ Anchor home">
+      <a class="app-brand" href="{% if is_demo_mode %}{{ demo_home_url|default:'#' }}{% elif user.is_authenticated %}{% url 'standalone:dashboard' %}{% else %}{% url 'website:home' %}{% endif %}" aria-label="MCQ Anchor home">
         <img src="{% static 'website/images/mcq-anchor-logo.png' %}" alt="MCQ Anchor logo">
       </a>
-      {% if user.is_authenticated %}
+      {% if is_demo_mode %}
+        <div class="app-nav-demo">
+          <span class="app-mode-pill">{{ demo_mode_label|default:"Demo mode" }}</span>
+        </div>
+      {% elif user.is_authenticated %}
         <div class="app-nav-links app-nav-links--desktop">
           {% block app_nav_links %}{% endblock %}
           <span class="app-user-status">Logged in as: {{ user.email|default:user.username }}</span>

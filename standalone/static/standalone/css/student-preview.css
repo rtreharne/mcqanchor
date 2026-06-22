@@ -339,6 +339,38 @@ body {
   outline: none;
 }
 
+.preview-sidebar-demo-note {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid rgba(21, 91, 200, 0.12);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.preview-sidebar-demo-note p {
+  margin: 0;
+  color: #5a739a;
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.preview-sidebar-demo-pill {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  justify-content: center;
+  min-height: 1.9rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(21, 91, 200, 0.08);
+  color: #155bc8;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .preview-course-metrics-panel {
   display: grid;
   gap: 0.55rem;
@@ -1310,6 +1342,14 @@ body {
   font-weight: 800;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.preview-question-block-label {
+  margin: -0.2rem 0 0.65rem;
+  color: rgba(36, 65, 103, 0.72);
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 .preview-question-grade {

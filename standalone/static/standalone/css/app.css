@@ -81,6 +81,29 @@ select {
   align-items: center;
 }
 
+.app-nav-demo {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.app-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.2rem;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid rgba(21, 91, 200, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #155bc8;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  box-shadow: 0 10px 24px rgba(47, 93, 161, 0.08);
+}
+
 .app-nav-menu {
   display: none;
   position: relative;

@@ -6,20 +6,24 @@
   <link rel="stylesheet" href="{% static 'standalone/vendor/katex/dist/katex.min.css' %}">
 {% endblock %}
 {% block app_nav_links %}
-  {% if validation_entry_url %}
+  {% if is_demo_mode %}
+  {% elif validation_entry_url %}
     <a href="{{ validation_entry_url }}">Validate</a>
   {% endif %}
-  {% if is_student_practice %}
+  {% if is_demo_mode %}
+  {% elif is_student_practice %}
     <a href="{% url 'standalone:student_dashboard' %}">Dashboard</a>
   {% else %}
     <a href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
   {% endif %}
 {% endblock %}
 {% block app_nav_menu_actions %}
-  {% if validation_entry_url %}
+  {% if is_demo_mode %}
+  {% elif validation_entry_url %}
     <a class="button secondary app-nav-menu-action" href="{{ validation_entry_url }}">Validate</a>
   {% endif %}
-  {% if is_student_practice %}
+  {% if is_demo_mode %}
+  {% elif is_student_practice %}
     <a class="button secondary app-nav-menu-action" href="{% url 'standalone:student_dashboard' %}">Dashboard</a>
   {% else %}
     <a class="button secondary app-nav-menu-action" href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
@@ -33,7 +37,10 @@
   data-student-preview
   data-action-url-template="{{ action_url_template|default:'' }}"
   data-course-id="{{ course.pk }}"
-  data-preview-mode="{% if is_student_practice %}student-practice{% else %}student-preview{% endif %}"
+  data-preview-mode="{% if is_demo_mode %}student-demo{% elif is_student_practice %}student-practice{% else %}student-preview{% endif %}"
+  data-demo-mode="{% if is_demo_mode %}true{% else %}false{% endif %}"
+  data-demo-course-key="{% if is_demo_mode %}{{ course.pk }}{% endif %}"
+  data-hide-flag-actions="{% if hide_flag_actions %}true{% else %}false{% endif %}"
 >
   <div class="preview-launch-loader" hidden data-preview-launch-loader>
     <div class="preview-launch-loader-card" role="status" aria-live="polite" aria-label="Preparing practice validation">
@@ -55,15 +62,23 @@
           <button type="button" class="preview-sidebar-summary-toggle" hidden data-preview-sidebar-summary-toggle>... more</button>
         </p>
       </div>
+      {% if is_demo_mode %}
+        <div class="preview-sidebar-demo-note">
+          <span class="preview-sidebar-demo-pill">{{ demo_mode_label|default:"Demo mode" }}</span>
+          <p>{{ demo_mode_copy|default:"Practice activity is shared across everyone using this demo link." }}</p>
+        </div>
+      {% endif %}
       <div class="preview-sidebar-validate-cta">
         <a class="button secondary" href="{{ practice_validation_url }}">Practice Validation</a>
-        {% if validation_sidebar_cta.disabled %}
-          <button class="button" type="button" disabled aria-disabled="true">{{ validation_sidebar_cta.label }}</button>
-        {% else %}
-          <a class="button" href="{{ validation_sidebar_cta.url }}">{{ validation_sidebar_cta.label }}</a>
-        {% endif %}
-        {% if validation_sidebar_cta.detail %}
-          <p class="preview-sidebar-validate-copy">{{ validation_sidebar_cta.detail }}</p>
+        {% if validation_sidebar_cta %}
+          {% if validation_sidebar_cta.disabled %}
+            <button class="button" type="button" disabled aria-disabled="true">{{ validation_sidebar_cta.label }}</button>
+          {% else %}
+            <a class="button" href="{{ validation_sidebar_cta.url }}">{{ validation_sidebar_cta.label }}</a>
+          {% endif %}
+          {% if validation_sidebar_cta.detail %}
+            <p class="preview-sidebar-validate-copy">{{ validation_sidebar_cta.detail }}</p>
+          {% endif %}
         {% endif %}
       </div>
       <section class="preview-course-metrics-panel" data-preview-course-metrics></section>

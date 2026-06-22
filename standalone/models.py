@@ -99,6 +99,8 @@ class CourseConfig(TimeStampedModel):
     course = models.OneToOneField(Course, on_delete=models.CASCADE, related_name="config")
     self_enrol_enabled = models.BooleanField(default=True)
     self_enrol_domain = models.CharField(max_length=255, blank=True)
+    demo_enabled = models.BooleanField(default=False)
+    demo_iframe_allowed_origins = models.TextField(blank=True)
     assistant_guidance = models.TextField(blank=True)
     practice_weight = models.PositiveSmallIntegerField(default=80, validators=[MinValueValidator(0), MaxValueValidator(100)])
     validation_weight = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
@@ -153,6 +155,31 @@ class CourseMagicLink(TimeStampedModel):
     @property
     def is_expired(self) -> bool:
         return timezone.now() >= self.expires_at
+
+
+class CourseDemoAccess(TimeStampedModel):
+    course = models.OneToOneField(Course, on_delete=models.CASCADE, related_name="demo_access")
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    shared_practice_state = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["course__title"]
+
+    def __str__(self) -> str:
+        return f"Demo access for {self.course}"
+
+
+class CourseDemoValidationSession(TimeStampedModel):
+    demo_access = models.ForeignKey(CourseDemoAccess, on_delete=models.CASCADE, related_name="validation_sessions")
+    visitor_key = models.CharField(max_length=64)
+    validation_state = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        unique_together = ("demo_access", "visitor_key")
+
+    def __str__(self) -> str:
+        return f"Demo validation session for {self.demo_access.course} ({self.visitor_key})"
 
 
 class Enrollment(TimeStampedModel):
@@ -459,7 +486,7 @@ class QuestionBankItem(TimeStampedModel):
     @classmethod
     def display_label_for_question_type(cls, question_type: str) -> str:
         return {
-            cls.QuestionType.MCQ: "Standard MCQ",
+            cls.QuestionType.MCQ: "MCQ",
             cls.QuestionType.NUM: "Numerical MCQ",
             cls.QuestionType.MAQ: "Multiple-answer MCQ",
             cls.QuestionType.WAQ: "Written answer",

@@ -1,7 +1,8 @@
 import json
 from datetime import timedelta
+import re
 from threading import Thread
-from urllib.parse import quote
+from urllib.parse import quote, urlencode, urlsplit
 
 from django.conf import settings
 from django.contrib import messages
@@ -15,6 +16,8 @@ from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonRe
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.views.decorators.clickjacking import xframe_options_exempt
+from django.views.decorators.csrf import csrf_exempt
 
 from standalone.forms import (
     BlockAvailableFromInlineForm,
@@ -49,6 +52,7 @@ from standalone.models import (
     CourseAllowedEmail,
     CourseBlock,
     CourseConfig,
+    CourseDemoAccess,
     CourseImport,
     CourseMagicLink,
     Enrollment,
@@ -74,6 +78,24 @@ from standalone.services.content import (
     regenerate_block_descriptions_and_objectives,
     regenerate_course_descriptions_and_objectives,
     summarize_block_content,
+)
+from standalone.services.demo_mode import (
+    demo_iframe_origin_allowed,
+    demo_iframe_origin_list,
+    draft_demo_preview_written_answer,
+    draft_demo_validation_practice_answer,
+    ensure_demo_access,
+    get_or_create_demo_validation_session,
+    new_demo_visitor_key,
+    request_demo_preview_quiz,
+    reveal_demo_validation_practice_next,
+    rotate_demo_access_token,
+    send_demo_preview_chat_message,
+    serialize_demo_preview_state,
+    serialize_demo_validation_practice_state,
+    skip_demo_validation_practice_question,
+    submit_demo_preview_answer,
+    submit_demo_validation_practice_answer,
 )
 from standalone.services.metrics import refresh_enrollment_metrics
 from standalone.services.notifications import send_logged_email
@@ -491,7 +513,7 @@ def course_detail(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
-    return render(request, "standalone/course_detail.html", _course_detail_context(course))
+    return render(request, "standalone/course_detail.html", _course_detail_context(course, request=request))
 
 
 @login_required
@@ -511,8 +533,9 @@ def course_delete(request: HttpRequest, course_id: int) -> HttpResponse:
     return redirect("standalone:teacher_dashboard")
 
 
-def _course_detail_context(course: Course):
+def _course_detail_context(course: Course, *, request: HttpRequest | None = None):
     config, _ = CourseConfig.objects.get_or_create(course=course)
+    demo_access = ensure_demo_access(course)
     blocks = list(
         course.blocks.select_related("config")
         .annotate(
@@ -555,6 +578,8 @@ def _course_detail_context(course: Course):
         "self_enrol_enabled": config.self_enrol_enabled and settings.STANDALONE_ENABLE_SELF_ENROL,
         "self_enrol_url": reverse("standalone:self_enrol", args=[course.slug]),
         "active_magic_link_count": active_magic_link_count,
+        "demo_access": demo_access,
+        "demo_access_context": _demo_access_context(request, demo_access) if request is not None else {},
     }
 
 
@@ -583,6 +608,113 @@ def _normalise_course_practice_averages(course: Course) -> None:
         setattr(course, attr_name, metric_value)
         metrics[metric_name] = metric_value
     course.practice_overall_average = _weighted_practice_average(course, metrics)
+
+
+def _demo_embed_origin_from_request(request: HttpRequest) -> str:
+    origin = (request.headers.get("Origin") or "").strip()
+    if origin:
+        return origin
+    referer = (request.headers.get("Referer") or "").strip()
+    if not referer:
+        return ""
+    parts = urlsplit(referer)
+    if not parts.scheme or not parts.netloc:
+        return ""
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
+def _apply_demo_response_headers(request: HttpRequest, response: HttpResponse, course: Course, *, embed_mode: bool) -> HttpResponse:
+    if embed_mode:
+        allowed_origins = demo_iframe_origin_list(course.config.demo_iframe_allowed_origins)
+        if not allowed_origins:
+            response.status_code = 403
+            return response
+        frame_ancestors = " ".join(["'self'", *allowed_origins])
+        response["Content-Security-Policy"] = f"frame-ancestors {frame_ancestors}"
+    else:
+        response["X-Frame-Options"] = "SAMEORIGIN"
+        response["Content-Security-Policy"] = "frame-ancestors 'self'"
+    return response
+
+
+def _demo_embed_blocked_response(request: HttpRequest, course: Course, *, reason: str) -> HttpResponse:
+    response = render(
+        request,
+        "standalone/demo_embed_blocked.html",
+        {
+            "course": course,
+            "is_demo_mode": True,
+            "is_embed_mode": True,
+            "demo_mode_label": "Demo mode",
+            "demo_home_url": "#",
+            "blocked_reason": reason,
+        },
+        status=403,
+    )
+    allowed_origins = demo_iframe_origin_list(course.config.demo_iframe_allowed_origins)
+    if allowed_origins:
+        frame_ancestors = " ".join(["'self'", *allowed_origins])
+        response["Content-Security-Policy"] = f"frame-ancestors {frame_ancestors}"
+    return response
+
+
+def _demo_query_string(*, embed: bool = False, visitor_key: str | None = None, restart: bool = False) -> str:
+    params: dict[str, str] = {}
+    if embed:
+        params["embed"] = "1"
+    if visitor_key:
+        params["visitor"] = visitor_key
+    if restart:
+        params["restart"] = "1"
+    if not params:
+        return ""
+    return f"?{urlencode(params)}"
+
+
+def _demo_practice_url(access: CourseDemoAccess, *, embed: bool = False) -> str:
+    return f"{reverse('standalone:demo_practice', args=[access.token])}{_demo_query_string(embed=embed)}"
+
+
+def _demo_validation_practice_url(
+    access: CourseDemoAccess,
+    *,
+    embed: bool = False,
+    visitor_key: str | None = None,
+    restart: bool = False,
+) -> str:
+    return (
+        f"{reverse('standalone:demo_validation_practice', args=[access.token])}"
+        f"{_demo_query_string(embed=embed, visitor_key=visitor_key, restart=restart)}"
+    )
+
+
+def _demo_iframe_snippet(request: HttpRequest, access: CourseDemoAccess) -> str:
+    src = request.build_absolute_uri(_demo_practice_url(access, embed=True))
+    return (
+        f'<iframe src="{src}" title="{access.course.title} demo" '
+        'width="100%" height="900" style="border:0;border-radius:1rem;overflow:hidden;" loading="lazy"></iframe>'
+    )
+
+
+def _demo_access_context(request: HttpRequest, access: CourseDemoAccess) -> dict:
+    return {
+        "enabled": bool(access.course.config.demo_enabled),
+        "demo_url": request.build_absolute_uri(_demo_practice_url(access)),
+        "demo_embed_url": request.build_absolute_uri(_demo_practice_url(access, embed=True)),
+        "demo_iframe_snippet": _demo_iframe_snippet(request, access),
+        "allowed_origins": access.course.config.demo_iframe_allowed_origins,
+    }
+
+
+def _demo_access_or_404(token) -> CourseDemoAccess:
+    access = get_object_or_404(
+        CourseDemoAccess.objects.select_related("course", "course__config"),
+        token=token,
+        course__is_active=True,
+    )
+    if not access.course.config.demo_enabled:
+        raise Http404
+    return access
 
 
 def _student_sidebar_validation_booking_url(enrollment: Enrollment) -> str:
@@ -743,20 +875,29 @@ def _serialize_preview_booking_sessions(course: Course, *, now=None) -> list[dic
     return sessions
 
 
+def _course_config(course: Course) -> CourseConfig:
+    try:
+        return course.config
+    except CourseConfig.DoesNotExist:
+        config, _created = CourseConfig.objects.get_or_create(course=course)
+        return config
+
+
 def _weighted_practice_average(course: Course, metrics: dict) -> float:
+    config = _course_config(course)
     total_weight = (
-        course.config.mastery_weight
-        + course.config.coverage_weight
-        + course.config.engagement_weight
-        + course.config.target_weight
+        config.mastery_weight
+        + config.coverage_weight
+        + config.engagement_weight
+        + config.target_weight
     )
     if total_weight <= 0:
         return 0.0
     weighted_total = (
-        metrics["mastery"] * course.config.mastery_weight
-        + metrics["coverage"] * course.config.coverage_weight
-        + metrics["engagement"] * course.config.engagement_weight
-        + metrics["target"] * course.config.target_weight
+        metrics["mastery"] * config.mastery_weight
+        + metrics["coverage"] * config.coverage_weight
+        + metrics["engagement"] * config.engagement_weight
+        + metrics["target"] * config.target_weight
     )
     return round(weighted_total / total_weight, 2)
 
@@ -1191,14 +1332,25 @@ def magic_link_create(request: HttpRequest, course_id: int) -> HttpResponse:
         magic_url = request.build_absolute_uri(reverse("standalone:magic_enrol", args=[magic_link.token]))
         messages.success(
             request,
-            f"Magic link created. It expires on {magic_link.expires_at:%d %b %Y, %H:%M} and can enrol {magic_link.max_uses} new student(s): {magic_url}",
+            f"Enrolment magic link created. It expires on {magic_link.expires_at:%d %b %Y, %H:%M} and can enrol {magic_link.max_uses} new student(s): {magic_url}",
         )
         return redirect("standalone:course_detail", course.pk)
     return render(
         request,
         "standalone/form_page.html",
-        {"title": f"Create magic link for {course.title}", "form": form, "submit_label": "Create magic link"},
+        {"title": f"Create enrolment magic link for {course.title}", "form": form, "submit_label": "Create magic link"},
     )
+
+
+@login_required
+def demo_link_regenerate(request: HttpRequest, course_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    access = ensure_demo_access(course)
+    rotate_demo_access_token(access)
+    messages.success(request, "Demo link regenerated.")
+    return redirect(f"{reverse('standalone:course_detail', args=[course.pk])}#course-settings-content")
 
 
 @transaction.atomic
@@ -1298,6 +1450,237 @@ def magic_enrol(request: HttpRequest, token) -> HttpResponse:
                 login(request, user)
                 return redirect("standalone:student_dashboard")
     return render(request, "standalone/form_page.html", {"title": f"Join {magic_link.course.title}", "form": form, "submit_label": "Join course"})
+
+
+def _demo_embed_mode(request: HttpRequest) -> bool:
+    return request.GET.get("embed") == "1"
+
+
+def _normalized_demo_visitor_key(value: str | None) -> str:
+    candidate = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{8,64}", candidate):
+        return candidate
+    return ""
+
+
+def _demo_validation_visitor_key(request: HttpRequest) -> str:
+    return (
+        _normalized_demo_visitor_key(request.GET.get("visitor"))
+        or _normalized_demo_visitor_key(request.headers.get("X-Demo-Visitor-Key"))
+        or _normalized_demo_visitor_key(request.POST.get("visitor"))
+    )
+
+
+def _blocked_demo_embed_response_if_needed(request: HttpRequest, access: CourseDemoAccess) -> HttpResponse | None:
+    if not _demo_embed_mode(request):
+        return None
+    allowed_origins = demo_iframe_origin_list(access.course.config.demo_iframe_allowed_origins)
+    if not allowed_origins:
+        return _demo_embed_blocked_response(
+            request,
+            access.course,
+            reason="This demo is not currently enabled for iframe embedding.",
+        )
+    request_origin = _demo_embed_origin_from_request(request)
+    if request_origin and not demo_iframe_origin_allowed(access.course.config.demo_iframe_allowed_origins, request_origin):
+        return _demo_embed_blocked_response(
+            request,
+            access.course,
+            reason="This embedding origin is not allowed for this demo.",
+        )
+    return None
+
+
+def _demo_preview_payload(access: CourseDemoAccess, block: CourseBlock, action: str, request: HttpRequest) -> JsonResponse:
+    if action == "quiz":
+        requested_question_type = None
+        preferred_objective_id = None
+        force_new = False
+        if request.body and "application/json" in (request.content_type or ""):
+            try:
+                data = json.loads(request.body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+            requested_question_type = str(data.get("question_type", "")).strip().lower() or None
+            preferred_objective_id = int(data.get("learning_objective_id") or 0) or None
+            force_new = bool(data.get("force_new"))
+        try:
+            payload = request_demo_preview_quiz(
+                access,
+                block,
+                requested_question_type=requested_question_type,
+                preferred_objective_id=preferred_objective_id,
+                force_new=force_new,
+            )
+        except ValueError as error:
+            return JsonResponse({"ok": False, "error": str(error)}, status=400)
+        return JsonResponse({"ok": True, "preview": payload})
+
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+
+    if action == "answer":
+        selected_answers = data.get("answers")
+        if not isinstance(selected_answers, list):
+            selected_answer = str(data.get("answer", "")).strip()
+            selected_answers = [selected_answer] if selected_answer else []
+        question_id = int(data.get("question_id") or 0)
+        answer_text = str(data.get("answer_text", "")).strip()
+        payload = submit_demo_preview_answer(access, block, question_id, selected_answers, answer_text=answer_text)
+        return JsonResponse({"ok": True, "preview": payload})
+    if action == "draft_answer":
+        question_id = int(data.get("question_id") or 0)
+        answer_text = str(data.get("answer_text", "")).strip()
+        payload = draft_demo_preview_written_answer(access, block, question_id, answer_text)
+        return JsonResponse({"ok": True, "alignment": payload})
+    if action == "chat":
+        question = str(data.get("question", "")).strip()
+        if not question:
+            return JsonResponse({"ok": False, "error": "Please enter a course question first."}, status=400)
+        payload = send_demo_preview_chat_message(access, block, question)
+        return JsonResponse({"ok": True, "preview": payload})
+    raise Http404
+
+
+@xframe_options_exempt
+def demo_practice(request: HttpRequest, token) -> HttpResponse:
+    access = _demo_access_or_404(token)
+    blocked = _blocked_demo_embed_response_if_needed(request, access)
+    if blocked is not None:
+        return blocked
+    preview_state = serialize_demo_preview_state(access)
+    embed_mode = _demo_embed_mode(request)
+    response = render(
+        request,
+        "standalone/student_preview.html",
+        {
+            "course": access.course,
+            "preview_state": preview_state,
+            "action_url_template": reverse("standalone:demo_practice_action", args=[access.token, 0, "ACTION"]),
+            "is_student_practice": True,
+            "practice_validation_url": _demo_validation_practice_url(access, embed=embed_mode),
+            "validation_entry_url": "",
+            "validation_sidebar_cta": None,
+            "is_demo_mode": True,
+            "is_embed_mode": embed_mode,
+            "demo_mode_label": "Demo mode",
+            "demo_mode_copy": "Practice activity is shared across everyone using this demo link.",
+            "demo_home_url": _demo_practice_url(access, embed=embed_mode),
+            "hide_flag_actions": True,
+        },
+    )
+    return _apply_demo_response_headers(request, response, access.course, embed_mode=embed_mode)
+
+
+@csrf_exempt
+def demo_practice_action(request: HttpRequest, token, block_id: int, action: str) -> JsonResponse:
+    if request.method != "POST":
+        raise Http404
+    access = _demo_access_or_404(token)
+    block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id, course=access.course)
+    return _demo_preview_payload(access, block, action, request)
+
+
+@xframe_options_exempt
+def demo_validation_practice(request: HttpRequest, token) -> HttpResponse:
+    access = _demo_access_or_404(token)
+    blocked = _blocked_demo_embed_response_if_needed(request, access)
+    if blocked is not None:
+        return blocked
+    embed_mode = _demo_embed_mode(request)
+    visitor_key = _demo_validation_visitor_key(request)
+    if not visitor_key:
+        visitor_key = new_demo_visitor_key()
+        return redirect(
+            _demo_validation_practice_url(
+                access,
+                embed=embed_mode,
+                visitor_key=visitor_key,
+                restart=request.GET.get("restart") == "1",
+            )
+        )
+    validation_session = get_or_create_demo_validation_session(access, visitor_key)
+    session_state = serialize_demo_validation_practice_state(
+        access,
+        validation_session,
+        restart=request.GET.get("restart") == "1",
+    )
+    sidebar_preview_state = serialize_demo_preview_state(access)
+    response = render(
+        request,
+        "standalone/student_validate.html",
+        {
+            "course": access.course,
+            "session_state": session_state,
+            "sidebar_state": {},
+            "sidebar_preview_state": sidebar_preview_state,
+            "practice_validation_url": _demo_validation_practice_url(access, embed=embed_mode, visitor_key=visitor_key),
+            "validation_sidebar_cta": None,
+            "practice_url": _demo_practice_url(access, embed=embed_mode),
+            "session_action_url": (
+                f"{reverse('standalone:demo_validation_practice_action', args=[access.token, 'ACTION'])}"
+                f"{_demo_query_string(embed=embed_mode, visitor_key=visitor_key)}"
+            ),
+            "exit_url": _demo_practice_url(access, embed=embed_mode),
+            "exit_label": "Back to practice",
+            "is_demo_mode": True,
+            "is_embed_mode": embed_mode,
+            "demo_mode_label": "Demo mode",
+            "demo_mode_copy": "Practice validation stays private to this browser. Shared demo averages still come from the public demo practice space.",
+            "demo_visitor_key": visitor_key,
+            "demo_home_url": _demo_practice_url(access, embed=embed_mode),
+            "show_validation_sidebar_cta": False,
+        },
+    )
+    return _apply_demo_response_headers(request, response, access.course, embed_mode=embed_mode)
+
+
+@csrf_exempt
+def demo_validation_practice_action(request: HttpRequest, token, action: str) -> JsonResponse:
+    if request.method != "POST":
+        raise Http404
+    access = _demo_access_or_404(token)
+    visitor_key = _demo_validation_visitor_key(request)
+    if not visitor_key:
+        return JsonResponse({"ok": False, "error": "Missing demo visitor key."}, status=400)
+    validation_session = get_or_create_demo_validation_session(access, visitor_key)
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    try:
+        if action == "next":
+            payload = reveal_demo_validation_practice_next(access, validation_session)
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "draft_answer":
+            payload = draft_demo_validation_practice_answer(
+                access,
+                validation_session,
+                int(data.get("question_id") or 0),
+                str(data.get("answer_text", "")).strip(),
+            )
+            return JsonResponse({"ok": True, "alignment": payload})
+        if action == "submit":
+            payload = submit_demo_validation_practice_answer(
+                access,
+                validation_session,
+                int(data.get("question_id") or 0),
+                data.get("answers") or ([str(data.get("answer", "")).strip()] if data.get("answer") else []),
+                answer_text=str(data.get("answer_text", "")).strip(),
+            )
+            return JsonResponse({"ok": True, "session": payload})
+        if action == "skip":
+            payload = skip_demo_validation_practice_question(
+                access,
+                validation_session,
+                int(data.get("question_id") or 0),
+            )
+            return JsonResponse({"ok": True, "session": payload})
+    except ValidationFlowError as error:
+        return JsonResponse({"ok": False, "error": str(error)}, status=400)
+    raise Http404
 
 
 @login_required

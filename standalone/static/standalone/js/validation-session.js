@@ -133,7 +133,7 @@ if (validationRoot && validationDataNode) {
         return "Written answer";
       case "mcq":
       default:
-        return "Standard MCQ";
+        return "MCQ";
     }
   }
 

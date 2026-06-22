@@ -98,6 +98,50 @@
           </div>
         </article>
 
+        <article class="course-settings-group" data-demo-settings>
+          <div class="course-settings-group-head">
+            <h3>Demo mode</h3>
+            <p>Publish a no-login student demo link and optional Canvas iframe for this course.</p>
+          </div>
+          <div class="course-settings-grid">
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.demo_enabled.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'demo_enabled' %}">
+              <label class="course-setting-label course-setting-label-checkbox" for="{{ course_config_form.demo_enabled.id_for_label }}">
+                {{ course_config_form.demo_enabled }}
+                <span>{{ course_config_form.demo_enabled.label }}</span>
+              </label>
+              <p class="course-setting-help">{{ course_config_form.demo_enabled.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell course-setting-cell--full" data-course-config-row data-course-config-field="{{ course_config_form.demo_iframe_allowed_origins.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'demo_iframe_allowed_origins' %}">
+              <label class="course-setting-label" for="{{ course_config_form.demo_iframe_allowed_origins.id_for_label }}">{{ course_config_form.demo_iframe_allowed_origins.label }}</label>
+              {{ course_config_form.demo_iframe_allowed_origins }}
+              <p class="course-setting-help">{{ course_config_form.demo_iframe_allowed_origins.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell course-setting-cell--full"{% if not course.config.demo_enabled %} hidden{% endif %} data-demo-settings-enabled-only>
+              <label class="course-setting-label" for="demo-public-link">Demo link</label>
+              <textarea id="demo-public-link" rows="2" readonly>{{ demo_access_context.demo_url }}</textarea>
+              <p class="course-setting-help">Anyone with this link can open the shared student demo without logging in.</p>
+            </div>
+            <div class="course-setting-cell course-setting-cell--full"{% if not course.config.demo_enabled %} hidden{% endif %} data-demo-settings-enabled-only>
+              <label class="course-setting-label" for="demo-iframe-snippet">Canvas iframe snippet</label>
+              <textarea id="demo-iframe-snippet" rows="5" readonly>{{ demo_access_context.demo_iframe_snippet }}</textarea>
+              <p class="course-setting-help">Use the embed URL inside Canvas. Only the origins above can frame it.</p>
+            </div>
+            <div class="course-setting-cell course-setting-cell--full"{% if course.config.demo_enabled %} hidden{% endif %} data-demo-settings-disabled-copy>
+              <p class="course-setting-help">Enable demo mode to publish a public demo link and iframe snippet for this course.</p>
+            </div>
+            <div class="course-setting-cell">
+              <label class="course-setting-label">Regenerate demo link</label>
+              <form method="post" action="{% url 'standalone:demo_link_regenerate' course.pk %}">
+                {% csrf_token %}
+                <button class="button secondary" type="submit">Regenerate demo link</button>
+              </form>
+              <p class="course-setting-help">Rotates the public token used by both the direct demo link and the Canvas iframe.</p>
+            </div>
+          </div>
+        </article>
+
         <article class="course-settings-group">
           <div class="course-settings-group-head">
             <h3>Question mix</h3>
@@ -699,14 +743,14 @@
           </div>
         </article>
         <article class="student-access-card">
-          <h3>Magic links</h3>
-          <p>Magic links do not require an exact allowlist email. They still obey the optional domain restriction, expiry time, and maximum new-enrolment count.</p>
+          <h3>Enrolment magic links</h3>
+          <p>Enrolment magic links do not require an exact allowlist email. They still obey the optional domain restriction, expiry time, and maximum new-enrolment count.</p>
           <div class="block-chip-row">
             <span class="block-chip">{{ active_magic_link_count }} active link{{ active_magic_link_count|pluralize }}</span>
             {% if course.config.self_enrol_domain %}<span class="block-chip">Domain {{ course.config.self_enrol_domain }}</span>{% endif %}
           </div>
           <div class="block-inline-actions">
-            <a class="button secondary" href="{% url 'standalone:magic_link_create' course.pk %}">Create magic link</a>
+            <a class="button secondary" href="{% url 'standalone:magic_link_create' course.pk %}">Create enrolment magic link</a>
           </div>
         </article>
       </div>

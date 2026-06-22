@@ -14,6 +14,7 @@ from standalone.models import (
     CourseBlock,
     Enrollment,
     EnrollmentQuestionState,
+    LearningObjective,
     PracticeAttempt,
     PracticeAttemptQuestion,
     QuestionBankItem,
@@ -157,6 +158,23 @@ def _released_validation_blocks(course) -> list[CourseBlock]:
     return list(course.blocks.filter(available_from__lte=timezone.localdate()).order_by("order", "created_at"))
 
 
+def _released_objectives_by_block(course, *, blocks: list[CourseBlock] | None = None) -> dict[int, list[LearningObjective]]:
+    queryset = LearningObjective.objects.filter(course=course, block__available_from__lte=timezone.localdate()).select_related("block")
+    if blocks is not None:
+        queryset = queryset.filter(block__in=blocks)
+    objectives_by_block: dict[int, list[LearningObjective]] = defaultdict(list)
+    for objective in queryset.order_by("block__order", "position", "pk"):
+        objectives_by_block[objective.block_id].append(objective)
+    return objectives_by_block
+
+
+def _stable_seed_token(seed_key: str, *parts) -> str:
+    raw = ":".join(str(part) for part in parts)
+    if not seed_key:
+        return raw
+    return hashlib.sha256(f"{seed_key}:{raw}".encode("utf-8")).hexdigest()
+
+
 def _released_validation_questions(course, *, include_written: bool = True, blocks: list[CourseBlock] | None = None):
     queryset = course.question_bank_items.filter(
         bank_type=QuestionBankItem.BankType.VALIDATION,
@@ -293,6 +311,343 @@ def _scored_practice_validation_questions(course, enrollment: Enrollment, *, inc
     return [item[-1] for item in scored]
 
 
+def _allocate_weighted_block_slots(
+    blocks: list[CourseBlock],
+    weight_map: dict[int, int],
+    slot_count: int,
+    *,
+    seed_key: str = "",
+    ensure_one_min: bool = False,
+) -> dict[int, int]:
+    quotas = {block.pk: 0 for block in blocks}
+    eligible_blocks = [block for block in blocks if int(weight_map.get(block.pk) or 0) > 0]
+    if slot_count <= 0 or not eligible_blocks:
+        return quotas
+
+    remaining_slots = int(slot_count)
+    if ensure_one_min and remaining_slots >= len(eligible_blocks):
+        for block in eligible_blocks:
+            quotas[block.pk] = 1
+        remaining_slots -= len(eligible_blocks)
+    if remaining_slots <= 0:
+        return quotas
+
+    total_weight = sum(int(weight_map.get(block.pk) or 0) for block in eligible_blocks)
+    if total_weight <= 0:
+        return quotas
+
+    raw_allocations: dict[int, float] = {}
+    floor_allocations: dict[int, int] = {}
+    for block in eligible_blocks:
+        raw_value = remaining_slots * float(int(weight_map.get(block.pk) or 0)) / float(total_weight)
+        floor_value = math.floor(raw_value)
+        raw_allocations[block.pk] = raw_value
+        floor_allocations[block.pk] = floor_value
+        quotas[block.pk] += floor_value
+
+    leftover = remaining_slots - sum(floor_allocations.values())
+    if leftover > 0:
+        ranked_blocks = sorted(
+            eligible_blocks,
+            key=lambda block: (
+                -(raw_allocations[block.pk] - floor_allocations[block.pk]),
+                _stable_seed_token(seed_key, "quota", block.pk),
+                block.order,
+                block.pk,
+            ),
+        )
+        for block in ranked_blocks[:leftover]:
+            quotas[block.pk] += 1
+    return quotas
+
+
+def _ordered_objectives_for_block(objectives: list[LearningObjective], *, seed_key: str = "", salt: str = "objective") -> list[LearningObjective]:
+    if not seed_key:
+        return list(objectives)
+    return sorted(
+        objectives,
+        key=lambda objective: (
+            _stable_seed_token(seed_key, salt, objective.block_id, objective.pk),
+            objective.position,
+            objective.pk,
+        ),
+    )
+
+
+def _planned_objective_slots(
+    course,
+    question_count: int,
+    *,
+    blocks: list[CourseBlock] | None = None,
+    seed_key: str = "",
+) -> list[tuple[CourseBlock, int]]:
+    released_blocks = list(blocks or _released_validation_blocks(course))
+    objectives_by_block = _released_objectives_by_block(course, blocks=released_blocks)
+    eligible_blocks = [block for block in released_blocks if objectives_by_block.get(block.pk)]
+    if question_count <= 0 or not eligible_blocks:
+        return []
+
+    original_objectives = {
+        block.pk: _ordered_objectives_for_block(objectives_by_block.get(block.pk, []), seed_key=seed_key, salt="initial-objective")
+        for block in eligible_blocks
+    }
+    remaining_objectives = {block_id: list(objectives) for block_id, objectives in original_objectives.items()}
+    selected_by_block: dict[int, list[LearningObjective]] = defaultdict(list)
+
+    original_counts = {block.pk: len(original_objectives.get(block.pk, [])) for block in eligible_blocks}
+    remaining_slots = int(question_count)
+    initial_quotas = _allocate_weighted_block_slots(
+        eligible_blocks,
+        original_counts,
+        remaining_slots,
+        seed_key=f"{seed_key}:initial",
+        ensure_one_min=remaining_slots >= len(eligible_blocks),
+    )
+    for block in eligible_blocks:
+        target = int(initial_quotas.get(block.pk) or 0)
+        if target <= 0:
+            continue
+        take = min(target, len(remaining_objectives.get(block.pk, [])))
+        if take <= 0:
+            continue
+        selected_by_block[block.pk].extend(remaining_objectives[block.pk][:take])
+        remaining_objectives[block.pk] = remaining_objectives[block.pk][take:]
+        remaining_slots -= take
+
+    redistribute_round = 0
+    while remaining_slots > 0:
+        remaining_counts = {
+            block.pk: len(remaining_objectives.get(block.pk, []))
+            for block in eligible_blocks
+            if remaining_objectives.get(block.pk)
+        }
+        if not remaining_counts:
+            break
+        redistribute_round += 1
+        extra_quotas = _allocate_weighted_block_slots(
+            eligible_blocks,
+            remaining_counts,
+            remaining_slots,
+            seed_key=f"{seed_key}:redistribute:{redistribute_round}",
+            ensure_one_min=False,
+        )
+        progress = False
+        for block in eligible_blocks:
+            target = int(extra_quotas.get(block.pk) or 0)
+            if target <= 0:
+                continue
+            take = min(target, len(remaining_objectives.get(block.pk, [])))
+            if take <= 0:
+                continue
+            selected_by_block[block.pk].extend(remaining_objectives[block.pk][:take])
+            remaining_objectives[block.pk] = remaining_objectives[block.pk][take:]
+            remaining_slots -= take
+            progress = True
+        if not progress:
+            break
+
+    if remaining_slots > 0:
+        repeat_counts: dict[int, int] = defaultdict(int)
+        for objectives in selected_by_block.values():
+            for objective in objectives:
+                repeat_counts[objective.pk] += 1
+        repeat_round = 0
+        while remaining_slots > 0:
+            repeat_round += 1
+            repeat_weights = {
+                block.pk: len(original_objectives.get(block.pk, []))
+                for block in eligible_blocks
+                if original_objectives.get(block.pk)
+            }
+            if not repeat_weights:
+                break
+            repeat_quotas = _allocate_weighted_block_slots(
+                eligible_blocks,
+                repeat_weights,
+                remaining_slots,
+                seed_key=f"{seed_key}:repeat:{repeat_round}",
+                ensure_one_min=False,
+            )
+            progress = False
+            for block in eligible_blocks:
+                repeat_target = int(repeat_quotas.get(block.pk) or 0)
+                if repeat_target <= 0:
+                    continue
+                ranked_objectives = sorted(
+                    original_objectives.get(block.pk, []),
+                    key=lambda objective: (
+                        repeat_counts[objective.pk],
+                        _stable_seed_token(seed_key, "repeat-objective", block.pk, objective.pk, repeat_counts[objective.pk]),
+                        objective.position,
+                        objective.pk,
+                    ),
+                )
+                if not ranked_objectives:
+                    continue
+                for objective in ranked_objectives[:repeat_target]:
+                    selected_by_block[block.pk].append(objective)
+                    repeat_counts[objective.pk] += 1
+                    remaining_slots -= 1
+                    progress = True
+                    if remaining_slots <= 0:
+                        break
+                if remaining_slots <= 0:
+                    break
+            if not progress:
+                break
+
+    interleaved: list[tuple[int, str, int, int, CourseBlock, int]] = []
+    for block in eligible_blocks:
+        for index, objective in enumerate(selected_by_block.get(block.pk, [])):
+            interleaved.append(
+                (
+                    index,
+                    _stable_seed_token(seed_key, "slot-order", block.pk),
+                    block.order,
+                    block.pk,
+                    block,
+                    objective.pk,
+                )
+            )
+    interleaved.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[5]))
+    return [(item[4], item[5]) for item in interleaved[:question_count]]
+
+
+def _extended_type_preference(course, selected_type_counts: dict[str, int], selected_count: int, question_count: int) -> list[str]:
+    preferred = _practice_validation_type_preference(course, selected_type_counts, selected_count, question_count)
+    ordered = list(preferred)
+    for question_type in (
+        QuestionBankItem.QuestionType.MCQ,
+        QuestionBankItem.QuestionType.NUM,
+        QuestionBankItem.QuestionType.MAQ,
+        QuestionBankItem.QuestionType.WAQ,
+    ):
+        if question_type not in ordered:
+            ordered.append(question_type)
+    return ordered
+
+
+def _pop_matching_question(
+    remaining_questions: list[QuestionBankItem],
+    *,
+    block_id: int | None = None,
+    objective_id: int | None = None,
+    question_types: list[str] | None = None,
+    unused_objective_ids: set[int] | None = None,
+) -> QuestionBankItem | None:
+    type_order = list(question_types or [])
+    if not type_order:
+        type_order = [""]
+    for desired_type in type_order:
+        for index, question in enumerate(remaining_questions):
+            if block_id is not None and question.block_id != block_id:
+                continue
+            if objective_id is not None and int(question.learning_objective_id or 0) != int(objective_id):
+                continue
+            if unused_objective_ids is not None and int(question.learning_objective_id or 0) not in unused_objective_ids:
+                continue
+            if desired_type and question.question_type != desired_type:
+                continue
+            return remaining_questions.pop(index)
+    return None
+
+
+def _generate_question_for_slot(
+    course,
+    block: CourseBlock,
+    objective_id: int | None,
+    question_type_order: list[str],
+    generator,
+):
+    if generator is None:
+        return None
+    for strict in ([True, False] if objective_id else [False]):
+        preferred_objective_ids = [objective_id] if objective_id else None
+        for question_type in question_type_order:
+            question = generator(
+                block,
+                objective_id if strict else None,
+                question_type,
+                preferred_objective_ids=preferred_objective_ids if strict else None,
+                strict_preferred_objectives=bool(strict and preferred_objective_ids),
+            )
+            if question is not None:
+                return question
+    return None
+
+
+def select_stratified_validation_questions(
+    course,
+    available_questions: list[QuestionBankItem],
+    question_count: int,
+    *,
+    seed_key: str = "",
+    blocks: list[CourseBlock] | None = None,
+    generate_question=None,
+) -> list[QuestionBankItem]:
+    released_blocks = list(blocks or _released_validation_blocks(course))
+    if question_count <= 0 or not released_blocks:
+        return []
+
+    planned_slots = _planned_objective_slots(course, question_count, blocks=released_blocks, seed_key=seed_key)
+    if not planned_slots:
+        return []
+
+    remaining_questions = list(available_questions)
+    selected: list[QuestionBankItem] = []
+    selected_type_counts: dict[str, int] = defaultdict(int)
+    selected_objective_counts: dict[int, int] = defaultdict(int)
+    block_lookup = {block.pk: block for block in released_blocks}
+
+    for block, objective_id in planned_slots:
+        type_order = _extended_type_preference(course, selected_type_counts, len(selected), question_count)
+        unused_objective_ids = {
+            int(question.learning_objective_id or 0)
+            for question in remaining_questions
+            if question.block_id == block.pk and question.learning_objective_id and selected_objective_counts.get(int(question.learning_objective_id), 0) == 0
+        }
+        question = _pop_matching_question(remaining_questions, block_id=block.pk, objective_id=objective_id, question_types=type_order)
+        if question is None:
+            question = _generate_question_for_slot(course, block, objective_id, type_order, generate_question)
+        if question is None and unused_objective_ids:
+            question = _pop_matching_question(
+                remaining_questions,
+                block_id=block.pk,
+                objective_id=None,
+                question_types=type_order,
+                unused_objective_ids=unused_objective_ids,
+            )
+        if question is None:
+            question = _pop_matching_question(remaining_questions, block_id=block.pk, objective_id=None, question_types=type_order)
+        if question is None:
+            question = _generate_question_for_slot(course, block, None, type_order, generate_question)
+        if question is None:
+            continue
+        selected.append(question)
+        selected_type_counts[question.question_type] += 1
+        if question.learning_objective_id:
+            selected_objective_counts[int(question.learning_objective_id)] += 1
+
+    if len(selected) < question_count:
+        missing = question_count - len(selected)
+        for _index in range(missing):
+            type_order = _extended_type_preference(course, selected_type_counts, len(selected), question_count)
+            question = _pop_matching_question(remaining_questions, block_id=None, objective_id=None, question_types=type_order)
+            if question is None:
+                for block, objective_id in planned_slots:
+                    question = _generate_question_for_slot(course, block_lookup.get(block.pk, block), objective_id, type_order, generate_question)
+                    if question is not None:
+                        break
+            if question is None:
+                break
+            selected.append(question)
+            selected_type_counts[question.question_type] += 1
+            if question.learning_objective_id:
+                selected_objective_counts[int(question.learning_objective_id)] += 1
+
+    return selected[:question_count]
+
+
 def _pick_locked_questions(
     course,
     enrollment: Enrollment,
@@ -303,44 +658,25 @@ def _pick_locked_questions(
     blocks: list[CourseBlock] | None = None,
 ):
     available = _scored_validation_questions(course, enrollment, include_written=include_written, blocks=blocks)
-    if not available:
-        return []
-    available_by_type: dict[str, list[QuestionBankItem]] = {
-        QuestionBankItem.QuestionType.MCQ: [],
-        QuestionBankItem.QuestionType.NUM: [],
-        QuestionBankItem.QuestionType.MAQ: [],
-        QuestionBankItem.QuestionType.WAQ: [],
-    }
-    for question in available:
-        available_by_type.setdefault(question.question_type, []).append(question)
+    released_blocks = list(blocks or _released_validation_blocks(course))
 
-    for question_type, questions in available_by_type.items():
-        if seed_key:
-            available_by_type[question_type] = sorted(
-                questions,
-                key=lambda question: (
-                    question.block.order,
-                    _question_seed(seed_key, question.pk, f"lock:{question_type}"),
-                    question.pk,
-                ),
-            )
-        else:
-            available_by_type[question_type] = list(questions)
+    def generator(block, objective_id, question_type, *, preferred_objective_ids=None, strict_preferred_objectives=False):
+        _practice, validation = generate_question_pair_for_block(
+            block,
+            question_type=question_type,
+            preferred_objective_ids=preferred_objective_ids,
+            strict_preferred_objectives=strict_preferred_objectives,
+        )
+        return validation
 
-    selected: list[QuestionBankItem] = []
-    selected_type_counts: dict[str, int] = defaultdict(int)
-    for _index in range(question_count):
-        chosen_question = None
-        for question_type in _practice_validation_type_preference(course, selected_type_counts, len(selected), question_count):
-            queue = available_by_type.get(question_type) or []
-            if queue:
-                chosen_question = queue.pop(0)
-                break
-        if chosen_question is None:
-            break
-        selected.append(chosen_question)
-        selected_type_counts[chosen_question.question_type] += 1
-    return selected
+    return select_stratified_validation_questions(
+        course,
+        available,
+        question_count,
+        seed_key=seed_key,
+        blocks=released_blocks,
+        generate_question=generator,
+    )
 
 
 def _pick_practice_validation_questions(
@@ -353,44 +689,25 @@ def _pick_practice_validation_questions(
     blocks: list[CourseBlock] | None = None,
 ):
     available = _scored_practice_validation_questions(course, enrollment, include_written=include_written, blocks=blocks)
-    if not available:
-        return []
-    available_by_type: dict[str, list[QuestionBankItem]] = {
-        QuestionBankItem.QuestionType.MCQ: [],
-        QuestionBankItem.QuestionType.NUM: [],
-        QuestionBankItem.QuestionType.MAQ: [],
-        QuestionBankItem.QuestionType.WAQ: [],
-    }
-    for question in available:
-        available_by_type.setdefault(question.question_type, []).append(question)
+    released_blocks = list(blocks or _released_validation_blocks(course))
 
-    for question_type, questions in available_by_type.items():
-        if seed_key:
-            available_by_type[question_type] = sorted(
-                questions,
-                key=lambda question: (
-                    question.block.order,
-                    _question_seed(seed_key, question.pk, f"practice-lock:{question_type}"),
-                    question.pk,
-                ),
-            )
-        else:
-            available_by_type[question_type] = list(questions)
+    def generator(block, objective_id, question_type, *, preferred_objective_ids=None, strict_preferred_objectives=False):
+        practice, _validation = generate_question_pair_for_block(
+            block,
+            question_type=question_type,
+            preferred_objective_ids=preferred_objective_ids,
+            strict_preferred_objectives=strict_preferred_objectives,
+        )
+        return practice
 
-    selected: list[QuestionBankItem] = []
-    selected_type_counts: dict[str, int] = defaultdict(int)
-    for _index in range(question_count):
-        chosen_question = None
-        for question_type in _practice_validation_type_preference(course, selected_type_counts, len(selected), question_count):
-            queue = available_by_type.get(question_type) or []
-            if queue:
-                chosen_question = queue.pop(0)
-                break
-        if chosen_question is None:
-            break
-        selected.append(chosen_question)
-        selected_type_counts[chosen_question.question_type] += 1
-    return selected
+    return select_stratified_validation_questions(
+        course,
+        available,
+        question_count,
+        seed_key=seed_key,
+        blocks=released_blocks,
+        generate_question=generator,
+    )
 
 
 def _practice_validation_type_targets(course) -> dict[str, float]:
@@ -450,7 +767,7 @@ def _ensure_practice_validation_questions(
     blocks = _released_validation_blocks(course)
     if not blocks:
         return []
-    selected = _pick_practice_validation_questions(
+    return _pick_practice_validation_questions(
         course,
         enrollment,
         question_count,
@@ -458,30 +775,6 @@ def _ensure_practice_validation_questions(
         seed_key=seed_key,
         blocks=blocks,
     )
-    while len(selected) < question_count:
-        selected_ids = {question.pk for question in selected}
-        seen_ids = _seen_question_ids_for_enrollment(enrollment, course)
-        seen_ids.update(selected_ids)
-        selected_type_counts: dict[str, int] = defaultdict(int)
-        for question in selected:
-            selected_type_counts[question.question_type] += 1
-        preferred_types = _practice_validation_type_preference(course, selected_type_counts, len(selected), question_count)
-        generated = False
-        for block in blocks:
-            for question_type in preferred_types:
-                practice_question, _validation_question = generate_question_pair_for_block(block, question_type=question_type)
-                if practice_question is None:
-                    continue
-                if practice_question.pk in seen_ids or int(practice_question.linked_question_id or 0) in seen_ids:
-                    continue
-                selected.append(practice_question)
-                generated = True
-                break
-            if generated and len(selected) >= question_count:
-                break
-        if not generated:
-            break
-    return selected[:question_count]
 
 
 def ensure_room_code_secret(event: ValidationEvent) -> None:

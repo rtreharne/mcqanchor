@@ -150,6 +150,17 @@ function setCourseConfigRowState(row, state, message = "") {
   status.textContent = message;
 }
 
+function syncDemoSettingsVisibility(root = document) {
+  const demoToggle = root.querySelector("[data-course-config-field='demo_enabled'] input[type='checkbox']");
+  const enabled = !!demoToggle?.checked;
+  root.querySelectorAll("[data-demo-settings-enabled-only]").forEach((element) => {
+    element.hidden = !enabled;
+  });
+  root.querySelectorAll("[data-demo-settings-disabled-copy]").forEach((element) => {
+    element.hidden = enabled;
+  });
+}
+
 async function saveCourseConfigInput(input) {
   const row = input.closest("[data-course-config-row]");
   const fieldName = row?.dataset.courseConfigField;
@@ -647,6 +658,9 @@ function initializeCourseDetail(root = document) {
 
     if (input.type === "checkbox" || input.tagName === "SELECT") {
       input.addEventListener("change", () => {
+        if (input.name === "demo_enabled") {
+          syncDemoSettingsVisibility(root);
+        }
         void saveCourseConfigInput(input);
       });
       return;
@@ -672,6 +686,7 @@ function initializeCourseDetail(root = document) {
   });
 
   schedulePendingAssetRefresh(root);
+  syncDemoSettingsVisibility(root);
 }
 
 document.addEventListener("DOMContentLoaded", () => {

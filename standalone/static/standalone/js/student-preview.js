@@ -55,6 +55,8 @@ if (previewRoot && previewDataNode) {
   const objectiveSheetError = previewRoot.querySelector("[data-preview-objective-sheet-error]");
   const objectiveSheetSaveButton = previewRoot.querySelector("[data-preview-objective-sheet-save]");
   const isTeacherPreview = previewRoot.dataset.previewMode === "student-preview";
+  const isDemoMode = previewRoot.dataset.demoMode === "true";
+  const hideFlagActions = previewRoot.dataset.hideFlagActions === "true";
 
   let previewState = JSON.parse(previewDataNode.textContent || "{}");
   let activeBlockId = String(previewState.active_block_id || "");
@@ -161,6 +163,49 @@ if (previewRoot && previewDataNode) {
     }
   }
 
+  function demoValidationVisitorStorageKey() {
+    const courseKey = String(previewRoot.dataset.demoCourseKey || previewState?.course?.id || "");
+    return courseKey ? `quizanchor:demo-validation-visitor:${courseKey}` : "";
+  }
+
+  function demoValidationVisitorKey() {
+    const storageKey = demoValidationVisitorStorageKey();
+    if (!storageKey) {
+      return "";
+    }
+    try {
+      let value = window.localStorage.getItem(storageKey) || "";
+      if (!value) {
+        value = window.crypto?.randomUUID ? window.crypto.randomUUID().replace(/-/g, "") : `${Date.now()}${Math.random().toString(16).slice(2)}`;
+        window.localStorage.setItem(storageKey, value);
+      }
+      return value;
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function demoValidationUrl(url) {
+    if (!isDemoMode || !url) {
+      return url;
+    }
+    try {
+      const nextUrl = new URL(url, window.location.origin);
+      if (!nextUrl.pathname.includes("/validation-practice/")) {
+        return nextUrl.toString();
+      }
+      if (!nextUrl.searchParams.get("visitor")) {
+        const visitorKey = demoValidationVisitorKey();
+        if (visitorKey) {
+          nextUrl.searchParams.set("visitor", visitorKey);
+        }
+      }
+      return nextUrl.toString();
+    } catch (_error) {
+      return url;
+    }
+  }
+
   function beginPracticeValidationLaunch(link) {
     if (!link || practiceValidationNavigationTimer) {
       return;
@@ -172,7 +217,7 @@ if (previewRoot && previewDataNode) {
       }, practiceValidationMobileSidebarDelayMs);
     }
     practiceValidationNavigationTimer = window.setTimeout(() => {
-      window.location.assign(link.href);
+      window.location.assign(demoValidationUrl(link.href));
     }, practiceValidationLaunchDelayMs);
   }
 
@@ -1199,7 +1244,7 @@ if (previewRoot && previewDataNode) {
         return "Written answer";
       case "mcq":
       default:
-        return "Standard MCQ";
+        return "MCQ";
     }
   }
 
@@ -1575,19 +1620,21 @@ if (previewRoot && previewDataNode) {
       ) {
         appendFurtherStudyAction(actions, message);
       }
-      const flagButton = document.createElement("button");
-      flagButton.type = "button";
-      flagButton.className = "preview-flag-button";
-      flagButton.textContent = message.flagged ? "Flagged" : "Flag question";
-      flagButton.disabled = requestInFlight || message.flagged;
-      flagButton.addEventListener("click", () => {
-        if (isTeacherPreview) {
-          openFlagSheet(message);
-          return;
-        }
-        void postPreviewAction("flag", { question_id: message.question_id });
-      });
-      actions.appendChild(flagButton);
+      if (!hideFlagActions) {
+        const flagButton = document.createElement("button");
+        flagButton.type = "button";
+        flagButton.className = "preview-flag-button";
+        flagButton.textContent = message.flagged ? "Flagged" : "Flag question";
+        flagButton.disabled = requestInFlight || message.flagged;
+        flagButton.addEventListener("click", () => {
+          if (isTeacherPreview) {
+            openFlagSheet(message);
+            return;
+          }
+          void postPreviewAction("flag", { question_id: message.question_id });
+        });
+        actions.appendChild(flagButton);
+      }
       article.appendChild(actions);
       richText.renderMath(article);
       return article;
