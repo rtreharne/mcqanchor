@@ -1,0 +1,177 @@
+{
+  "scan_scope": {
+    "course_id": null,
+    "bank_type": "practice"
+  },
+  "flagged_count": 9,
+  "scanned_count": 75,
+  "course_count": 2,
+  "flagged_course_ids": [
+    5,
+    8
+  ],
+  "flagged_rows": [
+    {
+      "question_id": 819,
+      "linked_question_id": 820,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 131,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is it beneficial for programs to accept file names specified by the user rather than having file names hard-coded?",
+      "correct_answer": "It allows programs to be more flexible and handle different files without changing the code.",
+      "distractors": [
+        "It ensures that only specific files are accessed, increasing security by restricting input.",
+        "It simplifies the program structure by reducing the number of input parameters.",
+        "It prevents user errors by limiting the files that can be processed to those in the program."
+      ]
+    },
+    {
+      "question_id": 831,
+      "linked_question_id": 832,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 12,
+      "block_title": "Reading and Writing Files",
+      "learning_objective_id": 130,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "What does opening a file in a program return, and what does this object represent?",
+      "correct_answer": "Opening a file returns a file object, which represents the file on the computer's hard drive.",
+      "distractors": [
+        "Opening a file returns the entire content of the file as a string to the program.",
+        "Opening a file returns the name of the file as a string for the program to use.",
+        "Opening a file returns a number indicating the size of the file in bytes."
+      ]
+    },
+    {
+      "question_id": 741,
+      "linked_question_id": 742,
+      "course_id": 5,
+      "course_title": "Python for Biologists",
+      "block_id": 14,
+      "block_title": "Writing Functions",
+      "learning_objective_id": 152,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is it beneficial to create functions in a program instead of copying the same code multiple times?",
+      "correct_answer": "Because functions allow code reuse and easier updates without copying code multiple times",
+      "distractors": [
+        "Because functions automatically correct errors in the copied code",
+        "Because functions make the program run faster by avoiding repeated code",
+        "Because functions increase the length of the program making it more detailed"
+      ]
+    },
+    {
+      "question_id": 859,
+      "linked_question_id": 860,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 287,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Which theistic view integrates the idea that God established natural laws which then allowed evolutionary processes to proceed without further direct intervention?",
+      "correct_answer": "Theistic evolution, where God invented the rules and let natural processes run",
+      "distractors": [
+        "Young earth creationism, which holds species were created separately about 6000 years ago",
+        "Gap creationism, which believes the Earth is old but biodiversity appeared suddenly",
+        "Progressive creationism, involving mutations and selection combined with occasional divine interventions"
+      ]
+    },
+    {
+      "question_id": 865,
+      "linked_question_id": 866,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 247,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "How does the molecular clock method estimate the time of a common ancestor between species?",
+      "correct_answer": "By measuring genetic differences and assuming a relatively constant rate of evolution to approximate divergence time",
+      "distractors": [
+        "By comparing physical features and assuming species with similar traits share a recent common ancestor",
+        "By dating the age of fossils directly associated with each species to determine when they coexisted",
+        "By calculating the rate of environmental change and correlating it with species divergence times"
+      ]
+    },
+    {
+      "question_id": 809,
+      "linked_question_id": 810,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 263,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses generic templated distractors instead of real alternatives.",
+      "stem": "Which statement best explains assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events?",
+      "correct_answer": "Assess the limitations of the traditional tree of life metaphor due to symbiotic and horiz",
+      "distractors": [
+        "It focuses on a related detail in assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, but it does not explain the main relationship being tested.",
+        "It describes a different effect within assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 811,
+      "linked_question_id": 812,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 261,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance?",
+      "correct_answer": "Compare anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary si",
+      "distractors": [
+        "It focuses on a related detail in anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, but it does not explain the main relationship being tested.",
+        "It describes a different effect within anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 813,
+      "linked_question_id": 814,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 268,
+      "bank_type": "practice",
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events?",
+      "correct_answer": "Evaluate geological and fossil evidence supporting the rise of atmospheric oxygen and the",
+      "distractors": [
+        "It focuses on a related detail in geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, but it does not explain the main relationship being tested.",
+        "It describes a different effect within geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, rather than the best explanation for this question.",
+        "It confuses the cause and effect involved in geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events, so it does not fully answer the question."
+      ]
+    },
+    {
+      "question_id": 885,
+      "linked_question_id": 886,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 266,
+      "bank_type": "practice",
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is the concept of homologous traits important in understanding the Tree of Life?",
+      "correct_answer": "Because homologous traits indicate shared ancestry by showing features inherited from a common ancestor",
+      "distractors": [
+        "Because homologous traits are characteristics that evolve independently in unrelated species due to similar environments",
+        "Because homologous traits identify traits that appear only in the latest branches of the Tree of Life",
+        "Because homologous traits emphasize differences that are more important than common ancestry in classification"
+      ]
+    }
+  ]
+}

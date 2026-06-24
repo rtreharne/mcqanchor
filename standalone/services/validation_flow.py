@@ -41,6 +41,7 @@ from standalone.services.questions import (
     coding_question_quality_sort_key,
     generate_question_pair_for_block,
     preferred_coding_language_for_block,
+    question_quality_sort_key,
 )
 
 
@@ -205,6 +206,8 @@ def _filter_mismatched_coding_questions(questions: list[QuestionBankItem]) -> li
     preferred_by_block: dict[int, str] = {}
     filtered: list[QuestionBankItem] = []
     for question in questions:
+        if question_quality_sort_key(question)[0]:
+            continue
         if not question.is_coding_question:
             filtered.append(question)
             continue
@@ -280,6 +283,7 @@ def _scored_validation_questions(course, enrollment: Enrollment, *, include_writ
                 0 if question.pk not in prior_attempt_ids else 1,
                 question.block.order,
                 question.learning_objective.position if question.learning_objective_id else 999,
+                *question_quality_sort_key(question),
                 *coding_question_quality_sort_key(question),
                 question.created_at,
                 question.pk,
@@ -301,6 +305,7 @@ def _scored_practice_validation_questions(course, enrollment: Enrollment, *, inc
             (
                 question.block.order,
                 question.learning_objective.position if question.learning_objective_id else 999,
+                *question_quality_sort_key(question),
                 *coding_question_quality_sort_key(question),
                 question.created_at,
                 question.pk,

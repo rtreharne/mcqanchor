@@ -1,0 +1,171 @@
+{
+  "course_id": 8,
+  "apply": true,
+  "flagged_practice_count": 6,
+  "retired_question_count": 12,
+  "retired_question_ids": [
+    859,
+    860,
+    865,
+    866,
+    809,
+    810,
+    811,
+    812,
+    813,
+    814,
+    885,
+    886
+  ],
+  "replacement_pair_count": 6,
+  "generation_failure_count": 0,
+  "processed_rows": [
+    {
+      "practice_question_id": 859,
+      "validation_question_id": 860,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 287,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Which theistic view integrates the idea that God established natural laws which then allowed evolutionary processes to proceed without further direct intervention?"
+    },
+    {
+      "practice_question_id": 865,
+      "validation_question_id": 866,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 247,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "How does the molecular clock method estimate the time of a common ancestor between species?"
+    },
+    {
+      "practice_question_id": 809,
+      "validation_question_id": 810,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 263,
+      "issue": "Single-answer payload uses generic templated distractors instead of real alternatives.",
+      "stem": "Which statement best explains assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events?"
+    },
+    {
+      "practice_question_id": 811,
+      "validation_question_id": 812,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 261,
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance?"
+    },
+    {
+      "practice_question_id": 813,
+      "validation_question_id": 814,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 268,
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events?"
+    },
+    {
+      "practice_question_id": 885,
+      "validation_question_id": 886,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 266,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is the concept of homologous traits important in understanding the Tree of Life?"
+    }
+  ],
+  "regenerated_pairs": [
+    {
+      "practice_question_id": 859,
+      "validation_question_id": 860,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 287,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Which theistic view integrates the idea that God established natural laws which then allowed evolutionary processes to proceed without further direct intervention?",
+      "replacement_practice_question_id": 895,
+      "replacement_validation_question_id": 896
+    },
+    {
+      "practice_question_id": 865,
+      "validation_question_id": 866,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 22,
+      "block_title": "Darwin's Dangerous Idea",
+      "learning_objective_id": 247,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "How does the molecular clock method estimate the time of a common ancestor between species?",
+      "replacement_practice_question_id": 897,
+      "replacement_validation_question_id": 898
+    },
+    {
+      "practice_question_id": 809,
+      "validation_question_id": 810,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 263,
+      "issue": "Single-answer payload uses generic templated distractors instead of real alternatives.",
+      "stem": "Which statement best explains assess the limitations of the traditional tree of life metaphor due to symbiotic and horizontal gene transfer events?",
+      "replacement_practice_question_id": 899,
+      "replacement_validation_question_id": 900
+    },
+    {
+      "practice_question_id": 811,
+      "validation_question_id": 812,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 261,
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains anaerobic and aerobic metabolism in terms of energy efficiency and evolutionary significance?",
+      "replacement_practice_question_id": 901,
+      "replacement_validation_question_id": 902
+    },
+    {
+      "practice_question_id": 813,
+      "validation_question_id": 814,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 268,
+      "issue": "Single-answer payload uses an instructional objective phrase as the correct answer.",
+      "stem": "Which statement best explains geological and fossil evidence supporting the rise of atmospheric oxygen and the great oxygenation events?",
+      "replacement_practice_question_id": 903,
+      "replacement_validation_question_id": 904
+    },
+    {
+      "practice_question_id": 885,
+      "validation_question_id": 886,
+      "course_id": 8,
+      "course_title": "Becoming Human",
+      "block_id": 24,
+      "block_title": "Beginnings",
+      "learning_objective_id": 266,
+      "issue": "Generated question does not stay aligned with the target learning objective.",
+      "stem": "Why is the concept of homologous traits important in understanding the Tree of Life?",
+      "replacement_practice_question_id": 905,
+      "replacement_validation_question_id": 906
+    }
+  ],
+  "generation_failures": []
+}

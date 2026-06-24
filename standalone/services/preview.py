@@ -22,6 +22,7 @@ from standalone.services.questions import (
     normalize_explanation_text,
     normalize_numeric_explanation_text,
     preferred_coding_language_for_block,
+    question_quality_sort_key,
 )
 
 
@@ -329,6 +330,8 @@ def _pick_unseen_question(course: Course, block: CourseBlock, course_state: dict
                 preferred_languages_by_block[question.block_id] = preferred_coding_language
         if not coding_question_matches_expected_language(question, preferred_coding_language):
             continue
+        if question_quality_sort_key(question)[0]:
+            continue
         candidates.append(
             (
                 0 if question.learning_objective_id not in covered_objective_ids else 1,
@@ -336,6 +339,7 @@ def _pick_unseen_question(course: Course, block: CourseBlock, course_state: dict
                 chunk_presented_counts.get(int(question.source_chunk_id or 0), 0),
                 1 if question.learning_objective_id in recent_objective_ids else 0,
                 1 if question.pk in recent_question_ids else 0,
+                *question_quality_sort_key(question),
                 *coding_question_quality_sort_key(question),
                 question.cohort_seen_count,
                 question.created_at,
@@ -372,6 +376,8 @@ def _pick_retry_question(course: Course, block: CourseBlock, course_state: dict,
                 preferred_languages_by_block[question.block_id] = preferred_coding_language
         if not coding_question_matches_expected_language(question, preferred_coding_language):
             continue
+        if question_quality_sort_key(question)[0]:
+            continue
         if completion_sequence - state["last_presented_sequence"] < PREVIEW_RETRY_COMPLETION_GAP:
             continue
         candidates.append(
@@ -380,6 +386,7 @@ def _pick_retry_question(course: Course, block: CourseBlock, course_state: dict,
                 1 if question.pk in recent_question_ids else 0,
                 objective_presented_counts.get(int(question.learning_objective_id or 0), 0),
                 chunk_presented_counts.get(int(question.source_chunk_id or 0), 0),
+                *question_quality_sort_key(question),
                 *coding_question_quality_sort_key(question),
                 state["last_presented_sequence"],
                 state["times_incorrect"],

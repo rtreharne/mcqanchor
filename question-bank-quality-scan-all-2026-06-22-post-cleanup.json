@@ -1,0 +1,11 @@
+{
+  "scan_scope": {
+    "course_id": null,
+    "bank_type": "practice"
+  },
+  "flagged_count": 0,
+  "scanned_count": 75,
+  "course_count": 0,
+  "flagged_course_ids": [],
+  "flagged_rows": []
+}
