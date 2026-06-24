@@ -124,7 +124,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "standalone.User"
 
 MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_ROOT = env_str("MEDIA_ROOT", str(BASE_DIR / "media"))
 
 LOGIN_URL = "standalone:login"
 LOGIN_REDIRECT_URL = "standalone:dashboard"

@@ -23,6 +23,10 @@ services:
         value: "https://*.onrender.com,https://mcqanchor.com,https://www.mcqanchor.com"
       - key: SQLITE_PATH
         value: /app/data/db.sqlite3
+      - key: MEDIA_ROOT
+        value: /app/data/media
+      - key: WEB_CONCURRENCY
+        value: "1"
       - key: DJANGO_ADMIN_USERNAME
         sync: false
       - key: DJANGO_ADMIN_PASSWORD

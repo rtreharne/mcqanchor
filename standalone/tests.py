@@ -1054,6 +1054,64 @@ class StandaloneFlowTests(TestCase):
         course.refresh_from_db()
         self.assertTrue(course.summary)
 
+    def test_temp_media_root_supports_asset_and_course_import_path_processing(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
+
+        with tempfile.TemporaryDirectory() as media_root:
+            with self.settings(MEDIA_ROOT=media_root, OPENAI_API_KEY=""):
+                asset = ContentAsset.objects.create(
+                    block=block,
+                    uploaded_by=self.teacher,
+                    file=SimpleUploadedFile(
+                        "notes.txt",
+                        b"Describe membrane structure and function.",
+                        content_type="text/plain",
+                    ),
+                    original_filename="notes.txt",
+                    extension=".txt",
+                    include_in_generation=True,
+                    processing_status=ContentAsset.ProcessingStatus.PENDING,
+                )
+                course_import = CourseImport.objects.create(
+                    course=course,
+                    uploaded_by=self.teacher,
+                    source_file=self.build_pdf_upload(
+                        [["Chapter 1 Foundations", "Cells are the basic unit of life."]],
+                        filename="chapter-book.pdf",
+                    ),
+                    original_filename="chapter-book.pdf",
+                    status=CourseImport.Status.READY,
+                    progress=100,
+                )
+                chapter = CourseImportChapter.objects.create(
+                    course_import=course_import,
+                    title="Chapter 1: Foundations",
+                    order=1,
+                    start_page=1,
+                    end_page=1,
+                    extracted_text="",
+                )
+
+                from standalone.services.content import ingest_content_asset
+
+                ingest_content_asset(asset)
+                run_course_import_block_creation(course_import.pk, [chapter.pk])
+
+                asset.refresh_from_db()
+                course_import.refresh_from_db()
+                chapter.refresh_from_db()
+
+                self.assertTrue(asset.file.path.startswith(media_root))
+                self.assertTrue(course_import.source_file.path.startswith(media_root))
+                self.assertEqual(asset.processing_status, ContentAsset.ProcessingStatus.PROCESSED)
+                self.assertGreater(asset.chunks.count(), 0)
+                self.assertEqual(course_import.status, CourseImport.Status.COMPLETED)
+                self.assertIsNotNone(chapter.created_block)
+                imported_asset = chapter.created_block.assets.get()
+                self.assertEqual(imported_asset.processing_status, ContentAsset.ProcessingStatus.PROCESSED)
+                self.assertIn("Cells are the basic unit of life.", imported_asset.extracted_text)
+
     def test_authenticated_user_visiting_login_redirects_to_dashboard(self):
         self.client.force_login(self.teacher)
 

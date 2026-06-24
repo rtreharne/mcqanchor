@@ -1,5 +1,7 @@
+import importlib.util
 import json
 import os
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
@@ -122,6 +124,20 @@ class AdminBootstrapCommandTests(TestCase):
 
         user.refresh_from_db()
         self.assertTrue(user.check_password("new-secret-pass"))
+
+
+class SettingsConfigurationTests(TestCase):
+    def test_media_root_can_be_configured_with_environment_variable(self):
+        settings_path = Path(__file__).resolve().parent.parent / "config" / "settings.py"
+        spec = importlib.util.spec_from_file_location("config_settings_media_root_test", settings_path)
+        module = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+
+        with patch.dict(os.environ, {"MEDIA_ROOT": "/tmp/mcq-anchor-media-test"}, clear=False):
+            spec.loader.exec_module(module)
+
+        self.assertEqual(module.MEDIA_ROOT, "/tmp/mcq-anchor-media-test")
 
 
 class AdminCsvExportTests(TestCase):
