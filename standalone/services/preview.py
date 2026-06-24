@@ -227,12 +227,12 @@ def _block_completed_count(course_state: dict, block: CourseBlock) -> int:
     return len([event for event in course_state.get("completed_events", []) if int(event["block_id"]) == block.pk])
 
 
-def _advanced_question_start_percent(course: Course) -> int:
-    return max(0, min(100, int(course.config.advanced_question_start_percent or 0)))
+def _advanced_question_start_percent(block: CourseBlock) -> int:
+    return max(0, min(100, int(block.question_advanced_question_start_percent or 0)))
 
 
 def _advanced_question_types_unlocked(course: Course, block: CourseBlock, course_state: dict) -> bool:
-    threshold_percent = _advanced_question_start_percent(course)
+    threshold_percent = _advanced_question_start_percent(block)
     if threshold_percent <= 0:
         return True
     target_question_count = max(1, block.preview_target_question_count)
@@ -408,6 +408,16 @@ def _ordered_unmet_objective_ids(course_state: dict, block: CourseBlock) -> list
     return unmet_objective_ids
 
 
+def _generation_objective_ids_for_block(course_state: dict, block: CourseBlock) -> list[int]:
+    unmet_objective_ids = _ordered_unmet_objective_ids(course_state, block)
+    if unmet_objective_ids:
+        return unmet_objective_ids
+
+    objective_ids = [objective.pk for objective in block.learning_objectives.all()]
+    random.shuffle(objective_ids)
+    return objective_ids
+
+
 def _pending_question(course: Course, block: CourseBlock, course_state: dict):
     pending_question_id = course_state.setdefault("pending_questions", {}).get(str(block.pk))
     if not pending_question_id:
@@ -470,7 +480,7 @@ def _ensure_question_for_block(
     if question is None:
         question, _ = generate_question_pair_for_block(
             block,
-            preferred_objective_ids=[preferred_objective.pk] if preferred_objective is not None else _ordered_unmet_objective_ids(course_state, block),
+            preferred_objective_ids=[preferred_objective.pk] if preferred_objective is not None else _generation_objective_ids_for_block(course_state, block),
             strict_preferred_objectives=preferred_objective is not None,
             question_type=effective_type,
             raise_generation_errors=True,
@@ -1390,7 +1400,7 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
             "target": target,
         },
     )
-    advanced_question_start_percent = _advanced_question_start_percent(block.course)
+    advanced_question_start_percent = _advanced_question_start_percent(block)
     advanced_question_types_unlocked = _advanced_question_types_unlocked(block.course, block, course_state)
     return {
         "overall": overall,

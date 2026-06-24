@@ -25,6 +25,76 @@ from standalone.services.demo_mode import normalize_demo_iframe_origins
 from standalone.services.guidance import sanitize_assistant_guidance
 
 
+def _apply_question_setting_field_attributes(fields, *, block_level: bool = False) -> None:
+    guidance_help_prefix = "Optional. Add free-text steering notes"
+    if block_level:
+        guidance_help_suffix = " for this block. Leave blank to inherit the course default."
+    else:
+        guidance_help_suffix = (
+            " for question generation and student course chat, such as audience age, notation rules, or preferred wording."
+        )
+    fields["assistant_guidance"].label = "Assistant guidance"
+    fields["assistant_guidance"].help_text = guidance_help_prefix + guidance_help_suffix
+    fields["assistant_guidance"].widget = forms.Textarea(
+        attrs={
+            "rows": 5,
+            "placeholder": (
+                "Inherit course default"
+                if block_level
+                else "E.g. KS2 mathematics for 10-11 year olds. Keep language age-appropriate and concrete."
+            ),
+        }
+    )
+    fields["numeric_ratio_percent"].label = "Numeric question ratio (%)"
+    fields["numeric_ratio_percent"].help_text = (
+        "Leave blank to inherit the course default."
+        if block_level
+        else "Target percentage of newly generated questions that should be numeric single-answer items with locally validated calculations."
+    )
+    fields["maq_ratio_percent"].label = "Multiple-answer question ratio (%)"
+    fields["maq_ratio_percent"].help_text = (
+        "Leave blank to inherit the course default."
+        if block_level
+        else "Target percentage of newly generated questions that should allow multiple correct answers."
+    )
+    fields["waq_ratio_percent"].label = "Written-answer question ratio (%)"
+    fields["waq_ratio_percent"].help_text = (
+        "Leave blank to inherit the course default."
+        if block_level
+        else "Target percentage of newly generated questions that should use typed written answers."
+    )
+    fields["coding_question_ratio_percent"].label = "Coding question ratio (%)"
+    fields["coding_question_ratio_percent"].help_text = (
+        "Leave blank to inherit the course default."
+        if block_level
+        else "Target percentage of newly generated questions that should use coding comprehension or debugging snippets when coding content is detected."
+    )
+    fields["advanced_question_start_percent"].label = "Start MAQ/WAQ after target progress (%)"
+    fields["advanced_question_start_percent"].help_text = (
+        "Leave blank to inherit the course default."
+        if block_level
+        else "Block progress threshold before students are asked multiple-answer or written-answer questions. Use 0 to allow them from the start."
+    )
+    fields["distractor_count"].help_text = (
+        "Leave blank to inherit the course default."
+        if block_level
+        else "Number of distractors to include when generating single-answer questions."
+    )
+
+    for name in (
+        "assistant_guidance",
+        "distractor_count",
+        "numeric_ratio_percent",
+        "maq_ratio_percent",
+        "waq_ratio_percent",
+        "coding_question_ratio_percent",
+        "advanced_question_start_percent",
+    ):
+        field = fields[name]
+        if block_level and not isinstance(field.widget, forms.CheckboxInput):
+            field.widget.attrs["placeholder"] = field.widget.attrs.get("placeholder", "Inherit course default") or "Inherit course default"
+
+
 class EmailOrUsernameAuthenticationForm(forms.Form):
     username = forms.CharField(label="Email or username", max_length=150)
     password = forms.CharField(label="Password", widget=forms.PasswordInput())
@@ -188,32 +258,7 @@ class CourseConfigForm(forms.ModelForm):
                 "placeholder": "https://yourinstitution.instructure.com",
             }
         )
-        self.fields["assistant_guidance"].label = "Assistant guidance"
-        self.fields["assistant_guidance"].help_text = (
-            "Optional. Add free-text steering notes for question generation and student course chat, such as audience age, notation rules, or preferred wording."
-        )
-        self.fields["assistant_guidance"].widget = forms.Textarea(attrs={"rows": 5, "placeholder": "E.g. KS2 mathematics for 10-11 year olds. Keep language age-appropriate and concrete."})
-        self.fields["numeric_ratio_percent"].label = "Numeric question ratio (%)"
-        self.fields["numeric_ratio_percent"].help_text = (
-            "Target percentage of newly generated questions that should be numeric single-answer items with locally validated calculations."
-        )
-        self.fields["maq_ratio_percent"].label = "Multiple-answer question ratio (%)"
-        self.fields["maq_ratio_percent"].help_text = (
-            "Target percentage of newly generated questions that should allow multiple correct answers."
-        )
-        self.fields["waq_ratio_percent"].label = "Written-answer question ratio (%)"
-        self.fields["waq_ratio_percent"].help_text = (
-            "Target percentage of newly generated questions that should use typed written answers."
-        )
-        self.fields["coding_question_ratio_percent"].label = "Coding question ratio (%)"
-        self.fields["coding_question_ratio_percent"].help_text = (
-            "Target percentage of newly generated questions that should use coding comprehension or debugging snippets when coding content is detected."
-        )
-        self.fields["advanced_question_start_percent"].label = "Start MAQ/WAQ after target progress (%)"
-        self.fields["advanced_question_start_percent"].help_text = (
-            "Block progress threshold before students are asked multiple-answer or written-answer questions. "
-            "Use 0 to allow them from the start."
-        )
+        _apply_question_setting_field_attributes(self.fields)
         self.fields["practice_weight"].help_text = "Weighting of practice relative to validation in the overall course score."
         self.fields["validation_weight"].help_text = (
             "Weighting of validation relative to practice in the overall course score."
@@ -224,7 +269,6 @@ class CourseConfigForm(forms.ModelForm):
             "Weighting of on-time practice activity within overall practice scoring."
         )
         self.fields["target_weight"].help_text = "Weighting of progress toward the block question target."
-        self.fields["distractor_count"].help_text = "Number of distractors to include when generating single-answer questions."
         self.fields["revalidation_attempts"].help_text = "Number of additional validation attempts permitted after the first."
         self.fields["show_validation_feedback_immediately"].label = "Release validation feedback immediately"
         self.fields["show_validation_feedback_immediately"].help_text = (
@@ -417,6 +461,32 @@ class BlockAvailableFromInlineForm(forms.ModelForm):
         if value is None:
             raise forms.ValidationError("Please enter an availability date.")
         return value
+
+
+class BlockConfigForm(forms.ModelForm):
+    class Meta:
+        model = BlockConfig
+        fields = [
+            "assistant_guidance",
+            "distractor_count",
+            "numeric_ratio_percent",
+            "maq_ratio_percent",
+            "waq_ratio_percent",
+            "coding_question_ratio_percent",
+            "advanced_question_start_percent",
+        ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _apply_question_setting_field_attributes(self.fields, block_level=True)
+        for name, field in self.fields.items():
+            widget_classes = field.widget.attrs.get("class", "").split()
+            widget_classes.extend(["course-setting-input", "block-setting-input"])
+            field.widget.attrs["class"] = " ".join(dict.fromkeys(widget_classes))
+            field.widget.attrs["data-block-config-input"] = name
+
+    def clean_assistant_guidance(self):
+        return sanitize_assistant_guidance(self.cleaned_data.get("assistant_guidance", ""))
 
 
 class BlockConfigTargetQuestionCountInlineForm(forms.ModelForm):

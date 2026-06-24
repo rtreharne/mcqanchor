@@ -21,6 +21,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from standalone.forms import (
     BlockAvailableFromInlineForm,
+    BlockConfigForm,
     BlockConfigTargetQuestionCountInlineForm,
     BlockSummaryInlineForm,
     BlockTitleInlineForm,
@@ -557,6 +558,11 @@ def _course_detail_context(course: Course, *, request: HttpRequest | None = None
         if magic_link.is_active and not magic_link.is_expired and magic_link.use_count < magic_link.max_uses
     )
     for block in blocks:
+        try:
+            block_config = block.config
+        except BlockConfig.DoesNotExist:
+            block_config = BlockConfig(block=block, target_question_count=block.preview_target_question_count)
+        block.block_config_form = BlockConfigForm(instance=block_config, prefix=f"block-{block.pk}")
         return_to = f"{reverse('standalone:course_detail', args=[course.pk])}#assets-content-{block.pk}"
         block.upload_url = f"{reverse('standalone:asset_upload', args=[block.pk])}?next={quote(return_to, safe='/:?=&')}"
 
@@ -995,7 +1001,24 @@ def update_block_config_field(request: HttpRequest, block_id: int, field_name: s
         "target_question_count": BlockConfigTargetQuestionCountInlineForm,
     }.get(field_name)
     if form_class is None:
-        raise Http404
+        config_form = BlockConfigForm(instance=config)
+        if field_name not in config_form.fields:
+            raise Http404
+        override_value = request.POST.get(field_name, "")
+        form = BlockConfigForm(_block_config_form_payload(config, {field_name: override_value}), instance=config)
+        if not form.is_valid():
+            return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
+
+        updated_config = form.save()
+        value = getattr(updated_config, field_name)
+        return JsonResponse(
+            {
+                "ok": True,
+                "value": value,
+                "raw_value": value,
+                "message": "Block settings updated.",
+            }
+        )
 
     form = form_class(request.POST, instance=config)
     if not form.is_valid():
@@ -1046,6 +1069,19 @@ def _course_config_form_payload(config: CourseConfig, field_overrides: dict[str,
             payload[name] = "on" if value else ""
         else:
             payload[name] = "" if value is None else value
+    return payload
+
+
+def _block_config_form_payload(config: BlockConfig, field_overrides: dict[str, object] | None = None) -> dict[str, object]:
+    field_overrides = field_overrides or {}
+    form = BlockConfigForm(instance=config)
+    payload: dict[str, object] = {}
+    for name in form.fields:
+        if name in field_overrides:
+            value = field_overrides[name]
+        else:
+            value = getattr(config, name)
+        payload[name] = "" if value is None else value
     return payload
 
 

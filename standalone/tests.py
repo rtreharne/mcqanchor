@@ -14,7 +14,7 @@ from django.utils import timezone
 from openai import OpenAIError
 from unittest.mock import patch
 
-from standalone.forms import CourseForm, ValidationEventForm
+from standalone.forms import BlockConfigForm, CourseForm, ValidationEventForm
 from standalone.models import (
     BlockConfig,
     ContentAsset,
@@ -56,7 +56,7 @@ from standalone.services.numeric_questions import (
     _validate_numeric_candidate,
     normalize_numeric_answer_text,
 )
-from standalone.services.validation_flow import _pick_locked_questions, current_room_code
+from standalone.services.validation_flow import _pick_locked_questions, current_room_code, select_stratified_validation_questions
 from standalone.services.questions import (
     QuestionGenerationError,
     _create_question_pair,
@@ -394,6 +394,100 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(chapters[0].start_page, 1)
         self.assertEqual(chapters[0].end_page, 1)
 
+    @override_settings(OPENAI_API_KEY="")
+    def test_pdf_import_detects_top_level_numbered_sections_and_ignores_numbered_steps(self):
+        upload = self.build_pdf_upload(
+            [
+                [
+                    "1 Introduction to Excel and R",
+                    "If you are currently participating in a timetabled BIOS103 QS workshop.",
+                    "1.1 Estimating the Volume of a Snail",
+                ],
+                [
+                    "1. Download the CSV File:",
+                    "2. Import into Excel:",
+                    "3. Perform Regression",
+                ],
+                [
+                    "2 Summarising Data and ANOVA in",
+                    "Excel",
+                    "2.1 Summarising Data",
+                ],
+                [
+                    "3 Calibration Curves and Linear Regression in Excel",
+                    "3.1 Calibration Curves",
+                    "3.2 Linear Regression",
+                ],
+            ]
+        )
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf_file:
+            pdf_file.write(upload.read())
+            pdf_file.flush()
+
+            chapters = analyze_pdf_chapters(pdf_file.name)
+
+        self.assertEqual(
+            [chapter.title for chapter in chapters],
+            [
+                "1 Introduction to Excel and R",
+                "2 Summarising Data and ANOVA in Excel",
+                "3 Calibration Curves and Linear Regression in Excel",
+            ],
+        )
+        self.assertEqual([chapter.start_page for chapter in chapters], [1, 3, 4])
+        self.assertEqual([chapter.end_page for chapter in chapters], [2, 3, 4])
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_pdf_import_does_not_treat_numbered_instruction_pages_as_top_level_sections(self):
+        upload = self.build_pdf_upload(
+            [
+                [
+                    "1. Download the CSV File:",
+                    "2. Import into Excel:",
+                    "3. Perform Regression",
+                ],
+                [
+                    "Foundations of cell biology",
+                    "No chapter heading is present.",
+                ],
+            ]
+        )
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf_file:
+            pdf_file.write(upload.read())
+            pdf_file.flush()
+
+            chapters = analyze_pdf_chapters(pdf_file.name)
+
+        self.assertEqual(len(chapters), 1)
+        self.assertEqual(chapters[0].title, "Imported PDF")
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_pdf_import_joins_wrapped_top_level_numbered_titles(self):
+        upload = self.build_pdf_upload(
+            [
+                [
+                    "1 Introduction to R: Part",
+                    "I",
+                    "1.1 Reading and Inspecting Data",
+                ],
+                [
+                    "2 Statistics in R: Part",
+                    "II",
+                    "2.1 Linear Regression in R",
+                ],
+            ]
+        )
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf_file:
+            pdf_file.write(upload.read())
+            pdf_file.flush()
+
+            chapters = analyze_pdf_chapters(pdf_file.name)
+
+        self.assertEqual(
+            [chapter.title for chapter in chapters],
+            ["1 Introduction to R: Part I", "2 Statistics in R: Part II"],
+        )
+
     def test_course_form_auto_generates_slug_and_defaults(self):
         form = CourseForm(data={"title": "  Cell Biology 101  "})
 
@@ -673,6 +767,86 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(checkbox_response.status_code, 200)
         course.config.refresh_from_db()
         self.assertFalse(course.config.show_validation_feedback_immediately)
+
+    def test_block_config_form_inherits_course_defaults_when_blank_and_validates_ranges(self):
+        course = self.create_course()
+        course.config.assistant_guidance = "Use concise code explanations."
+        course.config.distractor_count = 4
+        course.config.numeric_ratio_percent = 25
+        course.config.maq_ratio_percent = 35
+        course.config.waq_ratio_percent = 15
+        course.config.coding_question_ratio_percent = 45
+        course.config.advanced_question_start_percent = 60
+        course.config.save(
+            update_fields=[
+                "assistant_guidance",
+                "distractor_count",
+                "numeric_ratio_percent",
+                "maq_ratio_percent",
+                "waq_ratio_percent",
+                "coding_question_ratio_percent",
+                "advanced_question_start_percent",
+                "updated_at",
+            ]
+        )
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+
+        invalid_form = BlockConfigForm(data={"numeric_ratio_percent": "101"}, instance=block.config)
+        self.assertFalse(invalid_form.is_valid())
+        self.assertIn("numeric_ratio_percent", invalid_form.errors)
+
+        form = BlockConfigForm(
+            data={
+                "assistant_guidance": "",
+                "distractor_count": "",
+                "numeric_ratio_percent": "",
+                "maq_ratio_percent": "",
+                "waq_ratio_percent": "",
+                "coding_question_ratio_percent": "",
+                "advanced_question_start_percent": "",
+            },
+            instance=block.config,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        config = form.save()
+        block.refresh_from_db()
+        config.refresh_from_db()
+
+        self.assertEqual(config.assistant_guidance, "")
+        self.assertIsNone(config.distractor_count)
+        self.assertIsNone(config.numeric_ratio_percent)
+        self.assertEqual(block.question_assistant_guidance, "Use concise code explanations.")
+        self.assertEqual(block.question_distractor_count, 4)
+        self.assertEqual(block.question_numeric_ratio_percent, 25)
+        self.assertEqual(block.question_maq_ratio_percent, 35)
+        self.assertEqual(block.question_waq_ratio_percent, 15)
+        self.assertEqual(block.question_coding_question_ratio_percent, 45)
+        self.assertEqual(block.question_advanced_question_start_percent, 60)
+
+    def test_block_config_field_autosave_updates_override_and_sanitises_guidance(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+        self.client.force_login(self.teacher)
+
+        numeric_response = self.client.post(
+            reverse("standalone:update_block_config_field", args=[block.pk, "coding_question_ratio_percent"]),
+            {"coding_question_ratio_percent": "100"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(numeric_response.status_code, 200)
+        block.config.refresh_from_db()
+        self.assertEqual(block.config.coding_question_ratio_percent, 100)
+
+        guidance_response = self.client.post(
+            reverse("standalone:update_block_config_field", args=[block.pk, "assistant_guidance"]),
+            {"assistant_guidance": " Keep examples in R.\n\nPrefer short snippets. "},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(guidance_response.status_code, 200)
+        block.config.refresh_from_db()
+        self.assertEqual(block.config.assistant_guidance, "Keep examples in R.\n\nPrefer short snippets.")
 
     def test_question_bank_item_numeric_type_enforces_is_numerical(self):
         course = self.create_course()
@@ -1233,6 +1407,13 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, 'action="%s"' % reverse("standalone:regenerate_block_content", args=[block.pk]), html=False)
         self.assertContains(response, 'data-inline-url="%s"' % reverse("standalone:update_block_field", args=[block.pk, "available_from"]), html=False)
         self.assertContains(response, 'data-inline-url="%s"' % reverse("standalone:update_block_config_field", args=[block.pk, "target_question_count"]), html=False)
+        self.assertContains(response, "Question settings")
+        self.assertContains(
+            response,
+            'data-block-config-url="%s"' % reverse("standalone:update_block_config_field", args=[block.pk, "coding_question_ratio_percent"]),
+            html=False,
+        )
+        self.assertContains(response, 'data-block-config-input="assistant_guidance"', html=False)
         self.assertContains(response, "Available from")
         self.assertContains(response, "Target MCQs")
         self.assertContains(response, "Enrolment routes")
@@ -1243,7 +1424,7 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, "Delete course")
         self.assertContains(response, 'action="%s"' % reverse("standalone:course_delete", args=[course.pk]), html=False)
         self.assertContains(response, "Self-enrol allowlist")
-        self.assertContains(response, "Magic links")
+        self.assertContains(response, "Enrolment magic links")
         page_html = response.content.decode("utf-8")
         self.assertEqual(page_html.count("course-section-head"), 6)
         self.assertIn('id="course-settings-content"', page_html)
@@ -1254,7 +1435,7 @@ class StandaloneFlowTests(TestCase):
         self.assertIn('id="course-danger-content"', page_html)
         self.assertLess(page_html.find("Course blocks"), page_html.find("Enrolment routes"))
         self.assertContains(response, "Students can join from the self-enrol URL only when their exact email address is on this course", html=False)
-        self.assertContains(response, "Magic links do not require an exact allowlist email.")
+        self.assertContains(response, "Enrolment magic links do not require an exact allowlist email.")
         self.assertContains(response, "This will replace the current description and learning objectives using every file in this block.")
         self.assertContains(response, "Delete this content block? This will remove its uploads, learning objectives, and generated questions. Remaining blocks will be re-numbered.")
         self.assertContains(response, "Upload files")
@@ -2805,6 +2986,71 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(practice.code_snippet, "")
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_block_coding_ratio_override_can_force_coding_generation(self):
+        course = self.create_course()
+        course.config.coding_question_ratio_percent = 0
+        course.config.save(update_fields=["coding_question_ratio_percent", "updated_at"])
+        block, _asset, _objective, _chunk = self.create_coding_content_block(course)
+        block.config.coding_question_ratio_percent = 100
+        block.config.save(update_fields=["coding_question_ratio_percent", "updated_at"])
+        captured = {}
+
+        def fake_payload(chunk, objective, distractor_count, question_type, *, coding_signal=None, **kwargs):
+            captured["coding_signal"] = coding_signal
+            captured["distractor_count"] = distractor_count
+            return {}, question_type, "python"
+
+        with patch("standalone.services.questions._payload_for_generation_attempt", side_effect=fake_payload):
+            with patch("standalone.services.questions._create_question_pair", return_value=("practice", "validation")):
+                practice, _validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MCQ)
+
+        self.assertEqual(practice, "practice")
+        self.assertIsNotNone(captured["coding_signal"])
+        self.assertEqual(captured["coding_signal"]["language"], "python")
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_block_coding_ratio_override_can_suppress_coding_generation(self):
+        course = self.create_course()
+        course.config.coding_question_ratio_percent = 100
+        course.config.save(update_fields=["coding_question_ratio_percent", "updated_at"])
+        block, _asset, _objective, _chunk = self.create_coding_content_block(course)
+        block.config.coding_question_ratio_percent = 0
+        block.config.save(update_fields=["coding_question_ratio_percent", "updated_at"])
+        captured = {}
+
+        def fake_payload(chunk, objective, distractor_count, question_type, *, coding_signal=None, **kwargs):
+            captured["coding_signal"] = coding_signal
+            return {}, question_type, ""
+
+        with patch("standalone.services.questions._payload_for_generation_attempt", side_effect=fake_payload):
+            with patch("standalone.services.questions._create_question_pair", return_value=("practice", "validation")):
+                practice, _validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MCQ)
+
+        self.assertEqual(practice, "practice")
+        self.assertIsNone(captured["coding_signal"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_block_distractor_override_changes_generated_distractor_count(self):
+        course = self.create_course()
+        course.config.distractor_count = 4
+        course.config.save(update_fields=["distractor_count", "updated_at"])
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+        block.config.distractor_count = 1
+        block.config.save(update_fields=["distractor_count", "updated_at"])
+        captured = {}
+
+        def fake_payload(chunk, objective, distractor_count, question_type, **kwargs):
+            captured["distractor_count"] = distractor_count
+            return {}, question_type, ""
+
+        with patch("standalone.services.questions._payload_for_generation_attempt", side_effect=fake_payload):
+            with patch("standalone.services.questions._create_question_pair", return_value=("practice", "validation")):
+                practice, _validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MCQ)
+
+        self.assertEqual(practice, "practice")
+        self.assertEqual(captured["distractor_count"], 1)
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_bad_ai_coding_payload_falls_back_to_language_aligned_coding_question(self):
         course = self.create_course()
         course.config.coding_question_ratio_percent = 100
@@ -2974,6 +3220,8 @@ print(result)""",
         course.config.assistant_guidance = "Audience is 10-11 years old. Keep wording age-appropriate."
         course.config.save(update_fields=["assistant_guidance", "updated_at"])
         block, _asset, objective, _chunk = self.create_preview_content_block(course)
+        block.config.assistant_guidance = "Use code examples that feel classroom-ready."
+        block.config.save(update_fields=["assistant_guidance", "updated_at"])
         objective.assistant_guidance = "Use Roman numerals directly when this objective is being tested."
         objective.save(update_fields=["assistant_guidance", "updated_at"])
         LearningObjectiveCorrection.objects.create(
@@ -2990,8 +3238,8 @@ print(result)""",
                 {
                     "question_type": QuestionBankItem.QuestionType.MCQ,
                     "stem": "Why might a cell membrane need selective transport?",
-                    "correct_answers": ["It controls what enters and leaves the cell."],
-                    "distractors": ["It stores DNA.", "It makes proteins.", "It replaces the nucleus."],
+                    "correct_answers": ["To control cell exchange."],
+                    "distractors": ["To store genetic code.", "To build ribosomes.", "To replace the nucleus."],
                     "further_study_questions": [
                         "Why does selective transport matter?",
                         "How would you explain membrane transport simply?",
@@ -3014,6 +3262,7 @@ print(result)""",
         self.assertTrue(prompts)
         prompt = prompts[0]
         self.assertIn("Audience is 10-11 years old", prompt)
+        self.assertIn("Use code examples that feel classroom-ready", prompt)
         self.assertIn("Use Roman numerals directly", prompt)
         self.assertIn("Do not switch all examples back into Arabic numerals", prompt)
         self.assertIn("Example flagged question: Which Arabic numeral matches XIV?", prompt)
@@ -4913,6 +5162,43 @@ print(result)""",
         question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
         self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.NUM)
 
+    def test_student_preview_uses_block_advanced_threshold_override(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 100
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        block.config.advanced_question_start_percent = 0
+        block.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Select all true statements about membranes.",
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            correct_answer="Membranes regulate transport.",
+            additional_correct_answers=["Membranes support signalling."],
+            distractors=["Membranes store chromosomes.", "Membranes replace ribosomes."],
+            explanation="This follows directly from this block.",
+            question_hash="block-threshold-override-maq-preview",
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.MAQ}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MAQ)
+        self.assertTrue(block_payload["metrics"]["advanced_question_types_unlocked"])
+        self.assertEqual(block_payload["metrics"]["advanced_question_start_percent"], 0)
+
     def test_student_preview_forced_advanced_type_unlocks_at_configured_target_progress(self):
         course = self.create_course()
         block, _, objective, chunk = self.create_preview_content_block(course)
@@ -5231,6 +5517,113 @@ print(result)""",
         self.assertNotEqual(generated_question.pk, existing_practice.pk)
         self.assertEqual(generated_question.learning_objective_id, second_objective.pk)
 
+    def test_student_preview_generation_randomizes_objective_order_after_full_coverage(self):
+        course = self.create_course()
+        block, asset, first_objective, first_chunk = self.create_preview_content_block(course)
+        second_objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=2,
+            code="1.2",
+            text="Explain signalling in cells",
+        )
+        second_chunk = ContentChunk.objects.create(
+            asset=asset,
+            course=course,
+            block=block,
+            ordinal=2,
+            text="Signalling pathways coordinate receptor activity and cellular responses.",
+            token_count=10,
+            checksum="preview-randomised-coverage-second-chunk",
+        )
+        generated_validation = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=second_objective,
+            source_chunk=second_chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Generated follow-on validation?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Validation explanation.",
+            question_hash="preview-full-coverage-generated-validation",
+        )
+        generated_practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=second_objective,
+            source_chunk=second_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Generated follow-on practice?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Practice explanation.",
+            question_hash="preview-full-coverage-generated-practice",
+            linked_question=generated_validation,
+        )
+        generated_validation.linked_question = generated_practice
+        generated_validation.save(update_fields=["linked_question", "updated_at"])
+
+        self.client.force_login(self.teacher)
+        session = self.client.session
+        session[PREVIEW_SESSION_KEY] = {
+            str(course.pk): {
+                "completion_sequence": 2,
+                "message_counter": 0,
+                "question_states": {},
+                "flagged_question_ids": [],
+                "transcripts": {},
+                "pending_questions": {},
+                "written_answer_drafts": {},
+                "completed_events": [
+                    {
+                        "block_id": block.pk,
+                        "question_id": 101,
+                        "correct": True,
+                        "answered_at": timezone.now().isoformat(),
+                        "learning_objective_id": first_objective.pk,
+                        "source_chunk_id": first_chunk.pk,
+                        "question_type": QuestionBankItem.QuestionType.MCQ,
+                        "selected_answers": ["A"],
+                        "answer_text": "A",
+                        "feedback": "Correct.",
+                    },
+                    {
+                        "block_id": block.pk,
+                        "question_id": 102,
+                        "correct": True,
+                        "answered_at": timezone.now().isoformat(),
+                        "learning_objective_id": second_objective.pk,
+                        "source_chunk_id": second_chunk.pk,
+                        "question_type": QuestionBankItem.QuestionType.MCQ,
+                        "selected_answers": ["A"],
+                        "answer_text": "A",
+                        "feedback": "Correct.",
+                    },
+                ],
+            }
+        }
+        session.save()
+
+        with patch("standalone.services.preview.random.shuffle", side_effect=lambda items: items.reverse()):
+            with patch(
+                "standalone.services.preview.generate_question_pair_for_block",
+                return_value=(generated_practice, generated_validation),
+            ) as generate_mock:
+                response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        generate_mock.assert_called_once_with(
+            block,
+            preferred_objective_ids=[second_objective.pk, first_objective.pk],
+            strict_preferred_objectives=False,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            raise_generation_errors=True,
+        )
+
     def test_student_preview_answer_updates_feedback_without_creating_real_attempts(self):
         course = self.create_course()
         block, _, objective, _ = self.create_preview_content_block(course)
@@ -5512,6 +5905,8 @@ print(result)""",
         course.config.assistant_guidance = "Audience is 10-11 years old. Keep explanations concrete."
         course.config.save(update_fields=["assistant_guidance", "updated_at"])
         block, _, objective, _ = self.create_preview_content_block(course, title="Roman Numerals")
+        block.config.assistant_guidance = "Keep examples short and stay in the notation used in class."
+        block.config.save(update_fields=["assistant_guidance", "updated_at"])
         objective.text = "Calculate Roman numerals"
         objective.assistant_guidance = "Use Roman numerals directly in examples and answers."
         objective.save(update_fields=["text", "assistant_guidance", "updated_at"])
@@ -5542,6 +5937,7 @@ print(result)""",
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(prompts)
+        self.assertIn("Keep examples short and stay in the notation used in class.", prompts[0])
         prompt = prompts[0]
         self.assertIn("Audience is 10-11 years old", prompt)
         self.assertIn("Use Roman numerals directly in examples and answers", prompt)
@@ -7923,6 +8319,88 @@ print(result)""",
         self.assertEqual(len(selected), 2)
         self.assertEqual({question.block_id for question in selected}, {block_one.pk, block_two.pk})
         self.assertTrue(any(question.block_id == block_two.pk and question.learning_objective_id == objective_two.pk for question in selected))
+
+    def test_validation_sampling_uses_block_level_type_targets(self):
+        course = self.create_course()
+        block_one, asset_one, objective_one, chunk_one = self.create_preview_content_block(course, title="Validation One", order=1)
+        block_two, asset_two, objective_two, chunk_two = self.create_preview_content_block(course, title="Validation Two", order=2)
+        block_one.config.numeric_ratio_percent = 100
+        block_one.config.save(update_fields=["numeric_ratio_percent", "updated_at"])
+        block_two.config.numeric_ratio_percent = 0
+        block_two.config.save(update_fields=["numeric_ratio_percent", "updated_at"])
+
+        num_one = QuestionBankItem.objects.create(
+            course=course,
+            block=block_one,
+            learning_objective=objective_one,
+            source_chunk=chunk_one,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.NUM,
+            stem="Calculate the first validation result.",
+            correct_answer="12",
+            distractors=["10", "14", "16"],
+            explanation="A.",
+            question_hash="block-one-num-validation-target",
+            is_numerical=True,
+            numeric_metadata={"script_version": "v1"},
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block_one,
+            learning_objective=objective_one,
+            source_chunk=chunk_one,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem="Which concept best fits block one?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="block-one-mcq-validation-target",
+        )
+        mcq_two = QuestionBankItem.objects.create(
+            course=course,
+            block=block_two,
+            learning_objective=objective_two,
+            source_chunk=chunk_two,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem="Which concept best fits block two?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="block-two-mcq-validation-target",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block_two,
+            learning_objective=objective_two,
+            source_chunk=chunk_two,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.NUM,
+            stem="Calculate the second validation result.",
+            correct_answer="8",
+            distractors=["6", "10", "12"],
+            explanation="A.",
+            question_hash="block-two-num-validation-target",
+            is_numerical=True,
+            numeric_metadata={"script_version": "v1"},
+        )
+
+        selected = select_stratified_validation_questions(
+            course,
+            list(course.question_bank_items.filter(bank_type=QuestionBankItem.BankType.VALIDATION).order_by("pk")),
+            2,
+            seed_key="block-level-validation-targets",
+            blocks=[block_one, block_two],
+        )
+
+        self.assertEqual(len(selected), 2)
+        self.assertIn(num_one.pk, {question.pk for question in selected})
+        self.assertIn(mcq_two.pk, {question.pk for question in selected})
 
     def test_student_practice_validation_sampling_stratifies_across_blocks(self):
         course = self.create_course()

@@ -518,8 +518,8 @@ def _planned_objective_slots(
     return [(item[4], item[5]) for item in interleaved[:question_count]]
 
 
-def _extended_type_preference(course, selected_type_counts: dict[str, int], selected_count: int, question_count: int) -> list[str]:
-    preferred = _practice_validation_type_preference(course, selected_type_counts, selected_count, question_count)
+def _extended_type_preference(block: CourseBlock, selected_type_counts: dict[str, int], selected_count: int, question_count: int) -> list[str]:
+    preferred = _practice_validation_type_preference(block, selected_type_counts, selected_count, question_count)
     ordered = list(preferred)
     for question_type in (
         QuestionBankItem.QuestionType.MCQ,
@@ -600,12 +600,22 @@ def select_stratified_validation_questions(
 
     remaining_questions = list(available_questions)
     selected: list[QuestionBankItem] = []
-    selected_type_counts: dict[str, int] = defaultdict(int)
+    selected_type_counts_by_block: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     selected_objective_counts: dict[int, int] = defaultdict(int)
     block_lookup = {block.pk: block for block in released_blocks}
+    planned_slot_counts_by_block: dict[int, int] = defaultdict(int)
+    for block, _objective_id in planned_slots:
+        planned_slot_counts_by_block[block.pk] += 1
 
     for block, objective_id in planned_slots:
-        type_order = _extended_type_preference(course, selected_type_counts, len(selected), question_count)
+        block_type_counts = selected_type_counts_by_block[block.pk]
+        block_selected_count = sum(block_type_counts.values())
+        type_order = _extended_type_preference(
+            block,
+            block_type_counts,
+            block_selected_count,
+            planned_slot_counts_by_block.get(block.pk, question_count),
+        )
         unused_objective_ids = {
             int(question.learning_objective_id or 0)
             for question in remaining_questions
@@ -629,24 +639,33 @@ def select_stratified_validation_questions(
         if question is None:
             continue
         selected.append(question)
-        selected_type_counts[question.question_type] += 1
+        selected_type_counts_by_block[question.block_id][question.question_type] += 1
         if question.learning_objective_id:
             selected_objective_counts[int(question.learning_objective_id)] += 1
 
     if len(selected) < question_count:
         missing = question_count - len(selected)
         for _index in range(missing):
-            type_order = _extended_type_preference(course, selected_type_counts, len(selected), question_count)
-            question = _pop_matching_question(remaining_questions, block_id=None, objective_id=None, question_types=type_order)
-            if question is None:
-                for block, objective_id in planned_slots:
-                    question = _generate_question_for_slot(course, block_lookup.get(block.pk, block), objective_id, type_order, generate_question)
-                    if question is not None:
-                        break
+            question = None
+            for block, objective_id in planned_slots:
+                block_type_counts = selected_type_counts_by_block[block.pk]
+                block_selected_count = sum(block_type_counts.values())
+                type_order = _extended_type_preference(
+                    block,
+                    block_type_counts,
+                    block_selected_count,
+                    planned_slot_counts_by_block.get(block.pk, question_count),
+                )
+                question = _pop_matching_question(remaining_questions, block_id=block.pk, objective_id=None, question_types=type_order)
+                if question is not None:
+                    break
+                question = _generate_question_for_slot(course, block_lookup.get(block.pk, block), objective_id, type_order, generate_question)
+                if question is not None:
+                    break
             if question is None:
                 break
             selected.append(question)
-            selected_type_counts[question.question_type] += 1
+            selected_type_counts_by_block[question.block_id][question.question_type] += 1
             if question.learning_objective_id:
                 selected_objective_counts[int(question.learning_objective_id)] += 1
 
@@ -715,29 +734,12 @@ def _pick_practice_validation_questions(
     )
 
 
-def _practice_validation_type_targets(course) -> dict[str, float]:
-    numeric_target = max(0.0, min(100.0, float(course.config.numeric_ratio_percent or 0)))
-    maq_target = max(0.0, min(100.0, float(course.config.maq_ratio_percent or 0)))
-    waq_target = max(0.0, min(100.0, float(course.config.waq_ratio_percent or 0)))
-    mcq_target = max(0.0, 100.0 - numeric_target - maq_target - waq_target)
-    total_target = mcq_target + numeric_target + maq_target + waq_target
-    if total_target <= 0:
-        return {
-            QuestionBankItem.QuestionType.MCQ: 100.0,
-            QuestionBankItem.QuestionType.NUM: 0.0,
-            QuestionBankItem.QuestionType.MAQ: 0.0,
-            QuestionBankItem.QuestionType.WAQ: 0.0,
-        }
-    return {
-        QuestionBankItem.QuestionType.MCQ: (mcq_target * 100.0 / total_target),
-        QuestionBankItem.QuestionType.NUM: (numeric_target * 100.0 / total_target),
-        QuestionBankItem.QuestionType.MAQ: (maq_target * 100.0 / total_target),
-        QuestionBankItem.QuestionType.WAQ: (waq_target * 100.0 / total_target),
-    }
+def _practice_validation_type_targets(block: CourseBlock) -> dict[str, float]:
+    return block.question_type_ratio_targets()
 
 
-def _practice_validation_type_preference(course, selected_type_counts: dict[str, int], selected_count: int, question_count: int) -> list[str]:
-    targets = _practice_validation_type_targets(course)
+def _practice_validation_type_preference(block: CourseBlock, selected_type_counts: dict[str, int], selected_count: int, question_count: int) -> list[str]:
+    targets = _practice_validation_type_targets(block)
     remaining_slots = max(1, question_count)
     candidates = []
     for question_type in (

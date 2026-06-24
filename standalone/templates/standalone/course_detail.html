@@ -510,6 +510,57 @@
               </div>
 
               <section class="block-detail-section">
+                <div class="course-settings-group-head">
+                  <h4>Question settings</h4>
+                  <p>Leave any block override blank to inherit the current course default.</p>
+                </div>
+                <div class="course-settings-grid">
+                  <div class="course-setting-cell course-setting-cell--full" data-block-config-row data-block-config-field="{{ block.block_config_form.assistant_guidance.name }}" data-block-config-url="{% url 'standalone:update_block_config_field' block.pk 'assistant_guidance' %}">
+                    <label class="course-setting-label" for="{{ block.block_config_form.assistant_guidance.id_for_label }}">{{ block.block_config_form.assistant_guidance.label }}</label>
+                    {{ block.block_config_form.assistant_guidance }}
+                    <p class="course-setting-help">{{ block.block_config_form.assistant_guidance.help_text }}</p>
+                    <p class="course-setting-status" data-block-config-status hidden></p>
+                  </div>
+                  <div class="course-setting-cell" data-block-config-row data-block-config-field="{{ block.block_config_form.distractor_count.name }}" data-block-config-url="{% url 'standalone:update_block_config_field' block.pk 'distractor_count' %}">
+                    <label class="course-setting-label" for="{{ block.block_config_form.distractor_count.id_for_label }}">{{ block.block_config_form.distractor_count.label }}</label>
+                    {{ block.block_config_form.distractor_count }}
+                    <p class="course-setting-help">{{ block.block_config_form.distractor_count.help_text }}</p>
+                    <p class="course-setting-status" data-block-config-status hidden></p>
+                  </div>
+                  <div class="course-setting-cell" data-block-config-row data-block-config-field="{{ block.block_config_form.numeric_ratio_percent.name }}" data-block-config-url="{% url 'standalone:update_block_config_field' block.pk 'numeric_ratio_percent' %}">
+                    <label class="course-setting-label" for="{{ block.block_config_form.numeric_ratio_percent.id_for_label }}">{{ block.block_config_form.numeric_ratio_percent.label }}</label>
+                    {{ block.block_config_form.numeric_ratio_percent }}
+                    <p class="course-setting-help">{{ block.block_config_form.numeric_ratio_percent.help_text }}</p>
+                    <p class="course-setting-status" data-block-config-status hidden></p>
+                  </div>
+                  <div class="course-setting-cell" data-block-config-row data-block-config-field="{{ block.block_config_form.maq_ratio_percent.name }}" data-block-config-url="{% url 'standalone:update_block_config_field' block.pk 'maq_ratio_percent' %}">
+                    <label class="course-setting-label" for="{{ block.block_config_form.maq_ratio_percent.id_for_label }}">{{ block.block_config_form.maq_ratio_percent.label }}</label>
+                    {{ block.block_config_form.maq_ratio_percent }}
+                    <p class="course-setting-help">{{ block.block_config_form.maq_ratio_percent.help_text }}</p>
+                    <p class="course-setting-status" data-block-config-status hidden></p>
+                  </div>
+                  <div class="course-setting-cell" data-block-config-row data-block-config-field="{{ block.block_config_form.waq_ratio_percent.name }}" data-block-config-url="{% url 'standalone:update_block_config_field' block.pk 'waq_ratio_percent' %}">
+                    <label class="course-setting-label" for="{{ block.block_config_form.waq_ratio_percent.id_for_label }}">{{ block.block_config_form.waq_ratio_percent.label }}</label>
+                    {{ block.block_config_form.waq_ratio_percent }}
+                    <p class="course-setting-help">{{ block.block_config_form.waq_ratio_percent.help_text }}</p>
+                    <p class="course-setting-status" data-block-config-status hidden></p>
+                  </div>
+                  <div class="course-setting-cell" data-block-config-row data-block-config-field="{{ block.block_config_form.coding_question_ratio_percent.name }}" data-block-config-url="{% url 'standalone:update_block_config_field' block.pk 'coding_question_ratio_percent' %}">
+                    <label class="course-setting-label" for="{{ block.block_config_form.coding_question_ratio_percent.id_for_label }}">{{ block.block_config_form.coding_question_ratio_percent.label }}</label>
+                    {{ block.block_config_form.coding_question_ratio_percent }}
+                    <p class="course-setting-help">{{ block.block_config_form.coding_question_ratio_percent.help_text }}</p>
+                    <p class="course-setting-status" data-block-config-status hidden></p>
+                  </div>
+                  <div class="course-setting-cell" data-block-config-row data-block-config-field="{{ block.block_config_form.advanced_question_start_percent.name }}" data-block-config-url="{% url 'standalone:update_block_config_field' block.pk 'advanced_question_start_percent' %}">
+                    <label class="course-setting-label" for="{{ block.block_config_form.advanced_question_start_percent.id_for_label }}">{{ block.block_config_form.advanced_question_start_percent.label }}</label>
+                    {{ block.block_config_form.advanced_question_start_percent }}
+                    <p class="course-setting-help">{{ block.block_config_form.advanced_question_start_percent.help_text }}</p>
+                    <p class="course-setting-status" data-block-config-status hidden></p>
+                  </div>
+                </div>
+              </section>
+
+              <section class="block-detail-section">
                 <p
                   class="inline-editable inline-editable-summary block-description"
                   data-inline-edit

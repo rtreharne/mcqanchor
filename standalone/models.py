@@ -278,12 +278,111 @@ class CourseBlock(TimeStampedModel):
         except BlockConfig.DoesNotExist:
             return 20
 
+    def _block_config_or_none(self):
+        try:
+            return self.config
+        except BlockConfig.DoesNotExist:
+            return None
+
+    def _resolved_text_override(self, block_field: str, course_field: str) -> str:
+        config = self._block_config_or_none()
+        value = getattr(config, block_field, "") if config is not None else ""
+        if str(value or "").strip():
+            return value
+        return getattr(self.course.config, course_field)
+
+    def _resolved_numeric_override(self, block_field: str, course_field: str) -> int:
+        config = self._block_config_or_none()
+        value = getattr(config, block_field, None) if config is not None else None
+        if value is not None:
+            return int(value)
+        return int(getattr(self.course.config, course_field))
+
+    @property
+    def question_assistant_guidance(self) -> str:
+        return self._resolved_text_override("assistant_guidance", "assistant_guidance")
+
+    @property
+    def question_distractor_count(self) -> int:
+        return self._resolved_numeric_override("distractor_count", "distractor_count")
+
+    @property
+    def question_numeric_ratio_percent(self) -> int:
+        return self._resolved_numeric_override("numeric_ratio_percent", "numeric_ratio_percent")
+
+    @property
+    def question_maq_ratio_percent(self) -> int:
+        return self._resolved_numeric_override("maq_ratio_percent", "maq_ratio_percent")
+
+    @property
+    def question_waq_ratio_percent(self) -> int:
+        return self._resolved_numeric_override("waq_ratio_percent", "waq_ratio_percent")
+
+    @property
+    def question_coding_question_ratio_percent(self) -> int:
+        return self._resolved_numeric_override("coding_question_ratio_percent", "coding_question_ratio_percent")
+
+    @property
+    def question_advanced_question_start_percent(self) -> int:
+        return self._resolved_numeric_override("advanced_question_start_percent", "advanced_question_start_percent")
+
+    def question_type_ratio_targets(self) -> dict[str, float]:
+        numeric_target = max(0.0, min(100.0, float(self.question_numeric_ratio_percent or 0)))
+        maq_target = max(0.0, min(100.0, float(self.question_maq_ratio_percent or 0)))
+        waq_target = max(0.0, min(100.0, float(self.question_waq_ratio_percent or 0)))
+        mcq_target = max(0.0, 100.0 - numeric_target - maq_target - waq_target)
+        total_target = mcq_target + numeric_target + maq_target + waq_target
+        if total_target <= 0:
+            return {
+                QuestionBankItem.QuestionType.MCQ: 100.0,
+                QuestionBankItem.QuestionType.NUM: 0.0,
+                QuestionBankItem.QuestionType.MAQ: 0.0,
+                QuestionBankItem.QuestionType.WAQ: 0.0,
+            }
+        return {
+            QuestionBankItem.QuestionType.MCQ: (mcq_target * 100.0 / total_target),
+            QuestionBankItem.QuestionType.NUM: (numeric_target * 100.0 / total_target),
+            QuestionBankItem.QuestionType.MAQ: (maq_target * 100.0 / total_target),
+            QuestionBankItem.QuestionType.WAQ: (waq_target * 100.0 / total_target),
+        }
+
 
 class BlockConfig(TimeStampedModel):
     block = models.OneToOneField(CourseBlock, on_delete=models.CASCADE, related_name="config")
     release_date = models.DateTimeField(null=True, blank=True)
     target_question_count = models.PositiveSmallIntegerField(default=20)
     target_weight_override = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    assistant_guidance = models.TextField(blank=True)
+    distractor_count = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+    )
+    numeric_ratio_percent = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    maq_ratio_percent = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    waq_ratio_percent = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    coding_question_ratio_percent = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    advanced_question_start_percent = models.PositiveSmallIntegerField(
         null=True,
         blank=True,
         validators=[MinValueValidator(0), MaxValueValidator(100)],

@@ -52,6 +52,11 @@ _NON_CHAPTER_OUTLINE_TITLES = {
 }
 _NON_CHAPTER_OUTLINE_PATTERN = re.compile(r"^(part|unit|section|appendix|appendices)\b", re.IGNORECASE)
 _TOC_HEADER_PATTERN = re.compile(r"\b(?P<kind>chapter|module)\s*[.:]?\s*(?P<number>\d{1,3})", re.IGNORECASE)
+_TOP_LEVEL_SECTION_PATTERN = re.compile(r"^(?P<number>\d{1,2})\s+(?P<title>[A-Z][A-Za-z0-9 ,:;'\-/()&]+)$")
+_SUBSECTION_PATTERN = re.compile(r"^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+")
+_NUMBERED_STEP_PATTERN = re.compile(r"^\d{1,2}[.:]\s+")
+_PAGE_COUNTER_PATTERN = re.compile(r"^\d+\s+of\s+\d+$", re.IGNORECASE)
+_TIMESTAMP_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}$")
 _OCR_PROBE_PAGE_COUNT = 40
 _END_BOUNDARY_TITLE = "__END_OF_CHAPTERS__"
 
@@ -97,7 +102,7 @@ def analyze_pdf_chapters(file_path: str | Path) -> list[PdfChapterCandidate]:
         return _cleanup_with_openai(chapters) if settings.OPENAI_API_KEY else chapters
 
     reader = PdfReader(str(file_path))
-    boundaries = _outline_boundaries(reader) or _heading_boundaries(pages)
+    boundaries = _outline_boundaries(reader) or _top_level_numbered_section_boundaries(pages) or _heading_boundaries(pages)
     if not boundaries:
         boundaries = [_ChapterBoundary("Imported PDF", 1, 35)]
 
@@ -319,6 +324,19 @@ def _heading_boundaries_from_page_map(page_map: dict[int, str]) -> list[_Chapter
     return _heading_boundaries(pages)
 
 
+def _top_level_numbered_section_boundaries(pages: list[str]) -> list[_ChapterBoundary]:
+    candidates: list[tuple[int, int, str]] = []
+
+    for page_index, page_text in enumerate(pages, start=1):
+        title = _top_level_numbered_title_from_page(page_text)
+        if not title:
+            continue
+        number, display_title = title
+        candidates.append((page_index, number, display_title))
+
+    return _validated_top_level_boundaries(candidates)
+
+
 def _empty_chapters_from_boundaries(
     boundaries: list[_ChapterBoundary], page_count: int
 ) -> list[PdfChapterCandidate]:
@@ -447,9 +465,35 @@ def _heading_boundaries(pages: list[str]) -> list[_ChapterBoundary]:
     return _dedupe_boundaries(boundaries)
 
 
+def _top_level_numbered_title_from_page(page_text: str) -> tuple[int, str] | None:
+    lines = _normalized_page_lines(page_text)
+    if not lines:
+        return None
+
+    for line_index, line in enumerate(lines[:8]):
+        match = _TOP_LEVEL_SECTION_PATTERN.match(line)
+        if not match:
+            continue
+        if _SUBSECTION_PATTERN.match(line) or _NUMBERED_STEP_PATTERN.match(line):
+            continue
+        if _looks_like_instruction_line(line):
+            continue
+
+        number = int(match.group("number"))
+        title = line
+        next_line = _joined_wrapped_title_line(lines, line_index)
+        if next_line:
+            title = next_line
+        return number, _clean_title(title)
+
+    return None
+
+
 def _heading_title_from_line(line: str) -> str:
     compact = re.sub(r"\s+", " ", line).strip(" -:\t")
     if not compact or len(compact) > 140:
+        return ""
+    if _looks_like_instruction_line(compact):
         return ""
 
     for pattern in _CHAPTER_PATTERNS:
@@ -475,6 +519,120 @@ def _next_title_line(lines: list[str], start_index: int) -> str:
         if 4 <= len(compact) <= 120 and not _heading_title_from_line(compact):
             return compact
     return ""
+
+
+def _normalized_page_lines(page_text: str) -> list[str]:
+    lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+    normalized: list[str] = []
+    for line in lines:
+        compact = re.sub(r"\s+", " ", line).strip()
+        if not compact or _is_print_pdf_noise_line(compact):
+            continue
+        normalized.append(compact)
+    return normalized
+
+
+def _is_print_pdf_noise_line(line: str) -> bool:
+    lowered = line.lower()
+    if _PAGE_COUNTER_PATTERN.match(line) or _TIMESTAMP_PATTERN.match(line):
+        return True
+    if "http://" in lowered or "https://" in lowered or " | " in line:
+        return True
+    if lowered in {"watch on", "ninepointeightone"}:
+        return True
+    return False
+
+
+def _joined_wrapped_title_line(lines: list[str], line_index: int) -> str:
+    current = lines[line_index]
+    if not _TOP_LEVEL_SECTION_PATTERN.match(current):
+        return current
+    if not _looks_like_wrapped_title_fragment(current):
+        return current
+
+    for next_line in lines[line_index + 1 : line_index + 3]:
+        if _is_print_pdf_noise_line(next_line):
+            continue
+        if _TOP_LEVEL_SECTION_PATTERN.match(next_line) or _SUBSECTION_PATTERN.match(next_line) or _NUMBERED_STEP_PATTERN.match(next_line):
+            break
+        if _looks_like_continuation_line(next_line):
+            return f"{current} {next_line}"
+        break
+    return current
+
+
+def _looks_like_wrapped_title_fragment(line: str) -> bool:
+    return bool(re.search(r"\b(in|of|for|and|to|part|linear|anova|statistics|functions):?$", line, flags=re.IGNORECASE))
+
+
+def _looks_like_continuation_line(line: str) -> bool:
+    return bool(line) and len(line) <= 60 and bool(re.match(r"^[A-Z][A-Za-z0-9 ,:;'\-/()&]*$", line))
+
+
+def _looks_like_instruction_line(line: str) -> bool:
+    lowered = line.lower()
+    if lowered.endswith(":"):
+        return True
+    instruction_verbs = {
+        "add",
+        "apply",
+        "calculate",
+        "choose",
+        "click",
+        "create",
+        "download",
+        "drag",
+        "generate",
+        "identify",
+        "import",
+        "insert",
+        "interpret",
+        "load",
+        "open",
+        "perform",
+        "select",
+        "set",
+        "start",
+        "transpose",
+        "use",
+        "write",
+    }
+    words = re.findall(r"[a-z]+", lowered)
+    if not words:
+        return False
+    return words[0] in instruction_verbs
+
+
+def _validated_top_level_boundaries(candidates: list[tuple[int, int, str]]) -> list[_ChapterBoundary]:
+    if len(candidates) < 2:
+        return []
+
+    filtered: list[tuple[int, int, str]] = []
+    seen_numbers: set[int] = set()
+    last_number = 0
+    for page_number, section_number, title in candidates:
+        if section_number in seen_numbers or section_number < last_number:
+            continue
+        seen_numbers.add(section_number)
+        last_number = section_number
+        filtered.append((page_number, section_number, title))
+
+    if len(filtered) < 2:
+        return []
+
+    sequential_pairs = sum(
+        1
+        for index in range(len(filtered) - 1)
+        if filtered[index + 1][1] == filtered[index][1] + 1
+    )
+    if sequential_pairs < 1:
+        return []
+
+    confidence = 86 if sequential_pairs >= 2 else 83
+    return [
+        _ChapterBoundary(title=title, start_page=page_number, confidence=confidence)
+        for page_number, _section_number, title in filtered
+    ]
 
 
 def _is_noise_heading(title: str) -> bool:

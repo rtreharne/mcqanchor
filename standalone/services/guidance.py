@@ -62,6 +62,12 @@ def _course_guidance(course: Course) -> str:
     return sanitize_assistant_guidance(guidance)
 
 
+def _block_guidance(block: CourseBlock | None) -> str:
+    if block is None:
+        return ""
+    return sanitize_assistant_guidance(block.question_assistant_guidance)
+
+
 def _objective_guidance(objective: LearningObjective | None) -> str:
     if objective is None:
         return ""
@@ -99,11 +105,21 @@ def _objective_prompt_block(objective: LearningObjective) -> str:
     return f"{objective.code}: {objective.text}\n" + "\n\n".join(parts)
 
 
-def build_generation_guidance_prompt(course: Course, *, objective: LearningObjective | None = None) -> str:
+def build_generation_guidance_prompt(
+    course: Course,
+    *,
+    block: CourseBlock | None = None,
+    objective: LearningObjective | None = None,
+) -> str:
     sections: list[str] = []
+    if block is None and objective is not None:
+        block = objective.block
     course_guidance = _course_guidance(course)
     if course_guidance:
         sections.append(f"Course guidance:\n{course_guidance}")
+    block_guidance = _block_guidance(block)
+    if block_guidance:
+        sections.append(f"Block guidance:\n{block_guidance}")
     if objective is not None:
         objective_block = _objective_prompt_block(objective)
         if objective_block:
@@ -149,6 +165,9 @@ def build_chat_guidance_prompt(course: Course, block: CourseBlock, question_text
     course_guidance = _course_guidance(course)
     if course_guidance:
         sections.append(f"Course guidance:\n{course_guidance}")
+    block_guidance = _block_guidance(block)
+    if block_guidance:
+        sections.append(f"Block guidance:\n{block_guidance}")
 
     matched_objectives = matched_guidance_objectives_for_chat(block, question_text)
     objective_sections = [section for section in (_objective_prompt_block(objective) for objective in matched_objectives) if section]

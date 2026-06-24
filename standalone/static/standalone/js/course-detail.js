@@ -150,6 +150,24 @@ function setCourseConfigRowState(row, state, message = "") {
   status.textContent = message;
 }
 
+function setBlockConfigRowState(row, state, message = "") {
+  if (!row) {
+    return;
+  }
+  row.dataset.saveState = state;
+  const status = row.querySelector("[data-block-config-status]");
+  if (!status) {
+    return;
+  }
+  if (!message) {
+    status.hidden = true;
+    status.textContent = "";
+    return;
+  }
+  status.hidden = false;
+  status.textContent = message;
+}
+
 function syncDemoSettingsVisibility(root = document) {
   const demoToggle = root.querySelector("[data-course-config-field='demo_enabled'] input[type='checkbox']");
   const enabled = !!demoToggle?.checked;
@@ -221,6 +239,64 @@ async function saveCourseConfigInput(input) {
     if (row.dataset.pendingSave === "true") {
       row.dataset.pendingSave = "false";
       void saveCourseConfigInput(input);
+    }
+  }
+}
+
+async function saveBlockConfigInput(input) {
+  const row = input.closest("[data-block-config-row]");
+  const fieldName = row?.dataset.blockConfigField;
+  const url = row?.dataset.blockConfigUrl;
+  if (!row || !fieldName || !url) {
+    return;
+  }
+
+  if (row.dataset.saving === "true") {
+    row.dataset.pendingSave = "true";
+    return;
+  }
+
+  const body = new URLSearchParams();
+  body.set(fieldName, input.value);
+
+  row.dataset.saving = "true";
+  row.dataset.pendingSave = "false";
+  setBlockConfigRowState(row, "saving", "Saving...");
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "X-CSRFToken": getCsrfToken(),
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: body.toString(),
+      credentials: "same-origin",
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw new Error((payload.errors || ["Unable to save this setting."]).join(" "));
+    }
+    if (payload.raw_value === null || payload.raw_value === undefined || payload.raw_value === "") {
+      input.value = "";
+    } else {
+      input.value = `${payload.raw_value}`;
+    }
+    setBlockConfigRowState(row, "saved", "Saved");
+    showSettingsToast(payload.message || "Block settings updated.");
+    window.setTimeout(() => {
+      if (row.dataset.saveState === "saved") {
+        setBlockConfigRowState(row, "", "");
+      }
+    }, 1200);
+  } catch (error) {
+    setBlockConfigRowState(row, "error", error.message || "Unable to save this setting.");
+  } finally {
+    row.dataset.saving = "false";
+    if (row.dataset.pendingSave === "true") {
+      row.dataset.pendingSave = "false";
+      void saveBlockConfigInput(input);
     }
   }
 }
@@ -682,6 +758,36 @@ function initializeCourseDetail(root = document) {
         saveHandle = null;
       }
       void saveCourseConfigInput(input);
+    });
+  });
+
+  root.querySelectorAll("[data-block-config-input]").forEach((input) => {
+    let saveHandle = null;
+    const scheduleSave = () => {
+      if (saveHandle) {
+        window.clearTimeout(saveHandle);
+      }
+      saveHandle = window.setTimeout(() => {
+        void saveBlockConfigInput(input);
+      }, 500);
+    };
+
+    input.addEventListener("input", () => {
+      scheduleSave();
+    });
+    input.addEventListener("change", () => {
+      if (saveHandle) {
+        window.clearTimeout(saveHandle);
+        saveHandle = null;
+      }
+      void saveBlockConfigInput(input);
+    });
+    input.addEventListener("blur", () => {
+      if (saveHandle) {
+        window.clearTimeout(saveHandle);
+        saveHandle = null;
+      }
+      void saveBlockConfigInput(input);
     });
   });
 

@@ -1,6 +1,6 @@
 from django.utils import timezone
 
-from standalone.models import Course, QuestionBankItem
+from standalone.models import Course, CourseBlock, QuestionBankItem
 from standalone.services.preview import PREVIEW_SESSION_KEY, PREVIEW_WAQ_MIN_SUBSTANTIVE_WORDS, serialize_preview_state
 from standalone.services.questions import generate_question_pair_for_block, question_quality_sort_key
 from standalone.services.validation_flow import (
@@ -105,29 +105,12 @@ def _preview_seen_question_ids(request, course: Course) -> set[int]:
     return _expand_seen_pair_ids(seen_ids)
 
 
-def _practice_validation_type_targets(course) -> dict[str, float]:
-    numeric_target = max(0.0, min(100.0, float(course.config.numeric_ratio_percent or 0)))
-    maq_target = max(0.0, min(100.0, float(course.config.maq_ratio_percent or 0)))
-    waq_target = max(0.0, min(100.0, float(course.config.waq_ratio_percent or 0)))
-    mcq_target = max(0.0, 100.0 - numeric_target - maq_target - waq_target)
-    total_target = mcq_target + numeric_target + maq_target + waq_target
-    if total_target <= 0:
-        return {
-            QuestionBankItem.QuestionType.MCQ: 100.0,
-            QuestionBankItem.QuestionType.NUM: 0.0,
-            QuestionBankItem.QuestionType.MAQ: 0.0,
-            QuestionBankItem.QuestionType.WAQ: 0.0,
-        }
-    return {
-        QuestionBankItem.QuestionType.MCQ: (mcq_target * 100.0 / total_target),
-        QuestionBankItem.QuestionType.NUM: (numeric_target * 100.0 / total_target),
-        QuestionBankItem.QuestionType.MAQ: (maq_target * 100.0 / total_target),
-        QuestionBankItem.QuestionType.WAQ: (waq_target * 100.0 / total_target),
-    }
+def _practice_validation_type_targets(block: CourseBlock) -> dict[str, float]:
+    return block.question_type_ratio_targets()
 
 
-def _practice_validation_type_preference(course, selected_type_counts: dict[str, int], selected_count: int, question_count: int) -> list[str]:
-    targets = _practice_validation_type_targets(course)
+def _practice_validation_type_preference(block: CourseBlock, selected_type_counts: dict[str, int], selected_count: int, question_count: int) -> list[str]:
+    targets = _practice_validation_type_targets(block)
     remaining_slots = max(1, question_count)
     candidates = []
     for question_type in (

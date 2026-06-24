@@ -1364,7 +1364,7 @@ def _numeric_question_payload(
             "This learning objective is not suitable for a locally evaluable numerical MCQ."
         )
     objective_text = objective_text or "this block"
-    teacher_guidance = build_generation_guidance_prompt(chunk.course, objective=objective)
+    teacher_guidance = build_generation_guidance_prompt(chunk.course, block=chunk.block, objective=objective)
     result = build_numeric_question_payload(
         chunk.text,
         objective_text,
@@ -1651,7 +1651,7 @@ def _openai_question_payload(
     objective_text = objective.text if objective else "this block"
     is_maq = question_type == QuestionBankItem.QuestionType.MAQ
     is_waq = question_type == QuestionBankItem.QuestionType.WAQ
-    teacher_guidance = build_generation_guidance_prompt(chunk.course, objective=objective)
+    teacher_guidance = build_generation_guidance_prompt(chunk.course, block=chunk.block, objective=objective)
     avoidance_prompt = ""
     if avoid_question_angles:
         avoidance_prompt = "\nAvoid repeating the wording, answer angle, or explanation focus of these recent questions:\n" + "\n".join(
@@ -1722,7 +1722,7 @@ def _openai_coding_question_payload(
     language_label = _coding_language_label(language)
     is_maq = question_type == QuestionBankItem.QuestionType.MAQ
     is_waq = question_type == QuestionBankItem.QuestionType.WAQ
-    teacher_guidance = build_generation_guidance_prompt(chunk.course, objective=objective)
+    teacher_guidance = build_generation_guidance_prompt(chunk.course, block=chunk.block, objective=objective)
     avoidance_prompt = ""
     if avoid_question_angles:
         avoidance_prompt = "\nAvoid repeating the wording, answer angle, or explanation focus of these recent questions:\n" + "\n".join(
@@ -2002,17 +2002,17 @@ def _recent_question_avoidance_notes(
     return notes
 
 
-def _preferred_generated_question_type(course: Course) -> str:
-    practice_questions = course.question_bank_items.filter(
+def _preferred_generated_question_type(block: CourseBlock) -> str:
+    practice_questions = block.question_bank_items.filter(
         bank_type=QuestionBankItem.BankType.PRACTICE,
         status=QuestionBankItem.Status.APPROVED,
     )
     practice_total = practice_questions.count()
     candidates = []
     for candidate_type, target_ratio in (
-        (QuestionBankItem.QuestionType.NUM, course.config.numeric_ratio_percent),
-        (QuestionBankItem.QuestionType.MAQ, course.config.maq_ratio_percent),
-        (QuestionBankItem.QuestionType.WAQ, course.config.waq_ratio_percent),
+        (QuestionBankItem.QuestionType.NUM, block.question_numeric_ratio_percent),
+        (QuestionBankItem.QuestionType.MAQ, block.question_maq_ratio_percent),
+        (QuestionBankItem.QuestionType.WAQ, block.question_waq_ratio_percent),
     ):
         if target_ratio <= 0:
             continue
@@ -2029,16 +2029,16 @@ def _preferred_generated_question_type(course: Course) -> str:
     return QuestionBankItem.QuestionType.MCQ
 
 
-def _preferred_standard_generated_question_type(course: Course) -> str:
-    practice_questions = course.question_bank_items.filter(
+def _preferred_standard_generated_question_type(block: CourseBlock) -> str:
+    practice_questions = block.question_bank_items.filter(
         bank_type=QuestionBankItem.BankType.PRACTICE,
         status=QuestionBankItem.Status.APPROVED,
     )
     practice_total = practice_questions.count()
     candidates = []
     for candidate_type, target_ratio in (
-        (QuestionBankItem.QuestionType.MAQ, course.config.maq_ratio_percent),
-        (QuestionBankItem.QuestionType.WAQ, course.config.waq_ratio_percent),
+        (QuestionBankItem.QuestionType.MAQ, block.question_maq_ratio_percent),
+        (QuestionBankItem.QuestionType.WAQ, block.question_waq_ratio_percent),
     ):
         if target_ratio <= 0:
             continue
@@ -2055,11 +2055,11 @@ def _preferred_standard_generated_question_type(course: Course) -> str:
     return QuestionBankItem.QuestionType.MCQ
 
 
-def _coding_question_generation_due(course: Course) -> bool:
-    target_ratio = getattr(course.config, "coding_question_ratio_percent", 0)
+def _coding_question_generation_due(block: CourseBlock) -> bool:
+    target_ratio = getattr(block, "question_coding_question_ratio_percent", 0)
     if target_ratio <= 0:
         return False
-    practice_questions = course.question_bank_items.filter(
+    practice_questions = block.question_bank_items.filter(
         bank_type=QuestionBankItem.BankType.PRACTICE,
         status=QuestionBankItem.Status.APPROVED,
     )
@@ -2256,7 +2256,7 @@ def _create_question_pair(
     normalized_payload = _normalize_generated_payload(
         payload,
         question_type,
-        course.config.distractor_count,
+        block.question_distractor_count,
         expected_coding_language=expected_coding_language,
     )
     objective_alignment_error = _objective_alignment_error(
@@ -2408,7 +2408,8 @@ def generate_question_pair_for_block(
             for chunk_id, signal in coding_signals.items()
             if signal.get("language") == preferred_coding_language
         }
-    coding_generation_due = _coding_question_generation_due(course) and bool(coding_signals)
+    distractor_count = block.question_distractor_count
+    coding_generation_due = _coding_question_generation_due(block) and bool(coding_signals)
     total_chunks_by_block: dict[int, int] = defaultdict(int)
     chunk_index_by_block: dict[int, int] = defaultdict(int)
     explicit_question_type = question_type if question_type in {
@@ -2417,13 +2418,13 @@ def generate_question_pair_for_block(
         QuestionBankItem.QuestionType.MAQ,
         QuestionBankItem.QuestionType.WAQ,
     } else None
-    question_type = explicit_question_type or _preferred_generated_question_type(course)
+    question_type = explicit_question_type or _preferred_generated_question_type(block)
     if (
         question_type == QuestionBankItem.QuestionType.NUM
         and explicit_question_type is None
         and not _block_has_suitable_numeric_path(block, candidate_chunks, objectives_by_block)
     ):
-        question_type = _preferred_standard_generated_question_type(course)
+        question_type = _preferred_standard_generated_question_type(block)
     last_generation_error = ""
     _trace_generation(
         "question_generation_requested",
@@ -2488,7 +2489,7 @@ def generate_question_pair_for_block(
                     block=block,
                     chunk=chunk,
                     objective=objective,
-                    distractor_count=course.config.distractor_count,
+                    distractor_count=distractor_count,
                     existing_hashes=existing_hashes,
                     avoid_question_angles=avoid_question_angles,
                 )
@@ -2502,7 +2503,7 @@ def generate_question_pair_for_block(
                 payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
                     chunk,
                     objective,
-                    course.config.distractor_count,
+                    distractor_count,
                     question_type,
                     coding_signal=coding_signal,
                     avoid_question_angles=avoid_question_angles,
@@ -2561,7 +2562,7 @@ def generate_question_pair_for_block(
                 block=block,
                 chunk=chunk,
                 objective=objective,
-                distractor_count=course.config.distractor_count,
+                distractor_count=distractor_count,
                 existing_hashes=existing_hashes,
                 avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
             )
@@ -2575,7 +2576,7 @@ def generate_question_pair_for_block(
             payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
                 chunk,
                 objective,
-                course.config.distractor_count,
+                distractor_count,
                 question_type,
                 coding_signal=coding_signal,
                 avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
@@ -2629,7 +2630,8 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
 
     for chunk in chunks:
         chunk_index_by_block[chunk.block_id] += 1
-        question_type = _preferred_generated_question_type(course)
+        distractor_count = chunk.block.question_distractor_count
+        question_type = _preferred_generated_question_type(chunk.block)
         objective = _select_objective_for_chunk(
             chunk,
             objectives_by_block.get(chunk.block_id, []),
@@ -2642,15 +2644,15 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
             and objective is not None
             and not supports_local_numeric_mcq(objective.text, chunk.text)
         ):
-            question_type = _preferred_standard_generated_question_type(course)
-        coding_signal = _coding_signal_for_chunk(chunk) if (_coding_question_generation_due(course) and question_type != QuestionBankItem.QuestionType.NUM) else {"language": "", "snippet": ""}
+            question_type = _preferred_standard_generated_question_type(chunk.block)
+        coding_signal = _coding_signal_for_chunk(chunk) if (_coding_question_generation_due(chunk.block) and question_type != QuestionBankItem.QuestionType.NUM) else {"language": "", "snippet": ""}
         preferred_coding_language = preferred_coding_language_for_block(chunk.block, [chunk], {chunk.pk: coding_signal} if coding_signal["language"] else {})
         if preferred_coding_language and coding_signal["language"] and coding_signal["language"] != preferred_coding_language:
             coding_signal = {"language": "", "snippet": ""}
         payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
             chunk,
             objective,
-            course.config.distractor_count,
+            distractor_count,
             question_type,
             coding_signal=(coding_signal if coding_signal["language"] and coding_signal["snippet"] else None),
         )
