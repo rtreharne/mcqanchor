@@ -107,6 +107,12 @@ class CourseConfig(TimeStampedModel):
     mastery_weight = models.PositiveSmallIntegerField(default=40, validators=[MinValueValidator(0), MaxValueValidator(100)])
     coverage_weight = models.PositiveSmallIntegerField(default=30, validators=[MinValueValidator(0), MaxValueValidator(100)])
     engagement_weight = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
+    allow_pre_engagement = models.BooleanField(default=False)
+    engagement_half_life_days = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1), MaxValueValidator(3650)],
+    )
     target_weight = models.PositiveSmallIntegerField(default=10, validators=[MinValueValidator(0), MaxValueValidator(100)])
     distractor_count = models.PositiveSmallIntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(5)])
     numeric_ratio_percent = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])

@@ -1850,8 +1850,11 @@ def _parse_question_payload(raw_output: str) -> dict:
 def _released_objectives_by_block(course: Course, today=None) -> dict[int, list[LearningObjective]]:
     today = today or timezone.localdate()
     objectives_by_block: dict[int, list[LearningObjective]] = defaultdict(list)
+    objective_queryset = LearningObjective.objects.filter(course=course)
+    if not bool(getattr(course.config, "allow_pre_engagement", False)):
+        objective_queryset = objective_queryset.filter(block__available_from__lte=today)
 
-    for objective in LearningObjective.objects.filter(course=course, block__available_from__lte=today).select_related("block").order_by("block__order", "position", "pk"):
+    for objective in objective_queryset.select_related("block").order_by("block__order", "position", "pk"):
         objectives_by_block[objective.block_id].append(objective)
 
     return objectives_by_block
@@ -1859,10 +1862,11 @@ def _released_objectives_by_block(course: Course, today=None) -> dict[int, list[
 
 def _ordered_released_chunks(course: Course, today=None):
     today = today or timezone.localdate()
+    chunk_queryset = ContentChunk.objects.filter(course=course, asset__include_in_generation=True)
+    if not bool(getattr(course.config, "allow_pre_engagement", False)):
+        chunk_queryset = chunk_queryset.filter(block__available_from__lte=today)
     return list(
-        ContentChunk.objects.filter(course=course, asset__include_in_generation=True, block__available_from__lte=today)
-        .select_related("block", "asset")
-        .order_by("block__order", "asset__created_at", "ordinal", "pk")
+        chunk_queryset.select_related("block", "asset").order_by("block__order", "asset__created_at", "ordinal", "pk")
     )
 
 

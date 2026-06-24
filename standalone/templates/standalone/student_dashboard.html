@@ -10,7 +10,7 @@
         <div class="metrics">
           <div><span>Mastery</span><strong>{{ enrollment.mastery_score }}%</strong><em>{{ enrollment.mastery_delta|floatformat:2 }}</em></div>
           <div><span>Coverage</span><strong>{{ enrollment.coverage_score }}%</strong><em>{{ enrollment.coverage_delta|floatformat:2 }}</em></div>
-          <div><span>Engagement</span><strong>{{ enrollment.engagement_score }}%</strong><em>{{ enrollment.engagement_delta|floatformat:2 }}</em></div>
+          <div{% if not enrollment.course.config.engagement_half_life_days %} class="is-fixed-engagement"{% endif %}><span>Engagement</span><strong>{{ enrollment.engagement_score }}%</strong><em>{{ enrollment.engagement_delta|floatformat:2 }}</em></div>
           <div><span>Target</span><strong>{{ enrollment.target_score }}%</strong><em>{{ enrollment.target_delta|floatformat:2 }}</em></div>
         </div>
         <div class="action-row">

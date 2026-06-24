@@ -37,7 +37,7 @@
             <span class="practice-average-metric practice-average-metric--overall"><span>Overall practice</span><strong>{{ course.practice_overall_average|floatformat:1 }}%</strong></span>
             <span class="practice-average-metric"><span>Mastery</span><strong>{{ course.practice_mastery_average|floatformat:1 }}%</strong></span>
             <span class="practice-average-metric"><span>Coverage</span><strong>{{ course.practice_coverage_average|floatformat:1 }}%</strong></span>
-            <span class="practice-average-metric"><span>Engagement</span><strong>{{ course.practice_engagement_average|floatformat:1 }}%</strong></span>
+            <span class="practice-average-metric{% if not course.config.engagement_half_life_days %} is-fixed-engagement{% endif %}"><span>Engagement</span><strong>{{ course.practice_engagement_average|floatformat:1 }}%</strong></span>
             <span class="practice-average-metric"><span>Target</span><strong>{{ course.practice_target_average|floatformat:1 }}%</strong></span>
           </div>
         </div>
@@ -221,6 +221,18 @@
               <label class="course-setting-label" for="{{ course_config_form.engagement_weight.id_for_label }}">{{ course_config_form.engagement_weight.label }}</label>
               {{ course_config_form.engagement_weight }}
               <p class="course-setting-help">{{ course_config_form.engagement_weight.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.allow_pre_engagement.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'allow_pre_engagement' %}">
+              <label class="course-setting-label" for="{{ course_config_form.allow_pre_engagement.id_for_label }}">{{ course_config_form.allow_pre_engagement.label }}</label>
+              {{ course_config_form.allow_pre_engagement }}
+              <p class="course-setting-help">{{ course_config_form.allow_pre_engagement.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.engagement_half_life_days.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'engagement_half_life_days' %}">
+              <label class="course-setting-label" for="{{ course_config_form.engagement_half_life_days.id_for_label }}">{{ course_config_form.engagement_half_life_days.label }}</label>
+              {{ course_config_form.engagement_half_life_days }}
+              <p class="course-setting-help">{{ course_config_form.engagement_half_life_days.help_text }}</p>
               <p class="course-setting-status" data-course-config-status hidden></p>
             </div>
             <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.target_weight.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'target_weight' %}">

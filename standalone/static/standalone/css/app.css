@@ -835,6 +835,12 @@ button.button[disabled] {
   color: #0d8a64;
 }
 
+.metrics > .is-fixed-engagement span,
+.metrics > .is-fixed-engagement strong,
+.metrics > .is-fixed-engagement em {
+  color: rgba(23, 48, 82, 0.62);
+}
+
 .simple-list {
   margin: 0;
   padding-left: 1.2rem;
@@ -1778,6 +1784,11 @@ button.button[disabled] {
   background: linear-gradient(135deg, rgba(233, 251, 246, 0.96), rgba(234, 244, 255, 0.96));
 }
 
+.practice-average-metric.is-fixed-engagement {
+  background: rgba(243, 246, 250, 0.96);
+  border-color: rgba(23, 48, 82, 0.08);
+}
+
 .practice-average-metric span {
   display: block;
   color: var(--muted);
@@ -1792,6 +1803,11 @@ button.button[disabled] {
   color: var(--ink);
   font-size: 1rem;
   line-height: 1.1;
+}
+
+.practice-average-metric.is-fixed-engagement span,
+.practice-average-metric.is-fixed-engagement strong {
+  color: rgba(23, 48, 82, 0.62);
 }
 
 .course-card-link {

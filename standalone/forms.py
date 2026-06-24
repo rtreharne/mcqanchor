@@ -268,6 +268,17 @@ class CourseConfigForm(forms.ModelForm):
         self.fields["engagement_weight"].help_text = (
             "Weighting of on-time practice activity within overall practice scoring."
         )
+        self.fields["allow_pre_engagement"].label = "Allow pre-engagement before release"
+        self.fields["allow_pre_engagement"].help_text = (
+            "If enabled, students can practise unreleased blocks early. "
+            "Any answers submitted before the block release date receive full engagement credit."
+        )
+        self.fields["engagement_half_life_days"].label = "Engagement half-life (days)"
+        self.fields["engagement_half_life_days"].help_text = (
+            "Optional. Engagement decays exponentially from each block release date. "
+            "After one half-life, an answered question counts for 50%; after two, 25%. "
+            "Leave blank to keep engagement fixed at 100%."
+        )
         self.fields["target_weight"].help_text = "Weighting of progress toward the block question target."
         self.fields["revalidation_attempts"].help_text = "Number of additional validation attempts permitted after the first."
         self.fields["show_validation_feedback_immediately"].label = "Release validation feedback immediately"

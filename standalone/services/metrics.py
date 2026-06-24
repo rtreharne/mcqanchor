@@ -1,10 +1,9 @@
 from decimal import Decimal
-from datetime import timedelta
 
 from django.utils import timezone
 
 from standalone.models import Enrollment, PracticeAttempt, PracticeAttemptQuestion
-from standalone.services.preview import PREVIEW_ENGAGEMENT_WINDOW_DAYS
+from standalone.services.preview import _engagement_metrics_from_answer_dates
 
 
 def _decimal_percent(value: float) -> Decimal:
@@ -21,7 +20,20 @@ def refresh_enrollment_metrics(enrollment: Enrollment) -> None:
     }
     course = enrollment.course
     blocks = list(course.blocks.prefetch_related("learning_objectives").order_by("order", "created_at"))
-    metric_blocks = [block for block in blocks if block.available_from <= today] or blocks
+    allow_pre_engagement = bool(getattr(course.config, "allow_pre_engagement", False))
+    metric_blocks = [
+        block
+        for block in blocks
+        if block.available_from <= today
+        or (
+            allow_pre_engagement
+            and PracticeAttemptQuestion.objects.filter(
+                attempt__enrollment=enrollment,
+                attempt__attempt_type=PracticeAttempt.AttemptType.PRACTICE,
+                question__block=block,
+            ).exists()
+        )
+    ] or blocks
 
     if not metric_blocks:
         mastery = coverage = engagement = target = Decimal("0.00")
@@ -40,18 +52,18 @@ def refresh_enrollment_metrics(enrollment: Enrollment) -> None:
                 is_correct=True,
                 question__learning_objective__isnull=False,
             ).values("question__learning_objective_id").distinct().count()
-            engagement_deadline = block.available_from + timedelta(days=PREVIEW_ENGAGEMENT_WINDOW_DAYS)
-            on_time_count = sum(
-                1
-                for answer in answers
-                if block.available_from <= answer.created_at.date() <= engagement_deadline
-            )
             target_question_count = max(1, block.preview_target_question_count)
+            engagement_metrics = _engagement_metrics_from_answer_dates(
+                course,
+                block,
+                [answer.created_at.date() for answer in answers],
+                target_question_count=target_question_count,
+            )
             block_scores.append(
                 {
                     "mastery": correct_count * 100 / completed_count if completed_count else 0.0,
                     "coverage": covered_objectives * 100 / total_objectives if total_objectives else 0.0,
-                    "engagement": min(100, on_time_count * 100 / target_question_count) if today >= block.available_from else 0.0,
+                    "engagement": float(engagement_metrics["engagement"]),
                     "target": min(100, completed_count * 100 / target_question_count),
                 }
             )

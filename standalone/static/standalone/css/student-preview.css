@@ -820,6 +820,16 @@ body {
   border-color: rgba(46, 190, 169, 0.24);
 }
 
+.preview-block-metric.is-fixed-engagement {
+  background: rgba(243, 246, 250, 0.96);
+  border-color: rgba(23, 48, 82, 0.08);
+}
+
+.preview-block-metric.is-fixed-engagement span,
+.preview-block-metric.is-fixed-engagement strong {
+  color: rgba(23, 48, 82, 0.62);
+}
+
 .preview-block-metric span {
   display: block;
   color: var(--muted);

@@ -1044,15 +1044,12 @@ if (previewRoot && previewDataNode) {
     return `${count} ${count === 1 ? singular : plural}`;
   }
 
-  function formatEngagementWindow(days) {
-    const weeks = Number(days || 0) / 7;
-    if (!weeks) {
-      return "0 weeks";
+  function formatHalfLifeDays(days) {
+    const count = Number(days || 0);
+    if (!count) {
+      return "";
     }
-    if (Number.isInteger(weeks)) {
-      return `${weeks} week${weeks === 1 ? "" : "s"}`;
-    }
-    return `${weeks.toFixed(1)} weeks`;
+    return `${count} day${count === 1 ? "" : "s"}`;
   }
 
   function formatPreviewDate(isoDate) {
@@ -1064,18 +1061,6 @@ if (previewRoot && previewDataNode) {
       return isoDate;
     }
     return previewDateFormatter.format(parsed);
-  }
-
-  function addDaysToIsoDate(isoDate, days) {
-    if (!isoDate) {
-      return "";
-    }
-    const parsed = new Date(`${isoDate}T00:00:00`);
-    if (Number.isNaN(parsed.getTime())) {
-      return "";
-    }
-    parsed.setDate(parsed.getDate() + Number(days || 0));
-    return parsed.toISOString().slice(0, 10);
   }
 
   function metricLabel(metricKey) {
@@ -1225,12 +1210,13 @@ if (previewRoot && previewDataNode) {
     }
   }
 
-  function metricButtonMarkup(metricKey, value, { scope = "block", blockId = "" } = {}) {
+  function metricButtonMarkup(metricKey, value, { scope = "block", blockId = "", metrics = null } = {}) {
     const blockAttribute = blockId ? ` data-block-id="${blockId}"` : "";
+    const isFixedEngagement = metricKey === "engagement" && !!metrics?.engagement_is_fixed;
     return `
       <button
         type="button"
-        class="preview-block-metric${metricKey === "overall" ? " preview-block-metric--overall" : ""}"
+        class="preview-block-metric${metricKey === "overall" ? " preview-block-metric--overall" : ""}${isFixedEngagement ? " is-fixed-engagement" : ""}"
         data-preview-metric-button="true"
         data-metric-key="${metricKey}"
         data-metric-scope="${scope}"${blockAttribute}
@@ -1244,12 +1230,12 @@ if (previewRoot && previewDataNode) {
   function metricMarkup(metrics, { scope = "block", blockId = "" } = {}) {
     return `
       ${scope === "course" && typeof metrics.overall === "number"
-        ? metricButtonMarkup("overall", metrics.overall, { scope, blockId })
+        ? metricButtonMarkup("overall", metrics.overall, { scope, blockId, metrics })
         : ""}
-      ${metricButtonMarkup("mastery", metrics.mastery, { scope, blockId })}
-      ${metricButtonMarkup("coverage", metrics.coverage, { scope, blockId })}
-      ${metricButtonMarkup("engagement", metrics.engagement, { scope, blockId })}
-      ${metricButtonMarkup("target", metrics.target, { scope, blockId })}
+      ${metricButtonMarkup("mastery", metrics.mastery, { scope, blockId, metrics })}
+      ${metricButtonMarkup("coverage", metrics.coverage, { scope, blockId, metrics })}
+      ${metricButtonMarkup("engagement", metrics.engagement, { scope, blockId, metrics })}
+      ${metricButtonMarkup("target", metrics.target, { scope, blockId, metrics })}
     `;
   }
 
@@ -2046,25 +2032,43 @@ if (previewRoot && previewDataNode) {
     }
 
     if (metricKey === "engagement") {
-      const windowLabel = formatEngagementWindow(metrics.engagement_window_days || 0);
+      const halfLifeLabel = formatHalfLifeDays(metrics.engagement_half_life_days || 0);
+      if (metrics.engagement_is_fixed) {
+        payload.text = scope === "course"
+          ? `Average engagement is currently fixed at 100% across ${liveBlockLabel} because no engagement half-life is configured for this course. Engagement decay will start only after a half-life is set.`
+          : "Engagement is currently fixed at 100% for this block because no engagement half-life is configured for this course. Once a half-life is set, engagement will decay exponentially from the block release date.";
+        payload.metric_rows = scope === "course"
+          ? [
+            `Displayed score: ${formatPercentage(metrics.engagement)}`,
+            "Half-life: not set",
+            "Decay status: inactive",
+          ]
+          : [
+            `Displayed score: ${formatPercentage(metrics.engagement)}`,
+            `Release date: ${block?.available_from_label || formatPreviewDate(block?.available_from || "") || "Not set"}`,
+            "Half-life: not set",
+            "Decay status: inactive",
+          ];
+        return payload;
+      }
       if (scope === "course") {
-        payload.text = `Average engagement is the mean engagement score across ${liveBlockLabel}. Each block asks what percentage of its target questions were completed within ${windowLabel} of release.`;
+        payload.text = `Average engagement is the mean engagement score across ${liveBlockLabel}. Each answered question contributes a decayed weight from its block release date using an exponential half-life of ${halfLifeLabel}. A question counts as 100% on release day, 50% after one half-life, 25% after two, and so on.`;
         payload.metric_rows = [
           `Displayed score: ${formatPercentage(metrics.engagement)}`,
-          `On-time questions: ${metrics.on_time_count || 0}`,
+          `Half-life: ${halfLifeLabel}`,
+          `Weighted activity: ${formatMetricNumber(metrics.engagement_weighted_count || 0)}`,
           `Combined live-block target: ${metrics.combined_target_question_count || 0}`,
-          `Time window: within ${windowLabel} of each block becoming available`,
         ];
         return payload;
       }
 
       const availableFromLabel = block?.available_from_label || formatPreviewDate(block?.available_from || "");
-      const deadlineLabel = formatPreviewDate(addDaysToIsoDate(block?.available_from || "", metrics.engagement_window_days || 0));
-      payload.text = `Engagement for this block is the percentage of target questions completed within ${windowLabel} of release.`;
+      payload.text = `Engagement for this block decays exponentially from its release date using a half-life of ${halfLifeLabel}. Each answered question contributes a weight of 0.5^(days since release / half-life). The displayed score is weighted activity divided by the block target, capped at 100%.`;
       payload.metric_rows = [
         `Displayed score: ${formatPercentage(metrics.engagement)}`,
-        `On-time questions: ${metrics.on_time_count || 0} of ${metrics.target_question_count || 0}`,
-        `On-time window: ${availableFromLabel}${deadlineLabel ? ` to ${deadlineLabel}` : ""}`,
+        `Release date: ${availableFromLabel || "Not set"}`,
+        `Half-life: ${halfLifeLabel}`,
+        `Weighted activity: ${formatMetricNumber(metrics.engagement_weighted_count || 0)} of ${metrics.target_question_count || 0}`,
       ];
       return payload;
     }

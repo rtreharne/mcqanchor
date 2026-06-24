@@ -4324,7 +4324,7 @@ print(result)""",
         enrollment.refresh_from_db()
         self.assertEqual(float(enrollment.mastery_score), 100.0)
         self.assertEqual(float(enrollment.coverage_score), 100.0)
-        self.assertEqual(float(enrollment.engagement_score), 5.0)
+        self.assertEqual(float(enrollment.engagement_score), 100.0)
         self.assertEqual(float(enrollment.target_score), 5.0)
 
         reload_response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
@@ -4372,6 +4372,70 @@ print(result)""",
         future_block_payload = next(item for item in future_response.json()["preview"]["blocks"] if item["id"] == future_block.pk)
         self.assertTrue(any("becomes available" in message["text"] for message in future_block_payload["transcript"] if message["kind"] == "text"))
         self.assertFalse(any(message.get("text") == "Future question?" for message in future_block_payload["transcript"]))
+
+    def test_student_practice_allows_future_block_questions_when_pre_engagement_enabled(self):
+        course = self.create_course()
+        course.config.allow_pre_engagement = True
+        course.config.save(update_fields=["allow_pre_engagement", "updated_at"])
+        Enrollment.objects.create(course=course, student=self.student)
+        future_block = CourseBlock.objects.create(
+            course=course,
+            title="Week 2",
+            order=1,
+            available_from=timezone.localdate() + timedelta(days=5),
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=future_block,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Future question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="future-pre-engagement-hash",
+        )
+
+        self.client.force_login(self.student)
+        future_response = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, future_block.pk, "quiz"]))
+
+        self.assertEqual(future_response.status_code, 200)
+        future_block_payload = next(item for item in future_response.json()["preview"]["blocks"] if item["id"] == future_block.pk)
+        future_questions = [message for message in future_block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(future_questions[-1]["text"], "Future question?")
+
+    def test_student_practice_engagement_uses_half_life_decay(self):
+        course = self.create_course()
+        course.config.engagement_half_life_days = 7
+        course.config.save(update_fields=["engagement_half_life_days", "updated_at"])
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        block.available_from = timezone.localdate() - timedelta(days=7)
+        block.save(update_fields=["available_from", "updated_at"])
+        block.config.target_question_count = 1
+        block.config.save(update_fields=["target_question_count", "updated_at"])
+        q1 = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Half-life question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="half-life-hash",
+        )
+
+        self.client.force_login(self.student)
+        self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+        self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": q1.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        enrollment.refresh_from_db()
+        self.assertEqual(float(enrollment.engagement_score), 50.0)
 
     def test_student_practice_flag_persists_and_skips_question(self):
         course = self.create_course()
@@ -4678,17 +4742,18 @@ print(result)""",
         course_metrics = preview["course"]["metrics"]
         self.assertEqual(course_metrics["mastery"], 50.0)
         self.assertEqual(course_metrics["coverage"], 50.0)
-        self.assertEqual(course_metrics["engagement"], 5.0)
+        self.assertEqual(course_metrics["engagement"], 100.0)
         self.assertEqual(course_metrics["target"], 5.0)
-        self.assertEqual(course_metrics["overall"], 36.5)
+        self.assertEqual(course_metrics["overall"], 55.5)
         self.assertEqual(course_metrics["correct_count"], 1)
         self.assertEqual(course_metrics["incorrect_count"], 1)
         self.assertEqual(course_metrics["completed_count"], 2)
         self.assertEqual(course_metrics["covered_objective_count"], 1)
         self.assertEqual(course_metrics["total_objective_count"], 3)
-        self.assertEqual(course_metrics["on_time_count"], 2)
+        self.assertEqual(course_metrics["engagement_weighted_count"], 40.0)
         self.assertEqual(course_metrics["combined_target_question_count"], 40)
-        self.assertEqual(course_metrics["engagement_window_days"], 7)
+        self.assertTrue(course_metrics["engagement_is_fixed"])
+        self.assertIsNone(course_metrics["engagement_half_life_days"])
         self.assertEqual(
             course_metrics["weights"],
             {
@@ -4701,17 +4766,18 @@ print(result)""",
         )
 
         first_block_metrics = next(block["metrics"] for block in preview["blocks"] if block["id"] == first_block.pk)
-        self.assertEqual(first_block_metrics["overall"], 71.5)
+        self.assertEqual(first_block_metrics["overall"], 90.5)
         self.assertEqual(first_block_metrics["correct_count"], 1)
         self.assertEqual(first_block_metrics["incorrect_count"], 0)
         self.assertEqual(first_block_metrics["completed_count"], 1)
         self.assertEqual(first_block_metrics["covered_objective_count"], 1)
         self.assertEqual(first_block_metrics["total_objective_count"], 1)
-        self.assertEqual(first_block_metrics["on_time_count"], 1)
-        self.assertEqual(first_block_metrics["engagement_window_days"], 7)
+        self.assertEqual(first_block_metrics["engagement_weighted_count"], 20.0)
+        self.assertTrue(first_block_metrics["engagement_is_fixed"])
+        self.assertIsNone(first_block_metrics["engagement_half_life_days"])
 
         second_block_metrics = next(block["metrics"] for block in preview["blocks"] if block["id"] == second_block.pk)
-        self.assertEqual(second_block_metrics["overall"], 1.5)
+        self.assertEqual(second_block_metrics["overall"], 20.5)
 
     def test_student_preview_quiz_uses_existing_bank_before_generating_new_pair(self):
         course = self.create_course()
@@ -5770,6 +5836,86 @@ print(result)""",
         self.assertEqual(PracticeAttempt.objects.count(), 0)
         self.assertEqual(EnrollmentQuestionState.objects.count(), 0)
         self.assertEqual(PracticeMessage.objects.count(), 0)
+
+    def test_student_preview_answer_adds_progress_message_when_coverage_and_target_complete(self):
+        course = self.create_course()
+        block, _, objective, _ = self.create_preview_content_block(course)
+        block.config.target_question_count = 1
+        block.config.save(update_fields=["target_question_count", "updated_at"])
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows from the approved notes.",
+            question_hash="preview-progress-complete",
+        )
+        self.client.force_login(self.teacher)
+
+        quiz_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        question_id = [message for message in quiz_response.json()["preview"]["blocks"][0]["transcript"] if message["kind"] == "question"][-1]["question_id"]
+        answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        block_payload = next(item for item in answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        progress_messages = [message for message in block_payload["transcript"] if message["kind"] == "progress_coach"]
+
+        self.assertEqual(len(progress_messages), 1)
+        self.assertIn("Coverage is complete for this block", progress_messages[-1]["text"])
+        self.assertIn("You've reached this block's practice target: 1 of 1 questions answered.", progress_messages[-1]["text"])
+        self.assertIn("Mastery is 100%.", progress_messages[-1]["text"])
+
+    def test_student_preview_answer_adds_progress_message_when_coverage_and_target_incomplete(self):
+        course = self.create_course()
+        block, _, objective, _ = self.create_preview_content_block(course)
+        block.config.target_question_count = 4
+        block.config.save(update_fields=["target_question_count", "updated_at"])
+        LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=objective.source_asset,
+            position=2,
+            code="LO2",
+            text="Explain a second idea in this block.",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows from the approved notes.",
+            question_hash="preview-progress-incomplete",
+        )
+        self.client.force_login(self.teacher)
+
+        quiz_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        question_id = [message for message in quiz_response.json()["preview"]["blocks"][0]["transcript"] if message["kind"] == "question"][-1]["question_id"]
+        answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        block_payload = next(item for item in answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        progress_messages = [message for message in block_payload["transcript"] if message["kind"] == "progress_coach"]
+
+        self.assertEqual(len(progress_messages), 1)
+        self.assertIn("Coverage is 50% (1 of 2 objectives). Keep going until you reach 100% coverage.", progress_messages[-1]["text"])
+        self.assertIn("Target progress is 25% (1 of 4 questions). Keep going until you reach 100%.", progress_messages[-1]["text"])
+        self.assertIn("Mastery is 100%.", progress_messages[-1]["text"])
 
     def test_student_preview_feedback_includes_varying_keep_going_note(self):
         course = self.create_course()

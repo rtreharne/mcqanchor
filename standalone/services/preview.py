@@ -1,8 +1,9 @@
 import json
+import math
 import random
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from django.conf import settings
 from django.db.models import Count, Q
@@ -30,7 +31,6 @@ from standalone.services.questions import (
 PREVIEW_SESSION_KEY = "standalone_student_preview"
 PREVIEW_ENROLLMENT_KEY = "preview"
 PREVIEW_RETRY_COMPLETION_GAP = 3
-PREVIEW_ENGAGEMENT_WINDOW_DAYS = 7
 PREVIEW_CHAT_RETRIEVAL_LIMIT = 6
 PREVIEW_CHAT_HISTORY_LIMIT = 6
 PREVIEW_INAPPROPRIATE_MESSAGE_WARNING = "Please keep messages respectful and appropriate. All conversations are logged and auditable by teachers."
@@ -129,7 +129,7 @@ def _first_active_block(course: Course):
     if not blocks:
         return None
     for block in blocks:
-        if block.is_available():
+        if _block_is_accessible(course, block):
             return block
     return blocks[0]
 
@@ -228,6 +228,55 @@ def _block_completed_count(course_state: dict, block: CourseBlock) -> int:
     return len([event for event in course_state.get("completed_events", []) if int(event["block_id"]) == block.pk])
 
 
+def _engagement_half_life_days(course: Course) -> int | None:
+    value = getattr(course.config, "engagement_half_life_days", None)
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _engagement_release_date(block: CourseBlock) -> date | None:
+    return getattr(block, "available_from", None)
+
+
+def _engagement_decay_weight(days_since_release: int, half_life_days: int) -> float:
+    return math.pow(0.5, max(0, days_since_release) / max(1, half_life_days))
+
+
+def _engagement_metrics_from_answer_dates(course: Course, block: CourseBlock, answer_dates: list[date], *, target_question_count: int) -> dict:
+    half_life_days = _engagement_half_life_days(course)
+    release_date = _engagement_release_date(block)
+    fixed = half_life_days is None or release_date is None
+    if fixed:
+        return {
+            "engagement": 100.0,
+            "engagement_weighted_count": float(target_question_count),
+            "engagement_half_life_days": half_life_days,
+            "engagement_release_date": release_date.isoformat() if release_date else "",
+            "engagement_is_fixed": True,
+        }
+
+    weighted_count = sum(
+        _engagement_decay_weight((answered_on - release_date).days, half_life_days)
+        for answered_on in answer_dates
+    )
+    return {
+        "engagement": round(min(100.0, weighted_count * 100.0 / max(1, target_question_count)), 2),
+        "engagement_weighted_count": round(weighted_count, 4),
+        "engagement_half_life_days": half_life_days,
+        "engagement_release_date": release_date.isoformat(),
+        "engagement_is_fixed": False,
+    }
+
+
+def _block_is_accessible(course: Course, block: CourseBlock) -> bool:
+    return block.is_available() or bool(getattr(course.config, "allow_pre_engagement", False))
+
+
 def _advanced_question_start_percent(block: CourseBlock) -> int:
     return max(0, min(100, int(block.question_advanced_question_start_percent or 0)))
 
@@ -264,8 +313,9 @@ def _course_question_queryset(course: Course, block: CourseBlock, course_state: 
         bank_type=QuestionBankItem.BankType.PRACTICE,
         status=QuestionBankItem.Status.APPROVED,
         block=block,
-        block__available_from__lte=timezone.localdate(),
     ).exclude(pk__in=_flagged_question_ids(course_state))
+    if not bool(getattr(course.config, "allow_pre_engagement", False)):
+        queryset = queryset.filter(block__available_from__lte=timezone.localdate())
     preferred_coding_language = preferred_coding_language_for_block(block)
     if preferred_coding_language:
         queryset = queryset.filter(Q(is_coding_question=False) | Q(coding_language=preferred_coding_language))
@@ -514,7 +564,7 @@ def request_preview_quiz(
 ) -> dict:
     course_state = _course_state(request, course)
     _ensure_block_transcript(course_state, block)
-    if not block.is_available():
+    if not _block_is_accessible(course, block):
         _append_message(
             course_state,
             block,
@@ -944,6 +994,63 @@ def _should_add_keep_going_line(transcript: list[dict]) -> bool:
     return False
 
 
+def _format_progress_percent(value: float) -> str:
+    rounded = round(float(value or 0.0), 2)
+    if rounded.is_integer():
+        return f"{int(rounded)}%"
+    return f"{rounded:.2f}".rstrip("0").rstrip(".") + "%"
+
+
+def _refresh_block_progress_message(course_state: dict, block: CourseBlock) -> None:
+    transcript = _ensure_block_transcript(course_state, block)
+    transcript[:] = [message for message in transcript if message.get("kind") != "progress_coach"]
+
+    metrics = _block_metrics(course_state, block)
+    covered_objective_count = int(metrics.get("covered_objective_count") or 0)
+    total_objective_count = int(metrics.get("total_objective_count") or 0)
+    completed_count = int(metrics.get("completed_count") or 0)
+    target_question_count = int(metrics.get("target_question_count") or 0)
+
+    lines: list[str] = []
+    if total_objective_count > 0:
+        if float(metrics.get("coverage") or 0.0) >= 100.0:
+            lines.append(
+                f"Coverage is complete for this block: you've covered all {covered_objective_count} learning objectives."
+            )
+        else:
+            lines.append(
+                f"Coverage is {_format_progress_percent(metrics.get('coverage') or 0.0)} "
+                f"({covered_objective_count} of {total_objective_count} objectives). "
+                "Keep going until you reach 100% coverage."
+            )
+
+    if target_question_count > 0:
+        if float(metrics.get("target") or 0.0) >= 100.0:
+            lines.append(
+                f"You've reached this block's practice target: {completed_count} of {target_question_count} questions answered."
+            )
+        else:
+            lines.append(
+                f"Target progress is {_format_progress_percent(metrics.get('target') or 0.0)} "
+                f"({completed_count} of {target_question_count} questions). "
+                "Keep going until you reach 100%."
+            )
+
+    lines.append(
+        f"Mastery is {_format_progress_percent(metrics.get('mastery') or 0.0)}. "
+        "You can keep increasing it at any time by completing more questions accurately."
+    )
+
+    _append_message(
+        course_state,
+        block,
+        "assistant",
+        "progress_coach",
+        text=" ".join(lines),
+        source_blocks=[block.title],
+    )
+
+
 def submit_preview_answer(request, course: Course, block: CourseBlock, question_id: int, selected_answers=None, *, answer_text: str = "") -> dict:
     course_state = _course_state(request, course)
     pending_question_id = course_state.setdefault("pending_questions", {}).get(str(block.pk))
@@ -1020,6 +1127,7 @@ def submit_preview_answer(request, course: Course, block: CourseBlock, question_
     )
     course_state.setdefault("pending_questions", {})[str(block.pk)] = None
     _clear_written_answer_draft(course_state, question_id)
+    _refresh_block_progress_message(course_state, block)
 
     request.session.modified = True
     return serialize_preview_state(request, course, active_block_id=block.pk)
@@ -1385,18 +1493,18 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
     }
     total_objectives = block.learning_objectives.count()
     covered_objective_count = len(objective_ids)
-    today = timezone.localdate()
-    engagement_deadline = block.available_from + timedelta(days=PREVIEW_ENGAGEMENT_WINDOW_DAYS)
-    on_time_count = sum(
-        1
-        for event in completed_events
-        if block.available_from <= datetime.fromisoformat(event["answered_at"]).date() <= engagement_deadline
-    )
     target_question_count = max(1, block.preview_target_question_count)
+    answer_dates = [datetime.fromisoformat(event["answered_at"]).date() for event in completed_events]
+    engagement_metrics = _engagement_metrics_from_answer_dates(
+        block.course,
+        block,
+        answer_dates,
+        target_question_count=target_question_count,
+    )
 
     mastery = round((correct_count * 100 / completed_count), 2) if completed_count else 0.0
     coverage = round((covered_objective_count * 100 / total_objectives), 2) if total_objectives else 0.0
-    engagement = round(min(100, on_time_count * 100 / target_question_count), 2) if today >= block.available_from else 0.0
+    engagement = float(engagement_metrics["engagement"])
     target = round(min(100, completed_count * 100 / target_question_count), 2)
     overall = _weighted_practice_score(
         block.course,
@@ -1420,8 +1528,10 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
         "incorrect_count": incorrect_count,
         "covered_objective_count": covered_objective_count,
         "total_objective_count": total_objectives,
-        "on_time_count": on_time_count,
-        "engagement_window_days": PREVIEW_ENGAGEMENT_WINDOW_DAYS,
+        "engagement_weighted_count": engagement_metrics["engagement_weighted_count"],
+        "engagement_half_life_days": engagement_metrics["engagement_half_life_days"],
+        "engagement_release_date": engagement_metrics["engagement_release_date"],
+        "engagement_is_fixed": engagement_metrics["engagement_is_fixed"],
         "target_question_count": target_question_count,
         "advanced_question_start_percent": advanced_question_start_percent,
         "advanced_question_types_unlocked": advanced_question_types_unlocked,
@@ -1458,13 +1568,13 @@ def _weighted_practice_score(course: Course, metrics: dict) -> float:
 
 
 def _course_metrics(course: Course, serialized_blocks: list[dict]) -> dict:
-    metric_blocks = [block for block in serialized_blocks if block.get("is_available")] or serialized_blocks
+    metric_blocks = [block for block in serialized_blocks if block.get("counts_in_metrics")] or serialized_blocks
     weights = _practice_score_weights(course)
     if not metric_blocks:
         return {
             "mastery": 0.0,
             "coverage": 0.0,
-            "engagement": 0.0,
+            "engagement": 100.0 if _engagement_half_life_days(course) is None else 0.0,
             "target": 0.0,
             "overall": 0.0,
             "block_count": 0,
@@ -1473,9 +1583,10 @@ def _course_metrics(course: Course, serialized_blocks: list[dict]) -> dict:
             "incorrect_count": 0,
             "covered_objective_count": 0,
             "total_objective_count": sum(block.get("learning_objective_count", 0) for block in serialized_blocks),
-            "on_time_count": 0,
+            "engagement_weighted_count": 0.0,
             "combined_target_question_count": 0,
-            "engagement_window_days": PREVIEW_ENGAGEMENT_WINDOW_DAYS,
+            "engagement_half_life_days": _engagement_half_life_days(course),
+            "engagement_is_fixed": _engagement_half_life_days(course) is None,
             "weights": weights,
         }
 
@@ -1495,9 +1606,10 @@ def _course_metrics(course: Course, serialized_blocks: list[dict]) -> dict:
         "incorrect_count": sum(block["metrics"]["incorrect_count"] for block in metric_blocks),
         "covered_objective_count": sum(block["metrics"]["covered_objective_count"] for block in serialized_blocks),
         "total_objective_count": sum(block.get("learning_objective_count", 0) for block in serialized_blocks),
-        "on_time_count": sum(block["metrics"]["on_time_count"] for block in metric_blocks),
+        "engagement_weighted_count": round(sum(block["metrics"]["engagement_weighted_count"] for block in metric_blocks), 4),
         "combined_target_question_count": sum(block["metrics"]["target_question_count"] for block in metric_blocks),
-        "engagement_window_days": PREVIEW_ENGAGEMENT_WINDOW_DAYS,
+        "engagement_half_life_days": _engagement_half_life_days(course),
+        "engagement_is_fixed": all(block["metrics"].get("engagement_is_fixed") for block in metric_blocks),
         "weights": weights,
     }
 
@@ -1554,6 +1666,9 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None) ->
         transcript = _ensure_block_transcript(course_state, block)
         objectives = list(block.learning_objectives.all())
         covered_objective_ids = _covered_objective_ids(course_state, block)
+        block_metrics = _block_metrics(course_state, block)
+        released = block.is_available()
+        pre_engagement_enabled = bool(getattr(course.config, "allow_pre_engagement", False))
         serialized_blocks.append(
             {
                 "id": block.pk,
@@ -1572,12 +1687,13 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None) ->
                 ],
                 "available_from": block.available_from.isoformat(),
                 "available_from_label": f"{block.available_from.day} {block.available_from:%b %Y}",
-                "is_available": block.is_available(),
+                "is_available": _block_is_accessible(course, block),
+                "counts_in_metrics": released or (pre_engagement_enabled and block_metrics["completed_count"] > 0),
                 "learning_objective_count": len(objectives),
                 "target_question_count": block.preview_target_question_count,
                 "has_pending_question": bool(pending_questions.get(str(block.pk))),
                 "transcript": _serialized_transcript(course_state, transcript),
-                "metrics": _block_metrics(course_state, block),
+                "metrics": block_metrics,
             }
         )
     request.session.modified = True
