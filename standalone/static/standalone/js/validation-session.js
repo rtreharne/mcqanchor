@@ -28,6 +28,7 @@ if (validationRoot && validationDataNode) {
   let draftDebounceTimer = 0;
   let draftRequestId = 0;
   let alignmentLoadingRequestId = 0;
+  let draftAbortController = null;
   let awayTimestamp = 0;
   const richText = window.StandaloneRichText || {
     appendFormattedMessageContent(container, text) {
@@ -361,8 +362,19 @@ if (validationRoot && validationDataNode) {
   }
 
   function postAction(action, payload) {
+    const isDraftAction = action === "draft_answer";
+    if (!isDraftAction) {
+      window.clearTimeout(draftDebounceTimer);
+      abortDraftRequest();
+    }
     setStatus("");
-    setComposerDisabled(true);
+    if (!isDraftAction) {
+      setComposerDisabled(true);
+    }
+    const controller = isDraftAction ? new AbortController() : null;
+    if (controller) {
+      draftAbortController = controller;
+    }
     return fetch(actionUrl(action), {
       method: "POST",
       headers: {
@@ -370,8 +382,12 @@ if (validationRoot && validationDataNode) {
         "X-CSRFToken": validationCsrfToken(),
       },
       body: JSON.stringify(payload || {}),
+      signal: controller?.signal,
     })
       .then(async (response) => {
+        if (controller && draftAbortController === controller) {
+          draftAbortController = null;
+        }
         const data = await response.json();
         if (!response.ok || !data.ok) {
           throw new Error(data.error || "Something went wrong.");
@@ -394,11 +410,27 @@ if (validationRoot && validationDataNode) {
         }
       })
       .catch((error) => {
+        if (error?.name === "AbortError") {
+          return;
+        }
         setStatus(error.message || "Something went wrong.");
       })
       .finally(() => {
-        setComposerDisabled(false);
+        if (!isDraftAction) {
+          setComposerDisabled(false);
+        }
       });
+  }
+
+  function abortDraftRequest({ clearLoading = true } = {}) {
+    if (draftAbortController) {
+      draftAbortController.abort();
+      draftAbortController = null;
+    }
+    if (clearLoading) {
+      alignmentLoadingRequestId = 0;
+      renderAlignment();
+    }
   }
 
   function reportAwayDuration(millisecondsAway) {
@@ -620,6 +652,7 @@ if (validationRoot && validationDataNode) {
       return;
     }
     window.clearTimeout(draftDebounceTimer);
+    abortDraftRequest({ clearLoading: false });
     const requestId = ++draftRequestId;
     alignmentLoadingRequestId = requestId;
     renderAlignment();
@@ -642,6 +675,10 @@ if (validationRoot && validationDataNode) {
     const question = currentPendingQuestion();
     if (question && question.question_type === "waq") {
       sessionState.pending_question = { ...question, draft_answer: input.value };
+      if (!input.value.trim()) {
+        abortDraftRequest();
+        return;
+      }
       queueDraftCheck();
       return;
     }
@@ -676,6 +713,8 @@ if (validationRoot && validationDataNode) {
     if (requestInFlight) {
       return;
     }
+    window.clearTimeout(draftDebounceTimer);
+    abortDraftRequest();
     if (currentPendingAudit()) {
       void postAction("submit", {
         audit_prompt_id: currentPendingAudit().id,

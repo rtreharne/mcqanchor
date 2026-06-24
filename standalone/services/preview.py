@@ -14,6 +14,7 @@ from standalone.models import Course, CourseBlock, LearningObjective, LearningOb
 from standalone.services.guidance import build_chat_guidance_prompt, merge_assistant_guidance, sanitize_assistant_guidance
 from standalone.services.questions import (
     QuestionGenerationError,
+    block_has_coding_signal,
     coding_question_matches_expected_language,
     coding_question_quality_sort_key,
     further_study_questions_for_chat,
@@ -268,6 +269,8 @@ def _course_question_queryset(course: Course, block: CourseBlock, course_state: 
     preferred_coding_language = preferred_coding_language_for_block(block)
     if preferred_coding_language:
         queryset = queryset.filter(Q(is_coding_question=False) | Q(coding_language=preferred_coding_language))
+    elif not block_has_coding_signal(block):
+        queryset = queryset.filter(is_coding_question=False)
     normalized_type = _normalize_requested_question_type(question_type)
     if normalized_type:
         queryset = queryset.filter(question_type=normalized_type)
@@ -328,6 +331,8 @@ def _pick_unseen_question(course: Course, block: CourseBlock, course_state: dict
             if not preferred_coding_language:
                 preferred_coding_language = preferred_coding_language_for_block(question.block)
                 preferred_languages_by_block[question.block_id] = preferred_coding_language
+            if not preferred_coding_language:
+                continue
         if not coding_question_matches_expected_language(question, preferred_coding_language):
             continue
         if question_quality_sort_key(question)[0]:
@@ -374,6 +379,8 @@ def _pick_retry_question(course: Course, block: CourseBlock, course_state: dict,
             if not preferred_coding_language:
                 preferred_coding_language = preferred_coding_language_for_block(question.block)
                 preferred_languages_by_block[question.block_id] = preferred_coding_language
+            if not preferred_coding_language:
+                continue
         if not coding_question_matches_expected_language(question, preferred_coding_language):
             continue
         if question_quality_sort_key(question)[0]:

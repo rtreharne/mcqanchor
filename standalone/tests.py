@@ -60,6 +60,7 @@ from standalone.services.validation_flow import _pick_locked_questions, current_
 from standalone.services.questions import (
     QuestionGenerationError,
     _create_question_pair,
+    _is_source_dependent_question_stem,
     _normalize_generated_payload,
     _single_answer_option_balance_error,
     _single_answer_length_signal_error,
@@ -653,6 +654,27 @@ class StandaloneFlowTests(TestCase):
                 self.assertTrue(signal["snippet"])
 
         self.assertEqual(coding_signal_for_text("Cell membranes regulate transport.")["language"], "")
+
+    def test_coding_signal_ignores_prose_that_mentions_interface_formula_or_from(self):
+        prose_cases = [
+            "RStudio provides a user-friendly interface that lets you write scripts and manage projects.",
+            "This means that when you copy the formula to other cells, this range will not change; it will always refer to the same values.",
+            "Values of m and b were extracted from the linear relationship A = m * C + b, where b is the systematic error.",
+            "Calculate the mean by entering =AVERAGE(IF($B$2:$B$161=$E2,$C$2:$C$161)) into cell F2.",
+        ]
+
+        for text in prose_cases:
+            with self.subTest(text=text[:40]):
+                signal = coding_signal_for_text(text, extension=".txt")
+                self.assertEqual(signal["language"], "")
+                self.assertEqual(signal["snippet"], "")
+
+    def test_source_dependent_stem_check_allows_table_function_question(self):
+        self.assertFalse(
+            _is_source_dependent_question_stem(
+                "Why is the table() function useful for counting category frequencies in R?"
+            )
+        )
 
     def test_teacher_invitation_activation_creates_teacher_account(self):
         self.client.force_login(self.internal)
@@ -2907,6 +2929,40 @@ class StandaloneFlowTests(TestCase):
         self.assertFalse(course.question_bank_items.exists())
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_standard_generation_stops_after_bounded_rejections(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "According to the textbook, what does this chapter cover?",
+                    "correct_answers": ["It covers the key topics in the chapter."],
+                    "distractors": ["Option A", "Option B", "Option C"],
+                    "further_study_questions": [
+                        "Why does this matter?",
+                        "How would you explain this?",
+                        "What should I avoid?",
+                    ],
+                    "explanation": "Explanation.",
+                    "difficulty": "core",
+                }
+            )
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            create_mock = mock_client.return_value.responses.create
+            create_mock.return_value = DummyResponse()
+            with self.assertRaisesMessage(QuestionGenerationError, "Could not generate a high-quality question for this block."):
+                generate_question_pair_for_block(
+                    block,
+                    question_type=QuestionBankItem.QuestionType.MCQ,
+                    raise_generation_errors=True,
+                )
+
+        self.assertLessEqual(create_mock.call_count, 8)
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_specificity_biased_ai_mcq_is_rejected_instead_of_falling_back(self):
         course = self.create_course()
         block, _asset, _objective, _chunk = self.create_preview_content_block(course)
@@ -3274,6 +3330,8 @@ print(result)""",
             extension=".r",
             text='library(tibble)\ndf <- data.frame(x = 1:5, y = letters[1:5])\nprint(df[, "x"])',
         )
+        objective.text = "Explain how R column subsetting and printing work"
+        objective.save(update_fields=["text", "updated_at"])
         matlab_question = QuestionBankItem.objects.create(
             course=course,
             block=block,
@@ -3319,6 +3377,58 @@ print(result)""",
         question_payload = [message for message in block_payload["transcript"] if message["kind"] == "question"][-1]
         self.assertEqual(question_payload["question_id"], r_question.pk)
         self.assertEqual(question_payload["coding_language"], "r")
+        self.assertNotEqual(question_payload["question_id"], matlab_question.pk)
+
+    def test_preview_filters_out_coding_questions_when_block_has_no_detectable_code(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course, title="Excel and R")
+        objective.text = "Explain why consistent naming improves R code readability"
+        objective.save(update_fields=["text", "updated_at"])
+        chunk.text = (
+            "RStudio provides a user-friendly interface for writing scripts. "
+            "When you copy the formula to other cells, this range will not change."
+        )
+        chunk.save(update_fields=["text"])
+        matlab_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="What does this MATLAB snippet return?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It returns a column vector.",
+            distractors=["It plots a graph.", "It opens a file.", "It sends a request."],
+            explanation="This MATLAB snippet returns a vector.",
+            question_hash="matlab-no-code-signal",
+            is_coding_question=True,
+            coding_language="matlab",
+            coding_question_kind=QuestionBankItem.CodingQuestionKind.COMPREHENSION,
+            code_snippet="x = (1:5)';\ndisp(x)",
+        )
+        plain_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Why does consistent naming improve readability in R scripts?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It makes R code easier to read and maintain.",
+            distractors=["It removes the need for variables.", "It forces all code into one file.", "It makes syntax errors impossible."],
+            explanation="Consistent naming improves readability.",
+            question_hash="plain-no-code-signal",
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        question_payload = [message for message in block_payload["transcript"] if message["kind"] == "question"][-1]
+        self.assertEqual(question_payload["question_id"], plain_question.pk)
         self.assertNotEqual(question_payload["question_id"], matlab_question.pk)
 
     def test_official_validation_filters_out_coding_questions_with_wrong_language_references(self):

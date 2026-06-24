@@ -269,24 +269,27 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.95rem;
-  height: 2.95rem;
+  width: 3.2rem;
+  height: 3.2rem;
   padding: 0;
   border: 1px solid rgba(166, 214, 255, 0.72);
   border-radius: 50%;
   background: linear-gradient(135deg, rgba(14, 109, 227, 0.96), rgba(39, 130, 241, 0.96));
   box-shadow: 0 16px 34px rgba(45, 101, 181, 0.24);
+  background-clip: padding-box;
+  overflow: hidden;
   color: #ffffff;
   cursor: pointer;
   transform: var(--preview-sidebar-toggle-transform);
   transition: left 220ms ease, background-color 160ms ease, color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
-  backdrop-filter: blur(12px);
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .preview-sidebar-toggle:hover,
 .preview-sidebar-toggle:focus-visible {
   box-shadow: 0 20px 40px rgba(45, 101, 181, 0.28);
-  transform: var(--preview-sidebar-toggle-transform) translateY(-0.03rem) scale(1.04);
+  transform: var(--preview-sidebar-toggle-transform);
   outline: none;
 }
 
@@ -2429,8 +2432,8 @@ body {
     --preview-sidebar-toggle-transform: translateY(-50%);
     left: auto;
     right: 0.5rem;
-    width: 2.7rem;
-    height: 2.7rem;
+    width: 3rem;
+    height: 3rem;
     z-index: 10;
   }
 
@@ -2625,8 +2628,8 @@ body {
 
   .preview-sidebar-toggle {
     right: 0.25rem;
-    width: 2.35rem;
-    height: 2.35rem;
+    width: 2.8rem;
+    height: 2.8rem;
   }
 
   .preview-sidebar-scrim {

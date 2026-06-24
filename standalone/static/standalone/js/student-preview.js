@@ -69,6 +69,7 @@ if (previewRoot && previewDataNode) {
   let waqDraftDebounceTimer = 0;
   let waqDraftRequestId = 0;
   let waqAlignmentLoadingRequestId = 0;
+  let waqDraftAbortController = null;
   let sidebarSummaryExpanded = false;
   let sidebarSummaryFullText = "";
   let practiceValidationNavigationTimer = 0;
@@ -86,6 +87,7 @@ if (previewRoot && previewDataNode) {
     month: "short",
     year: "numeric",
   });
+  const reducedMotionMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
   const richText = window.StandaloneRichText || {
     appendFormattedMessageContent(container, text) {
       if (!container) {
@@ -873,6 +875,16 @@ if (previewRoot && previewDataNode) {
     renderWaqAlignment();
   }
 
+  function abortWaqDraftRequest({ clearLoading = true } = {}) {
+    if (waqDraftAbortController) {
+      waqDraftAbortController.abort();
+      waqDraftAbortController = null;
+    }
+    if (clearLoading) {
+      clearWaqAlignmentLoading();
+    }
+  }
+
   function setWaqAlignmentFlash(isFlashing) {
     if (!waqAlignment) {
       return;
@@ -1077,7 +1089,33 @@ if (previewRoot && previewDataNode) {
   }
 
   function scrollTranscriptToBottom() {
-    transcript?.scrollTo({ top: transcript.scrollHeight, behavior: "auto" });
+    transcript?.scrollTo({ top: transcript.scrollHeight, behavior: reducedMotionMedia.matches ? "auto" : "smooth" });
+  }
+
+  function transcriptHeaderOffset() {
+    if (!transcript || mobileChatMedia.matches) {
+      return 0;
+    }
+    const header = previewRoot.querySelector(".preview-chat-header");
+    if (!header || !header.offsetHeight) {
+      return 0;
+    }
+    return header.offsetHeight;
+  }
+
+  function scrollTranscriptToMessageTop(messageElement) {
+    if (!transcript || !messageElement) {
+      return;
+    }
+    const targetTop = Math.max(messageElement.offsetTop - transcriptHeaderOffset(), 0);
+    transcript.scrollTo({ top: targetTop, behavior: reducedMotionMedia.matches ? "auto" : "smooth" });
+  }
+
+  function latestTranscriptMessageCard() {
+    if (!transcript) {
+      return null;
+    }
+    return transcript.lastElementChild instanceof HTMLElement ? transcript.lastElementChild : null;
   }
 
   function latestPendingQuestionCard() {
@@ -1122,9 +1160,8 @@ if (previewRoot && previewDataNode) {
 
     const activeQuestion = latestPendingQuestionCard();
     if (activeQuestion) {
-      const isTallerThanViewport = activeQuestion.offsetHeight > transcript.clientHeight - 16;
-      if (scrollMode === "question" && (mobileChatMedia.matches || isTallerThanViewport)) {
-        transcript.scrollTo({ top: Math.max(activeQuestion.offsetTop, 0), behavior: "auto" });
+      if (scrollMode === "question") {
+        scrollTranscriptToMessageTop(activeQuestion);
         window.requestAnimationFrame(() => {
           if (latestPendingQuestionCard() === activeQuestion) {
             updateQuestionOverflowState(activeQuestion);
@@ -1146,6 +1183,12 @@ if (previewRoot && previewDataNode) {
 
     if (scrollMode === "preserve") {
       transcript.scrollTop = Math.min(previousScrollTop, transcript.scrollHeight);
+      return;
+    }
+
+    const latestMessage = latestTranscriptMessageCard();
+    if (latestMessage) {
+      scrollTranscriptToMessageTop(latestMessage);
       return;
     }
 
@@ -2178,6 +2221,8 @@ if (previewRoot && previewDataNode) {
       return;
     }
 
+    const controller = new AbortController();
+    waqDraftAbortController = controller;
     const response = await fetch(actionUrl(block.id, "draft_answer"), {
       method: "POST",
       headers: {
@@ -2190,7 +2235,11 @@ if (previewRoot && previewDataNode) {
         answer_text: answerText,
       }),
       credentials: "same-origin",
+      signal: controller.signal,
     });
+    if (waqDraftAbortController === controller) {
+      waqDraftAbortController = null;
+    }
     const data = await response.json();
     if (!response.ok || !data.ok) {
       throw new Error(data.error || "Unable to update alignment right now.");
@@ -2220,7 +2269,7 @@ if (previewRoot && previewDataNode) {
     setStatus("");
     clearWaqDraftTimer();
     waqDraftRequestId += 1;
-    clearWaqAlignmentLoading();
+    abortWaqDraftRequest();
     setComposerDisabled(true);
     let succeeded = false;
     try {
@@ -2348,12 +2397,13 @@ if (previewRoot && previewDataNode) {
       setQuizLoading(block.id, true);
       renderTranscript();
     }
+    let quizRequestSucceeded = false;
     try {
-        await postPreviewAction("quiz", null, { minDurationMs: 2000, scrollMode: "question" });
+        quizRequestSucceeded = await postPreviewAction("quiz", null, { minDurationMs: 2000, scrollMode: "question" });
     } finally {
       if (block) {
         setQuizLoading(block.id, false);
-        renderTranscript("preserve");
+        renderTranscript(quizRequestSucceeded ? "question" : "preserve");
       }
     }
   });
@@ -2385,12 +2435,13 @@ if (previewRoot && previewDataNode) {
         setQuizLoading(block.id, true);
         renderTranscript();
       }
+      let quizRequestSucceeded = false;
       try {
-        await postPreviewAction("quiz", { question_type: questionType }, { minDurationMs: 2000, scrollMode: "question" });
+        quizRequestSucceeded = await postPreviewAction("quiz", { question_type: questionType }, { minDurationMs: 2000, scrollMode: "question" });
       } finally {
         if (block) {
           setQuizLoading(block.id, false);
-          renderTranscript("preserve");
+          renderTranscript(quizRequestSucceeded ? "question" : "preserve");
         }
       }
     });
@@ -2422,14 +2473,18 @@ if (previewRoot && previewDataNode) {
     clearWaqDraftTimer();
     if (!input.value.trim()) {
       waqDraftRequestId += 1;
-      clearWaqAlignmentLoading();
+      abortWaqDraftRequest();
       return;
     }
+    abortWaqDraftRequest({ clearLoading: false });
     const requestId = waqDraftRequestId + 1;
     waqDraftRequestId = requestId;
     setWaqAlignmentLoading(requestId);
     waqDraftDebounceTimer = window.setTimeout(() => {
-      void postDraftAnswer(activeWaq.question_id, input.value, requestId).catch(() => {
+      void postDraftAnswer(activeWaq.question_id, input.value, requestId).catch((error) => {
+        if (error?.name === "AbortError") {
+          return;
+        }
         if (requestId === waqDraftRequestId) {
           clearWaqAlignmentLoading(requestId);
           setStatus("Unable to update alignment right now.");
@@ -2470,8 +2525,9 @@ if (previewRoot && previewDataNode) {
         renderTranscript();
       }
       void (async () => {
+        let quizRequestSucceeded = false;
         try {
-          await postPreviewAction(
+          quizRequestSucceeded = await postPreviewAction(
             "quiz",
             {
               question_type: questionType,
@@ -2483,7 +2539,7 @@ if (previewRoot && previewDataNode) {
         } finally {
           if (block) {
             setQuizLoading(block.id, false);
-            renderTranscript("preserve");
+            renderTranscript(quizRequestSucceeded ? "question" : "preserve");
           }
         }
       })();

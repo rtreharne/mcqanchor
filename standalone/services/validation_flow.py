@@ -37,6 +37,7 @@ from standalone.services.preview import (
     normalize_explanation_text,
 )
 from standalone.services.questions import (
+    block_has_coding_signal,
     coding_question_matches_expected_language,
     coding_question_quality_sort_key,
     generate_question_pair_for_block,
@@ -215,6 +216,8 @@ def _filter_mismatched_coding_questions(questions: list[QuestionBankItem]) -> li
         if preferred_language is None:
             preferred_language = preferred_coding_language_for_block(question.block)
             preferred_by_block[question.block_id] = preferred_language
+        if not preferred_language and not block_has_coding_signal(question.block):
+            continue
         if coding_question_matches_expected_language(question, preferred_language):
             filtered.append(question)
     return filtered

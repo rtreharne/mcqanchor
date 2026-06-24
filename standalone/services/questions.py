@@ -68,6 +68,7 @@ WAQ_FALLBACK_STEM_TEMPLATES = (
 )
 
 FURTHER_STUDY_QUESTION_COUNT = 3
+MAX_STANDARD_GENERATION_ATTEMPTS = 8
 LATEX_GREEK_REPLACEMENTS = {
     "alpha": "α",
     "beta": "β",
@@ -286,13 +287,13 @@ def _language_from_text(text: str) -> str:
 
     language_markers = [
         ("python", (r"\bdef\s+\w+\s*\(", r"\bimport\s+\w+", r"\bfrom\s+\w+\s+import\b", r"\bprint\s*\(")),
-        ("r", (r"\blibrary\s*\(", r"\bdata\.frame\s*\(", r"<-", r"\bggplot\s*\(")),
+        ("r", (r"\blibrary\s*\(", r"\bdata\.frame\s*\(", r"<-", r"\bggplot\s*\(", r"\b(?:read|write)\.csv\s*\(", r"\b(?:table|aggregate|mean|median|sd|plot|points|legend|expression|do\.call|print|source|runif|set\.seed|list\.files|unlink|readLines|startsWith|paste|paste0|readPNG|channel|bwlabel)\s*\(", r"\b[A-Za-z_]\w*\$[A-Za-z_]\w+")),
         ("java", (r"\bpublic\s+class\b", r"\bSystem\.out\.println\s*\(", r"\bpublic\s+static\s+void\s+main\b")),
-        ("matlab", (r"\bend\b", r"\bfunction\s+\[?", r"\bdisp\s*\(", r"%\s*[A-Za-z]")),
+        ("matlab", (r"^\s*end\s*$", r"^\s*function\s+\[?", r"\bdisp\s*\(", r"^\s*%")),
         ("javascript", (r"\bconsole\.log\s*\(", r"\bfunction\s+\w+\s*\(", r"\bconst\s+\w+\s*=", r"=>\s*[{(]")),
         ("typescript", (r"\binterface\s+\w+\b", r":\s*(?:string|number|boolean)\b", r"\btype\s+\w+\s*=")),
         ("sql", (r"\bselect\s+.+\bfrom\b", r"\bjoin\b", r"\bwhere\b", r"\bgroup\s+by\b")),
-        ("shell", (r"^\s*#!.*\b(?:bash|sh)\b", r"\b(?:grep|awk|sed|chmod|cd|ls)\b", r"\$\w+")),
+        ("shell", (r"^\s*#!.*\b(?:bash|sh)\b", r"\b(?:grep|awk|sed|chmod|cd|ls)\b")),
         ("cpp", (r"#include\s*<", r"\bstd::", r"\bcout\s*<<")),
         ("csharp", (r"\busing\s+System\b", r"\bConsole\.WriteLine\s*\(", r"\bnamespace\s+\w+")),
         ("c", (r"#include\s*<", r"\bprintf\s*\(", r"\bmalloc\s*\(")),
@@ -494,10 +495,15 @@ def _is_code_like_line(line: str) -> bool:
     patterns = (
         r"^\s*(?:def|class|for|while|if|elif|else|try|except|return|import|from)\b",
         r"^\s*(?:public|private|protected|static|void|int|double|String|class)\b",
-        r"^\s*(?:function|const|let|var|interface|type)\b",
+        r"^\s*(?:function|const|let|var)\b",
         r"^\s*(?:SELECT|select|INSERT|insert|UPDATE|update|DELETE|delete)\b",
         r"^\s*[A-Za-z_][\w.]*\s*(?:<-|=)\s*.+",
-        r"[{};]$",
+        r"^\s*[#%].+",
+        r"^\s*\w+\s*\([^)]*\)\s*$",
+        r"\b(?:library|read\.csv|write\.csv|print|plot|points|legend|aggregate|do\.call|ggplot|disp|printf|console\.log|System\.out\.println)\s*\(",
+        r"\b[A-Za-z_]\w*\$[A-Za-z_]\w+",
+        r"\[[^\]]+\]",
+        r"^\s*[)}]\s*$",
         r"\b(?:print|console\.log|System\.out\.println|disp|printf)\s*\(",
         r"<[A-Za-z][^>]*>",
     )
@@ -519,24 +525,58 @@ def _extract_code_like_lines(text: str, *, max_lines: int = 18) -> str:
             current = []
     if current and len(current) > len(best):
         best = current
-    if not best:
-        sentences = [segment.strip() for segment in re.split(r"(?<=[.;{}])\s+", str(text or "")) if _is_code_like_line(segment)]
-        best = sentences[:max_lines]
     return "\n".join(best).strip()
+
+
+def _snippet_has_strong_language_signal(language: str, snippet: str) -> bool:
+    normalized = _normalize_coding_language(language)
+    text = str(snippet or "")
+    patterns = {
+        "python": (r"^\s*def\s+\w+\s*\(", r"\bimport\s+\w+", r"\bfrom\s+\w+\s+import\b", r"\bprint\s*\(", r"^\s*(?:for|if|while)\b.*:"),
+        "r": (r"<-", r"\blibrary\s*\(", r"\bdata\.frame\s*\(", r"\b(?:read|write)\.csv\s*\(", r"\bggplot\s*\(", r"\bfunction\s*\(", r"\b(?:plot|points|legend|aggregate|do\.call|table|mean|median|sd|print)\s*\(", r"\b[A-Za-z_]\w*\$[A-Za-z_]\w+"),
+        "matlab": (r"^\s*function\b", r"^\s*end\s*$", r"\bdisp\s*\(", r"^\s*%"),
+        "javascript": (r"\bfunction\s+\w+\s*\(", r"\b(?:const|let|var)\s+\w+\s*=", r"=>\s*[{(]"),
+        "typescript": (r"\binterface\s+\w+\b", r"\btype\s+\w+\s*=", r"\b(?:const|let)\s+\w+\s*:\s*[^=]+="),
+        "sql": (r"\bselect\s+.+\bfrom\b", r"\bjoin\b", r"\bgroup\s+by\b", r"\border\s+by\b"),
+        "shell": (r"^\s*#!.*\b(?:bash|sh)\b", r"^\s*(?:grep|awk|sed|chmod|cd|ls)\b"),
+        "java": (r"\bpublic\s+class\b", r"\bSystem\.out\.println\s*\(", r"\bpublic\s+static\s+void\s+main\b"),
+        "cpp": (r"#include\s*<", r"\bstd::", r"\bcout\s*<<"),
+        "csharp": (r"\busing\s+System\b", r"\bConsole\.WriteLine\s*\(", r"\bnamespace\s+\w+"),
+        "c": (r"#include\s*<", r"\bprintf\s*\(", r"\bmalloc\s*\("),
+        "html": (r"<(?:html|div|span|p|script|body|head)\b",),
+        "css": (r"[.#]?[a-zA-Z][\w-]*\s*\{[^}]*:", r"\bdisplay\s*:", r"\bcolor\s*:"),
+    }
+    return any(re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE) for pattern in patterns.get(normalized, ()))
 
 
 def coding_signal_for_text(text: str, *, extension: str = "", filename: str = "") -> dict[str, str]:
     fenced_snippet, fenced_language = _extract_fenced_code(text)
     filename_language = _language_from_extension(f".{str(filename).rsplit('.', 1)[-1].lower()}") if "." in str(filename) else ""
-    language = _language_from_extension(extension) or filename_language
-    language = language or fenced_language or _language_from_text(text)
     snippet = fenced_snippet or _extract_code_like_lines(text)
     snippet = re.sub(r"^\n+|\n+$", "", snippet)
     if len(snippet) > 1400:
         snippet = snippet[:1400].rsplit("\n", 1)[0].strip() or snippet[:1400].strip()
-    if not language or not snippet or len(snippet) < 8:
+    language = _language_from_extension(extension) or filename_language
+    language = language or fenced_language or _language_from_text(snippet)
+    if not language or not snippet or len(snippet) < 8 or not _snippet_has_strong_language_signal(language, snippet):
         return {"language": "", "snippet": ""}
     return {"language": language, "snippet": snippet}
+
+
+def block_has_coding_signal(
+    block: CourseBlock,
+    candidate_chunks: list[ContentChunk] | None = None,
+    coding_signals: dict[int, dict[str, str]] | None = None,
+) -> bool:
+    if candidate_chunks is None:
+        candidate_chunks = list(
+            ContentChunk.objects.filter(block=block, asset__include_in_generation=True)
+            .select_related("asset")
+            .order_by("asset__created_at", "ordinal", "pk")
+        )
+    if coding_signals is None:
+        coding_signals = {chunk.pk: signal for chunk, signal in _coding_chunks(candidate_chunks)}
+    return any(signal.get("language") and signal.get("snippet") for signal in coding_signals.values())
 
 
 def _coding_signal_for_chunk(chunk: ContentChunk) -> dict[str, str]:
@@ -722,9 +762,9 @@ def _single_answer_length_signal_error(correct_answer: str, distractors: list[st
     average_char_ratio = correct_chars / max(average_distractor_chars, 1)
 
     if (
-        (char_gap >= 18 and longest_char_ratio >= 1.2)
-        or (char_gap >= 12 and average_char_ratio >= 1.35)
-        or (word_gap >= 3 and correct_words >= average_distractor_words + 3 and average_char_ratio >= 1.2)
+        (char_gap >= 24 and longest_char_ratio >= 1.28)
+        or (char_gap >= 18 and average_char_ratio >= 1.45)
+        or (word_gap >= 4 and correct_words >= average_distractor_words + 4 and average_char_ratio >= 1.28)
     ):
         return "Single-answer payload makes the correct answer obviously longer than every distractor."
     return ""
@@ -867,6 +907,8 @@ def single_answer_question_balance_error(question: QuestionBankItem) -> str:
 
 
 def question_quality_issue(question: QuestionBankItem) -> str:
+    if getattr(question, "is_coding_question", False):
+        return ""
     return (
         single_answer_question_balance_error(question)
         or _objective_alignment_error(
@@ -926,7 +968,7 @@ def _objective_alignment_error(
         return ""
     question_tokens = _keyword_set(" ".join([stem, *correct_answers]))
     overlap = _keywords_overlap_count(objective_tokens, question_tokens)
-    required_overlap = 2 if len(objective_tokens) >= 5 else 1
+    required_overlap = 2 if len(objective_tokens) >= 8 else 1
     if overlap < required_overlap:
         return "Generated question does not stay aligned with the target learning objective."
     return ""
@@ -1598,7 +1640,7 @@ def _is_source_dependent_question_stem(stem: str) -> bool:
     if not lowered:
         return False
     source_terms = r"(?:source\s+text|textbook|book|chapter|passage|notes|material|materials|content|block|uploaded\s+document|document)"
-    source_artifacts = r"(?:figure|fig\.?|table|diagram|graph|worked\s+example|example|chapter|module|section|page|paragraph|extract|excerpt)"
+    source_artifacts = r"(?:figure|fig\.?|diagram|graph|worked\s+example|chapter|module|section|page|paragraph|extract|excerpt)"
     patterns = (
         rf"\b(?:according to|based on|from|in)\s+(?:the\s+)?{source_terms}\b",
         rf"\b(?:the\s+)?{source_terms}\s+(?:covers?|covered|provides?|states?|describes?|discusses?|mentions?|explains?|focuses\s+on)\b",
@@ -1606,9 +1648,10 @@ def _is_source_dependent_question_stem(stem: str) -> bool:
         rf"\bwhat\s+is\s+one\s+of\s+(?:the\s+)?(?:main|key|primary|central)\s+topics?\b",
         rf"\bwhich\s+(?:topic|statement|idea)\s+is\s+(?:covered|mentioned|discussed|provided)\b",
         rf"\b(?:this|the)\s+{source_artifacts}\b",
+        rf"\b(?:this|the)\s+(?:table|example)\s+\d+[a-z]?\b",
         rf"\b{source_artifacts}\s+\d+[a-z]?\b",
-        rf"\b(?:shown|described|presented|given)\s+in\s+(?:this|the)\s+{source_artifacts}\b",
-        rf"\b(?:text|passage|chapter|figure|table|worked\s+example)\s+above\b",
+        rf"\b(?:shown|described|presented|given)\s+in\s+(?:this|the)\s+(?:{source_artifacts}|table|example)\b",
+        rf"\b(?:text|passage|chapter|figure|table|worked\s+example|example)\s+above\b",
     )
     return any(re.search(pattern, lowered) for pattern in patterns)
 
@@ -2105,27 +2148,17 @@ def preferred_coding_language_for_block(
         language_counts[language] += 1
         first_seen_order.setdefault(language, index)
 
+    block_title = str(getattr(block, "title", "") or "")
+    if re.search(r"(?:^|[^A-Za-z])R(?:[^A-Za-z]|$)", block_title) and language_counts.get("r"):
+        return "r"
+
     if language_counts:
         ranked = sorted(
             language_counts.items(),
             key=lambda item: (-item[1], first_seen_order.get(item[0], 10**6), item[0]),
         )
         return ranked[0][0]
-
-    existing_counts = (
-        QuestionBankItem.objects.filter(
-            block=block,
-            bank_type=QuestionBankItem.BankType.PRACTICE,
-            status=QuestionBankItem.Status.APPROVED,
-            is_coding_question=True,
-        )
-        .exclude(coding_language="")
-        .values("coding_language")
-        .annotate(total=Count("id"))
-        .order_by("-total", "coding_language")
-    )
-    first_row = next(iter(existing_counts), None)
-    return str(first_row["coding_language"]) if first_row else ""
+    return ""
 
 
 def _normalize_generated_payload(
@@ -2259,13 +2292,14 @@ def _create_question_pair(
         block.question_distractor_count,
         expected_coding_language=expected_coding_language,
     )
-    objective_alignment_error = _objective_alignment_error(
-        stem=normalized_payload["stem"],
-        correct_answers=normalized_payload["correct_answers"],
-        objective=objective,
-    )
-    if objective_alignment_error:
-        raise ValueError(objective_alignment_error)
+    if not normalized_payload["is_coding_question"]:
+        objective_alignment_error = _objective_alignment_error(
+            stem=normalized_payload["stem"],
+            correct_answers=normalized_payload["correct_answers"],
+            objective=objective,
+        )
+        if objective_alignment_error:
+            raise ValueError(objective_alignment_error)
     stem = _normalize_question_stem(normalized_payload["stem"])
     if (
         normalized_payload["question_type"] != QuestionBankItem.QuestionType.NUM
@@ -2452,6 +2486,7 @@ def generate_question_pair_for_block(
         )
     attempted_chunk_ids: set[int] = set()
     found_numeric_candidate_path = False
+    generation_attempts = 0
 
     for objective in ordered_objectives:
         avoid_question_angles = _recent_question_avoidance_notes(block, question_type, objective=objective)
@@ -2478,6 +2513,8 @@ def generate_question_pair_for_block(
         if coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM:
             ranked_chunks = [chunk for chunk in ranked_chunks if chunk.pk in coding_signals] or ranked_chunks
         for chunk in ranked_chunks:
+            if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS:
+                break
             attempted_chunk_ids.add(chunk.pk)
             question_variant_index = question_type_objective_counts.get(objective.pk, 0) + question_type_objective_chunk_counts.get(
                 (objective.pk, chunk.pk),
@@ -2499,6 +2536,7 @@ def generate_question_pair_for_block(
                     last_generation_error = numeric_error
                 continue
             try:
+                generation_attempts += 1
                 coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
                 payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
                     chunk,
@@ -2525,8 +2563,12 @@ def generate_question_pair_for_block(
                 continue
             if practice is not None and validation is not None:
                 return practice, validation
+        if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS:
+            break
 
     for chunk in candidate_chunks:
+        if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS:
+            break
         if chunk.pk in attempted_chunk_ids:
             continue
         chunk_index_by_block[chunk.block_id] += 1
@@ -2572,6 +2614,7 @@ def generate_question_pair_for_block(
                 last_generation_error = numeric_error
             continue
         try:
+            generation_attempts += 1
             coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
             payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
                 chunk,
@@ -2601,6 +2644,8 @@ def generate_question_pair_for_block(
 
     if question_type == QuestionBankItem.QuestionType.NUM and not found_numeric_candidate_path and not last_generation_error:
         last_generation_error = "This block does not contain a suitable calculation-style path for a numerical MCQ."
+    if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS and not last_generation_error:
+        last_generation_error = "Generation stopped after too many rejected attempts."
     if raise_generation_errors and last_generation_error:
         detail = f" {last_generation_error}" if last_generation_error else ""
         message = (
