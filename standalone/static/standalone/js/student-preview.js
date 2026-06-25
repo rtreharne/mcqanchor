@@ -32,6 +32,8 @@ if (previewRoot && previewDataNode) {
   const waqAlignmentFill = previewRoot.querySelector("[data-waq-alignment-fill]");
   const waqAlignmentLoader = previewRoot.querySelector("[data-waq-alignment-loader]");
   const activeBlockTitle = previewRoot.querySelector(".preview-active-block-title");
+  const projectSwitcher = previewRoot.querySelector("[data-preview-project-switcher]");
+  const projectPanel = previewRoot.querySelector("[data-preview-project-panel]");
   const resourceButtons = Array.from(previewRoot.querySelectorAll("[data-preview-resource]"));
   const mobileSidebarMedia = window.matchMedia("(max-width: 980px)");
   const mobileChatMedia = window.matchMedia("(max-width: 640px)");
@@ -78,6 +80,8 @@ if (previewRoot && previewDataNode) {
   const inlineMessagesByBlock = {};
   const loadingMessagesByBlock = {};
   const optimisticUserMessagesByBlock = {};
+  const activeProjectIdsByBlock = {};
+  const projectAnswerDraftsById = {};
   const maqSelectionsByQuestionId = {};
   const sidebarSelectionPreviewMs = 2000;
   const practiceValidationLaunchDelayMs = 5000;
@@ -274,6 +278,26 @@ if (previewRoot && previewDataNode) {
 
   function findBlock(blockId) {
     return (previewState.blocks || []).find((block) => String(block.id) === String(blockId)) || null;
+  }
+
+  function currentProject(block = currentBlock()) {
+    if (!block || !Array.isArray(block.projects)) {
+      return null;
+    }
+    const activeProjectId = String(activeProjectIdsByBlock[String(block.id)] || "");
+    return block.projects.find((project) => String(project.id) === activeProjectId) || null;
+  }
+
+  function setActiveProject(blockId, projectId = "") {
+    const key = String(blockId || "");
+    if (!key) {
+      return;
+    }
+    if (projectId) {
+      activeProjectIdsByBlock[key] = String(projectId);
+      return;
+    }
+    delete activeProjectIdsByBlock[key];
   }
 
   function currentFlagSheetBlock() {
@@ -524,6 +548,9 @@ if (previewRoot && previewDataNode) {
   }
 
   function pendingQuestion(block = currentBlock()) {
+    if (currentProject(block)) {
+      return null;
+    }
     if (!block || !Array.isArray(block.transcript)) {
       return null;
     }
@@ -944,6 +971,14 @@ if (previewRoot && previewDataNode) {
     if (!input) {
       return;
     }
+    if (currentProject()) {
+      if (input.dataset.mode === "waq") {
+        input.value = "";
+      }
+      input.dataset.mode = "project-chat";
+      resizeComposerInput();
+      return;
+    }
     const question = pendingWrittenQuestion();
     if (question) {
       const nextValue = question.draft_answer || "";
@@ -966,21 +1001,26 @@ if (previewRoot && previewDataNode) {
     if (!submitButton || !input) {
       return;
     }
+    const activeProject = currentProject();
     const activeWaq = pendingWrittenQuestion();
     const hasText = !!input.value.trim();
     const isWaqMode = !!activeWaq;
+    const isProjectMode = !!activeProject;
 
     previewRoot.classList.toggle("is-waq-mode", isWaqMode);
+    previewRoot.classList.toggle("is-project-mode", isProjectMode);
     form?.classList.toggle("is-waq-mode", isWaqMode);
     quizControls?.classList.toggle("is-answer-mode", isWaqMode);
-    input.placeholder = isWaqMode ? "Write your answer..." : "Ask a related question.";
-    submitButton.textContent = isWaqMode ? "Submit answer" : (hasText ? "Send" : "Quiz");
+    input.placeholder = isWaqMode
+      ? "Write your answer..."
+      : (isProjectMode ? "Ask for a hint or nudge..." : "Ask a related question.");
+    submitButton.textContent = isWaqMode ? "Submit answer" : (hasText ? "Send" : (isProjectMode ? "Hint" : "Quiz"));
     submitButton.disabled = requestInFlight || (isWaqMode && !hasText);
     if (quizMenu) {
-      quizMenu.hidden = hasText || isWaqMode;
+      quizMenu.hidden = hasText || isWaqMode || isProjectMode;
     }
     if (quizMenuTrigger) {
-      quizMenuTrigger.disabled = requestInFlight || !!input.value.trim() || isWaqMode;
+      quizMenuTrigger.disabled = requestInFlight || !!input.value.trim() || isWaqMode || isProjectMode;
     }
     syncQuizMenuItems();
     renderWaqAlignment(activeWaq);
@@ -1005,6 +1045,9 @@ if (previewRoot && previewDataNode) {
     });
     previewRoot.querySelectorAll(".preview-flag-button").forEach((button) => {
       button.disabled = disabled || button.textContent === "Flagged";
+    });
+    previewRoot.querySelectorAll(".preview-project-answer-input, .preview-project-answer-submit").forEach((field) => {
+      field.disabled = disabled || field.dataset.completed === "true";
     });
     previewRoot.querySelectorAll(".preview-further-study-button, .preview-further-study-question").forEach((button) => {
       button.disabled = disabled;
@@ -1868,6 +1911,21 @@ if (previewRoot && previewDataNode) {
   }
 
   function combinedTranscript(block) {
+    const project = currentProject(block);
+    if (project) {
+      const messages = Array.isArray(project.transcript) ? [...project.transcript] : [];
+      if (optimisticUserMessagesByBlock[String(block.id)]) {
+        messages.push(optimisticUserMessagesByBlock[String(block.id)]);
+      }
+      if (loadingMessagesByBlock[String(block.id)]) {
+        messages.push({
+          id: `loading-project-${block.id}`,
+          kind: "loading",
+          role: "assistant",
+        });
+      }
+      return messages;
+    }
     const baseMessages = Array.isArray(block?.transcript) ? block.transcript : [];
     const inlineMessages = block ? blockInlineMessages(block.id) : [];
     const combined = [];
@@ -2147,6 +2205,148 @@ if (previewRoot && previewDataNode) {
     });
   }
 
+  function renderProjectSwitcher() {
+    if (!projectSwitcher) {
+      return;
+    }
+    const block = currentBlock();
+    projectSwitcher.innerHTML = "";
+    if (!block) {
+      projectSwitcher.hidden = true;
+      return;
+    }
+    const projects = Array.isArray(block.projects) ? block.projects : [];
+    if (!projects.length) {
+      projectSwitcher.hidden = true;
+      return;
+    }
+    projectSwitcher.hidden = false;
+
+    const practiceButton = document.createElement("button");
+    practiceButton.type = "button";
+    practiceButton.className = `preview-header-action${currentProject(block) ? "" : " is-active"}`;
+    practiceButton.textContent = "Practice";
+    practiceButton.addEventListener("click", () => {
+      setActiveProject(block.id, "");
+      renderPreview("preserve");
+    });
+    projectSwitcher.appendChild(practiceButton);
+
+    projects.forEach((project) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `preview-header-action${String(currentProject(block)?.id || "") === String(project.id) ? " is-active" : ""}`;
+      button.textContent = project.title;
+      button.addEventListener("click", async () => {
+        setActiveProject(block.id, project.id);
+        if (!project.materialized) {
+          await postPreviewAction("project_open", { project_id: project.id }, { scrollMode: "preserve" });
+        } else {
+          renderPreview("preserve");
+        }
+      });
+      projectSwitcher.appendChild(button);
+    });
+  }
+
+  function renderProjectPanel() {
+    if (!projectPanel) {
+      return;
+    }
+    const block = currentBlock();
+    const project = currentProject(block);
+    projectPanel.innerHTML = "";
+    projectPanel.hidden = !project;
+    if (!project) {
+      return;
+    }
+
+    const statusLabel = project.assignment_status === "complete"
+      ? "Complete"
+      : (project.assignment_status === "in_progress" ? "In progress" : "Ready");
+
+    const downloads = Array.isArray(project.downloads) ? project.downloads : [];
+    const wrapper = document.createElement("div");
+    wrapper.className = "preview-written-answer-panel";
+    wrapper.innerHTML = `
+      <div class="preview-message-meta">
+        <span class="preview-message-pill">Project</span>
+        <span class="preview-message-pill">${statusLabel}</span>
+        ${project.seed ? `<span class="preview-message-pill">Seed ${project.seed}</span>` : ""}
+      </div>
+    `;
+
+    const instructions = document.createElement("div");
+    appendFormattedMessageContent(instructions, project.student_instructions || "Project instructions will appear here once published.");
+    wrapper.appendChild(instructions);
+
+    if (downloads.length) {
+      const actions = document.createElement("div");
+      actions.className = "preview-message-actions";
+      downloads.forEach((download) => {
+        const link = document.createElement("a");
+        link.className = "button secondary";
+        link.href = download.url;
+        link.textContent = download.label;
+        actions.appendChild(link);
+      });
+      wrapper.appendChild(actions);
+    }
+
+    const answerRow = document.createElement("div");
+    answerRow.className = "preview-chat-composer";
+    const answerInput = document.createElement("input");
+    answerInput.type = "text";
+    answerInput.className = "preview-project-answer-input";
+    answerInput.placeholder = project.answer_unit
+      ? `${project.answer_label} (${project.answer_unit})`
+      : project.answer_label || "Answer";
+    answerInput.value = projectAnswerDraftsById[String(project.id)] || "";
+    answerInput.disabled = requestInFlight || project.assignment_status === "complete";
+    answerInput.dataset.completed = project.assignment_status === "complete" ? "true" : "false";
+    answerInput.addEventListener("input", () => {
+      projectAnswerDraftsById[String(project.id)] = answerInput.value;
+      submitAnswerButton.disabled = requestInFlight || project.assignment_status === "complete" || !answerInput.value.trim();
+    });
+    answerInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        submitAnswerButton.click();
+      }
+    });
+    const submitAnswerButton = document.createElement("button");
+    submitAnswerButton.type = "button";
+    submitAnswerButton.className = "button preview-project-answer-submit";
+    submitAnswerButton.textContent = project.assignment_status === "complete" ? "Completed" : "Submit project answer";
+    submitAnswerButton.disabled = requestInFlight || project.assignment_status === "complete" || !answerInput.value.trim();
+    submitAnswerButton.dataset.completed = project.assignment_status === "complete" ? "true" : "false";
+    submitAnswerButton.addEventListener("click", async () => {
+      const answer = String(answerInput.value || "").trim();
+      if (!answer) {
+        return;
+      }
+      projectAnswerDraftsById[String(project.id)] = "";
+      await postPreviewAction(
+        "project_submit",
+        { project_id: project.id, answer },
+        { focusComposer: true, minDurationMs: 600, scrollMode: "bottom" },
+      );
+    });
+    answerRow.append(answerInput, submitAnswerButton);
+    wrapper.appendChild(answerRow);
+
+    const helper = document.createElement("p");
+    helper.className = "preview-message-sources";
+    helper.textContent = project.assignment_status === "complete"
+      ? "This project is complete. You can still revisit the transcript and downloads."
+      : (project.hints_remaining > 0
+        ? `${project.hints_remaining} guided hint${project.hints_remaining === 1 ? "" : "s"} remaining.`
+        : "You can still ask for a nudge in the chat box below.");
+    wrapper.appendChild(helper);
+
+    projectPanel.appendChild(wrapper);
+  }
+
   function appendMetricMessage(metricKey, scope, blockId = "") {
     const block = scope === "block" ? findBlock(blockId) : currentBlock();
     if (!block || !metricKey) {
@@ -2177,11 +2377,14 @@ if (previewRoot && previewDataNode) {
     closeObjectiveMenus();
     activeBlockId = String(block.id);
     persistActiveBlockId(activeBlockId);
+    const project = currentProject(block);
     if (activeBlockTitle) {
-      activeBlockTitle.textContent = block.title;
+      activeBlockTitle.textContent = project ? `${block.title} · ${project.title}` : block.title;
     }
     renderCourseMetrics();
     renderBlockSwitcher();
+    renderProjectSwitcher();
+    renderProjectPanel();
     renderTranscript(scrollMode);
     if (flagSheetState) {
       const sheetBlock = currentFlagSheetBlock();
@@ -2355,6 +2558,35 @@ if (previewRoot && previewDataNode) {
       return;
     }
     const trimmed = input.value.trim();
+    const activeProject = currentProject();
+    if (activeProject) {
+      if (trimmed) {
+        input.value = "";
+        resizeComposerInput();
+        syncComposerState();
+        updateComposerClearance();
+      }
+      const block = currentBlock();
+      if (block) {
+        setOptimisticUserMessage(block.id, trimmed || "Hint");
+        setQuizLoading(block.id, true);
+        renderTranscript();
+      }
+      try {
+        await postPreviewAction(
+          "project_chat",
+          { project_id: activeProject.id, message: trimmed },
+          { focusComposer: true, minDurationMs: 600, scrollMode: "bottom" },
+        );
+      } finally {
+        if (block) {
+          setOptimisticUserMessage(block.id, "");
+          setQuizLoading(block.id, false);
+          renderTranscript();
+        }
+      }
+      return;
+    }
     const activeWaq = pendingWrittenQuestion();
     if (activeWaq) {
       if (!trimmed) {

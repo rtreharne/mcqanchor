@@ -5,6 +5,7 @@ from django.http import HttpResponse
 
 from standalone.models import (
     BlockConfig,
+    BlockProject,
     ContentAsset,
     ContentChunk,
     Course,
@@ -19,6 +20,10 @@ from standalone.models import (
     PracticeAttempt,
     PracticeAttemptQuestion,
     PracticeMessage,
+    ProjectArtifact,
+    ProjectAssignment,
+    ProjectMessage,
+    ProjectSubmission,
     QuestionBankItem,
     StudentInvitation,
     StudentProfile,
@@ -71,6 +76,7 @@ admin.site.register(CourseAllowedEmail)
 admin.site.register(CourseMagicLink)
 admin.site.register(CourseBlock)
 admin.site.register(BlockConfig)
+admin.site.register(BlockProject)
 admin.site.register(ContentAsset)
 admin.site.register(ContentChunk)
 admin.site.register(LearningObjective)
@@ -81,6 +87,10 @@ admin.site.register(ValidationSubmission)
 admin.site.register(NotificationLog)
 admin.site.register(PracticeAttemptQuestion)
 admin.site.register(PracticeMessage)
+admin.site.register(ProjectArtifact)
+admin.site.register(ProjectAssignment)
+admin.site.register(ProjectMessage)
+admin.site.register(ProjectSubmission)
 
 
 @admin.register(Enrollment)

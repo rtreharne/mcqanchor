@@ -159,7 +159,7 @@ def serialize_demo_preview_state(access: CourseDemoAccess, *, active_block_id=No
     with _demo_access_lock(access.pk):
         locked_access = CourseDemoAccess.objects.select_related("course").get(pk=access.pk)
         request = _demo_request(locked_access)
-        payload = serialize_preview_state(request, locked_access.course, active_block_id=active_block_id)
+        payload = serialize_preview_state(request, locked_access.course, active_block_id=active_block_id, include_projects=False)
         _persist_demo_states(locked_access, request)
     return payload
 
@@ -184,6 +184,8 @@ def request_demo_preview_quiz(
                 preferred_objective_id=preferred_objective_id,
                 force_new=force_new,
             )
+            for payload_block in payload.get("blocks", []):
+                payload_block["projects"] = []
             _persist_demo_states(locked_access, request)
     return payload
 
@@ -201,6 +203,8 @@ def submit_demo_preview_answer(access: CourseDemoAccess, block, question_id: int
                 selected_answers or [],
                 answer_text=answer_text,
             )
+            for payload_block in payload.get("blocks", []):
+                payload_block["projects"] = []
             _persist_demo_states(locked_access, request)
     return payload
 
@@ -221,6 +225,8 @@ def send_demo_preview_chat_message(access: CourseDemoAccess, block, question: st
             locked_access = CourseDemoAccess.objects.select_for_update().select_related("course").get(pk=access.pk)
             request = _demo_request(locked_access)
             payload = send_preview_chat_message(request, locked_access.course, block, question)
+            for payload_block in payload.get("blocks", []):
+                payload_block["projects"] = []
             _persist_demo_states(locked_access, request)
     return payload
 

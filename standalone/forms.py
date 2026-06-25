@@ -1,4 +1,5 @@
 from datetime import timedelta
+import json
 
 from django import forms
 from django.conf import settings
@@ -7,6 +8,7 @@ from django.utils.text import slugify
 
 from standalone.models import (
     BlockConfig,
+    BlockProject,
     ContentAsset,
     Course,
     CourseAllowedEmail,
@@ -512,6 +514,117 @@ class BlockConfigTargetQuestionCountInlineForm(forms.ModelForm):
         if value < 1:
             raise forms.ValidationError("Target question count must be at least 1.")
         return value
+
+
+class BlockProjectCreateForm(forms.ModelForm):
+    class Meta:
+        model = BlockProject
+        fields = ["teacher_prompt", "example_text"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["teacher_prompt"].label = "Teacher prompt"
+        self.fields["teacher_prompt"].widget = forms.Textarea(
+            attrs={
+                "rows": 5,
+                "placeholder": "Describe the mini-project you want students to complete.",
+            }
+        )
+        self.fields["example_text"].label = "Example text"
+        self.fields["example_text"].required = False
+        self.fields["example_text"].widget = forms.Textarea(
+            attrs={
+                "rows": 4,
+                "placeholder": "Optional example project wording or scaffold.",
+            }
+        )
+
+    def clean_teacher_prompt(self):
+        prompt = (self.cleaned_data.get("teacher_prompt") or "").strip()
+        if not prompt:
+            raise forms.ValidationError("Add a teacher prompt first.")
+        return prompt
+
+
+class BlockProjectEditForm(forms.ModelForm):
+    spec_json_text = forms.CharField(widget=forms.Textarea(attrs={"rows": 8}), label="Engine parameters (JSON)")
+    hint_plan_json_text = forms.CharField(widget=forms.Textarea(attrs={"rows": 7}), label="Hint plan (JSON)")
+
+    class Meta:
+        model = BlockProject
+        fields = [
+            "title",
+            "teacher_prompt",
+            "example_text",
+            "student_instructions",
+            "answer_label",
+            "answer_unit",
+            "decimal_places",
+        ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["title"].help_text = "Student-facing project title."
+        self.fields["teacher_prompt"].widget = forms.Textarea(attrs={"rows": 4})
+        self.fields["example_text"].required = False
+        self.fields["example_text"].widget = forms.Textarea(attrs={"rows": 3})
+        self.fields["student_instructions"].widget = forms.Textarea(attrs={"rows": 6})
+        self.fields["answer_unit"].required = False
+        self.fields["spec_json_text"].initial = json.dumps(self.instance.spec_json or {}, indent=2, sort_keys=True)
+        self.fields["hint_plan_json_text"].initial = json.dumps(self.instance.hint_plan_json or {}, indent=2, sort_keys=True)
+
+    def clean_title(self):
+        title = (self.cleaned_data.get("title") or "").strip()
+        if not title:
+            raise forms.ValidationError("Add a project title first.")
+        return title
+
+    def clean_answer_unit(self):
+        return (self.cleaned_data.get("answer_unit") or "").strip()
+
+    def clean_teacher_prompt(self):
+        prompt = (self.cleaned_data.get("teacher_prompt") or "").strip()
+        if not prompt:
+            raise forms.ValidationError("Add a teacher prompt first.")
+        return prompt
+
+    def clean_student_instructions(self):
+        instructions = (self.cleaned_data.get("student_instructions") or "").strip()
+        if not instructions:
+            raise forms.ValidationError("Add student-facing instructions before publishing.")
+        return instructions
+
+    def clean_spec_json_text(self):
+        value = (self.cleaned_data.get("spec_json_text") or "").strip()
+        if not value:
+            raise forms.ValidationError("Add engine parameters JSON first.")
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise forms.ValidationError("Enter valid JSON for the engine parameters.") from exc
+        if not isinstance(parsed, dict):
+            raise forms.ValidationError("Engine parameters must be a JSON object.")
+        return parsed
+
+    def clean_hint_plan_json_text(self):
+        value = (self.cleaned_data.get("hint_plan_json_text") or "").strip()
+        if not value:
+            return {}
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise forms.ValidationError("Enter valid JSON for the hint plan.") from exc
+        if not isinstance(parsed, dict):
+            raise forms.ValidationError("Hint plan must be a JSON object.")
+        return parsed
+
+    def save(self, commit=True):
+        project = super().save(commit=False)
+        project.spec_json = self.cleaned_data["spec_json_text"]
+        project.hint_plan_json = self.cleaned_data["hint_plan_json_text"]
+        if commit:
+            project.save()
+        return project
 
 
 class LearningObjectiveInlineForm(forms.ModelForm):

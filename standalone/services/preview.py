@@ -27,6 +27,7 @@ from standalone.services.questions import (
     preferred_coding_language_for_block,
     question_quality_sort_key,
 )
+from standalone.services.projects import serialize_projects_for_blocks
 
 
 PREVIEW_SESSION_KEY = "standalone_student_preview"
@@ -1770,10 +1771,16 @@ def _serialized_transcript(course_state: dict, transcript: list[dict]) -> list[d
     return serialized_messages
 
 
-def serialize_preview_state(request, course: Course, *, active_block_id=None) -> dict:
+def serialize_preview_state(request, course: Course, *, active_block_id=None, project_enrollment=None, include_projects: bool = True) -> dict:
     course_state = _course_state(request, course)
     blocks = _preview_blocks(course)
     active_block_id = active_block_id or (_first_active_block(course).pk if blocks else None)
+    project_map = serialize_projects_for_blocks(
+        blocks,
+        request=request,
+        enrollment=project_enrollment,
+        include_projects=include_projects,
+    )
     serialized_blocks = []
     pending_questions = course_state.get("pending_questions", {})
     for block in blocks:
@@ -1808,6 +1815,7 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None) ->
                 "has_pending_question": bool(pending_questions.get(str(block.pk))),
                 "transcript": _serialized_transcript(course_state, transcript),
                 "metrics": block_metrics,
+                "projects": project_map.get(block.pk, []),
             }
         )
     request.session.modified = True

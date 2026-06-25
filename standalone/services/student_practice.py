@@ -372,7 +372,7 @@ def _inject_validation_reminders(payload: dict, enrollment: Enrollment) -> dict:
 def serialize_student_practice_state(enrollment: Enrollment, *, active_block_id=None) -> dict:
     course_state = _student_course_state(enrollment)
     request = _fake_request(enrollment.course, course_state)
-    payload = serialize_preview_state(request, enrollment.course, active_block_id=active_block_id)
+    payload = serialize_preview_state(request, enrollment.course, active_block_id=active_block_id, project_enrollment=enrollment)
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course), refresh_metrics=False)
     return _inject_validation_reminders(payload, enrollment)
 

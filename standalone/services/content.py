@@ -497,6 +497,31 @@ def delete_block_and_resequence(block) -> None:
     course.save(update_fields=["summary", "updated_at"])
 
 
+@transaction.atomic
+def move_course_block(block, direction: str) -> bool:
+    blocks = list(block.course.blocks.order_by("order", "created_at", "pk"))
+    try:
+        current_index = next(index for index, item in enumerate(blocks) if item.pk == block.pk)
+    except StopIteration:
+        return False
+
+    if direction == "up" and current_index > 0:
+        swap_index = current_index - 1
+    elif direction == "down" and current_index < len(blocks) - 1:
+        swap_index = current_index + 1
+    else:
+        return False
+
+    blocks[current_index], blocks[swap_index] = blocks[swap_index], blocks[current_index]
+    for index, reordered_block in enumerate(blocks, start=1):
+        reordered_block.order = index
+    type(blocks[0]).objects.bulk_update(blocks, ["order"])
+
+    for reordered_block in blocks:
+        resequence_learning_objectives(reordered_block)
+    return True
+
+
 def _replace_block_objectives(block, source_asset: ContentAsset, objective_texts: list[str]) -> int:
     existing = list(block.learning_objectives.order_by("position", "pk"))
     created_or_updated = 0

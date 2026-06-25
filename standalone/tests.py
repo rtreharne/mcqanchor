@@ -4,6 +4,7 @@ import json
 import re
 import tempfile
 
+from bs4 import BeautifulSoup
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.management import call_command
@@ -17,6 +18,7 @@ from unittest.mock import patch
 from standalone.forms import BlockConfigForm, CourseForm, ValidationEventForm
 from standalone.models import (
     BlockConfig,
+    BlockProject,
     ContentAsset,
     ContentChunk,
     Course,
@@ -35,6 +37,9 @@ from standalone.models import (
     PracticeAttempt,
     PracticeAttemptQuestion,
     PracticeMessage,
+    ProjectAssignment,
+    ProjectMessage,
+    ProjectSubmission,
     QuestionBankItem,
     QuestionFlag,
     StudentInvitation,
@@ -56,6 +61,7 @@ from standalone.services.numeric_questions import (
     _validate_numeric_candidate,
     normalize_numeric_answer_text,
 )
+from standalone.services.projects import ensure_project_assignment
 from standalone.services.validation_flow import _pick_locked_questions, current_room_code, select_stratified_validation_questions
 from standalone.services.questions import (
     QuestionGenerationError,
@@ -169,6 +175,114 @@ class StandaloneFlowTests(TestCase):
             checksum="coding-chunk",
         )
         return block, asset, objective, chunk
+
+    def create_seeded_script_project(self, block, *, title="Seeded script project"):
+        return BlockProject.objects.create(
+            block=block,
+            title=title,
+            status=BlockProject.Status.PUBLISHED,
+            engine_type=BlockProject.EngineType.SEEDED_SCRIPT_OUTPUT,
+            teacher_prompt="Generate a deterministic seeded script project.",
+            student_instructions="Run the deterministic starter script and enter the printed value to 4 decimal places.",
+            answer_label="Script output",
+            answer_unit="",
+            decimal_places=4,
+            spec_json={
+                "filename_template": "seeded_project_{seed}.R",
+                "language": "r",
+                "steps": [
+                    {"kind": "lcg_random", "name": "random_number", "decimals": 4},
+                    {"kind": "expression", "name": "final_answer", "expression": "random_number"},
+                ],
+                "output_name": "final_answer",
+            },
+            hint_plan_json={
+                "intro": "Use the provided starter script and work through it step by step.",
+                "hints": [
+                    "Start by checking the seeded value shown in the script.",
+                    "The final printed value is the one you should submit.",
+                ],
+                "wrong_unit": "",
+                "wrong_precision": "Round the printed value to 4 decimal places.",
+                "wrong_value": "Re-run the seeded script and compare the printed value carefully.",
+                "completion": "Project complete.",
+            },
+            generation_status=BlockProject.GenerationStatus.READY,
+        )
+
+    def create_tabular_project(self, block, *, title="Tabular project"):
+        return BlockProject.objects.create(
+            block=block,
+            title=title,
+            status=BlockProject.Status.PUBLISHED,
+            engine_type=BlockProject.EngineType.TABULAR_ANALYSIS,
+            teacher_prompt="Generate a deterministic tabular analysis project.",
+            student_instructions="Download the dataset, fit the relationship, and submit the converted prediction in cm3 to 1 decimal place.",
+            answer_label="Predicted volume",
+            answer_unit="cm3",
+            decimal_places=1,
+            spec_json={
+                "dataset": {
+                    "filename_template": "snails_{seed}.csv",
+                    "row_count": 2,
+                    "columns": [
+                        {
+                            "name": "Mass (g)",
+                            "alias": "mass_g",
+                            "generator": {"kind": "sequence", "start": 1, "step": 1, "decimals": 0},
+                        }
+                    ],
+                },
+                "operations": [
+                    {
+                        "kind": "derive_column",
+                        "name": "Volume V (mm3)",
+                        "alias": "volume_mm3",
+                        "expression": "mass_g * 1000",
+                        "decimals": 0,
+                    },
+                    {
+                        "kind": "linear_regression",
+                        "x_alias": "mass_g",
+                        "y_alias": "volume_mm3",
+                        "slope_name": "slope",
+                        "intercept_name": "intercept",
+                    },
+                    {
+                        "kind": "predict_linear",
+                        "slope_name": "slope",
+                        "intercept_name": "intercept",
+                        "x_value": 1,
+                        "output_name": "predicted_volume_mm3",
+                    },
+                    {
+                        "kind": "convert_unit",
+                        "input_name": "predicted_volume_mm3",
+                        "factor": 0.001,
+                        "output_name": "predicted_volume_cm3",
+                    },
+                    {
+                        "kind": "round",
+                        "input_name": "predicted_volume_cm3",
+                        "decimal_places": 1,
+                        "output_name": "final_answer",
+                    },
+                ],
+                "final_answer_name": "final_answer",
+            },
+            hint_plan_json={
+                "intro": "Download the dataset and follow the instructions carefully.",
+                "hints": [
+                    "The dataset has only two rows in this test fixture, so the line is exact.",
+                    "Convert the predicted volume from mm3 into cm3 before submitting.",
+                ],
+                "wrong_unit": "Convert the predicted value into cm3 before submitting it.",
+                "wrong_precision": "Round the converted value to 1 decimal place.",
+                "wrong_value": "Recheck the linear prediction before converting the unit.",
+                "completion": "Project complete.",
+            },
+            generation_status=BlockProject.GenerationStatus.READY,
+        )
 
     def build_pdf_upload(self, pages, filename="book.pdf"):
         from reportlab.pdfgen import canvas
@@ -1546,6 +1660,8 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, 'action="%s"' % reverse("standalone:move_learning_objective", args=[objective.pk, "up"]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:move_learning_objective", args=[objective.pk, "down"]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:delete_learning_objective", args=[objective.pk]), html=False)
+        self.assertContains(response, 'action="%s"' % reverse("standalone:move_block", args=[block.pk, "up"]), html=False)
+        self.assertContains(response, 'action="%s"' % reverse("standalone:move_block", args=[block.pk, "down"]), html=False)
         self.assertContains(response, "Delete this learning objective? This will re-number the remaining objectives.")
         self.assertLess(response.content.decode("utf-8").find("Learning objectives"), response.content.decode("utf-8").find("Uploads"))
 
@@ -2177,6 +2293,59 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(trailing_block.learning_objectives.get().code, "2.1")
         course.refresh_from_db()
         self.assertTrue(course.summary)
+
+    def test_block_can_move_down_and_resequence_learning_objective_codes(self):
+        course = self.create_course()
+        first_block = CourseBlock.objects.create(course=course, title="Week 1", summary="First.", order=1)
+        second_block = CourseBlock.objects.create(course=course, title="Week 2", summary="Second.", order=2)
+        asset = ContentAsset.objects.create(
+            block=first_block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile("week1.txt", b"Week 1 notes", content_type="text/plain"),
+            original_filename="week1.txt",
+            extension=".txt",
+            include_in_generation=True,
+            processing_status=ContentAsset.ProcessingStatus.PROCESSED,
+            extracted_text="Explain week one.",
+        )
+        objective = LearningObjective.objects.create(
+            course=course,
+            block=first_block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Explain week one",
+        )
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(reverse("standalone:move_block", args=[first_block.pk, "down"]), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        first_block.refresh_from_db()
+        second_block.refresh_from_db()
+        objective.refresh_from_db()
+        self.assertEqual(first_block.order, 2)
+        self.assertEqual(second_block.order, 1)
+        self.assertEqual(objective.code, "2.1")
+        block_titles = [
+            element.get_text(" ", strip=True)
+            for element in BeautifulSoup(response.content, "html.parser").select(".course-block-card .course-block-title")
+        ]
+        self.assertEqual(block_titles[:2], ["Week 2", "Week 1"])
+
+    def test_block_move_stops_at_top_without_reordering(self):
+        course = self.create_course()
+        first_block = CourseBlock.objects.create(course=course, title="Week 1", summary="First.", order=1)
+        second_block = CourseBlock.objects.create(course=course, title="Week 2", summary="Second.", order=2)
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(reverse("standalone:move_block", args=[first_block.pk, "up"]), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        first_block.refresh_from_db()
+        second_block.refresh_from_db()
+        self.assertEqual(first_block.order, 1)
+        self.assertEqual(second_block.order, 2)
 
     def test_self_enrol_requires_allowlist_and_domain(self):
         course = self.create_course()
@@ -9623,6 +9792,7 @@ print(result)""",
                 )
                 self.assertEqual(next_response.status_code, 200)
                 alpha_state = next_response.json()["session"]
+
                 continue
             pending = alpha_state.get("pending_question")
             self.assertIsNotNone(pending)
@@ -9686,6 +9856,167 @@ print(result)""",
             f"{reverse('standalone:demo_practice', args=[access.token])}?embed=1",
             html=False,
         )
+
+    def test_course_detail_renders_block_project_authoring_controls(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+
+        self.client.force_login(self.teacher)
+        response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
+
+        self.assertContains(response, "Projects")
+        self.assertContains(response, reverse("standalone:block_project_create", args=[block.pk]), html=False)
+        self.assertContains(response, "Generate project draft")
+
+    def test_project_assignment_seed_and_artifacts_are_stable(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+        project = self.create_seeded_script_project(block)
+        enrollment = Enrollment.objects.create(course=course, student=self.student, status=Enrollment.Status.ACTIVE)
+
+        first_assignment = ensure_project_assignment(enrollment, project)
+        second_assignment = ensure_project_assignment(enrollment, project)
+
+        self.assertEqual(first_assignment.pk, second_assignment.pk)
+        self.assertEqual(first_assignment.seed, second_assignment.seed)
+        self.assertEqual(first_assignment.artifacts.count(), 1)
+        self.assertTrue(first_assignment.expected_answer_display)
+        self.assertTrue(first_assignment.messages.filter(kind="project_intro").exists())
+
+    def test_project_numeric_submission_accepts_unit_conversion(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+        project = self.create_tabular_project(block)
+        enrollment = Enrollment.objects.create(course=course, student=self.student, status=Enrollment.Status.ACTIVE)
+
+        assignment = ensure_project_assignment(enrollment, project)
+        self.assertEqual(assignment.expected_answer_display, "1.0 cm3")
+
+        self.client.force_login(self.student)
+        open_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "project_open"]),
+            data=json.dumps({"project_id": project.pk}),
+            content_type="application/json",
+        )
+        self.assertEqual(open_response.status_code, 200)
+
+        submit_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "project_submit"]),
+            data=json.dumps({"project_id": project.pk, "answer": "1000 mm3"}),
+            content_type="application/json",
+        )
+        self.assertEqual(submit_response.status_code, 200)
+
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.status, ProjectAssignment.Status.COMPLETE)
+        self.assertEqual(assignment.latest_normalized_answer, "1.0")
+        self.assertEqual(ProjectSubmission.objects.filter(assignment=assignment, is_correct=True).count(), 1)
+
+    def test_published_project_becomes_immutable_after_assignments_exist(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+        project = self.create_seeded_script_project(block, title="Original title")
+        enrollment = Enrollment.objects.create(course=course, student=self.student, status=Enrollment.Status.ACTIVE)
+        ensure_project_assignment(enrollment, project)
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(
+            reverse("standalone:block_project_update", args=[project.pk]),
+            data={
+                f"project-{project.pk}-title": "Changed title",
+                f"project-{project.pk}-teacher_prompt": project.teacher_prompt,
+                f"project-{project.pk}-example_text": project.example_text,
+                f"project-{project.pk}-student_instructions": project.student_instructions,
+                f"project-{project.pk}-answer_label": project.answer_label,
+                f"project-{project.pk}-answer_unit": project.answer_unit,
+                f"project-{project.pk}-decimal_places": project.decimal_places,
+                f"project-{project.pk}-spec_json_text": json.dumps(project.spec_json),
+                f"project-{project.pk}-hint_plan_json_text": json.dumps(project.hint_plan_json),
+            },
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        project.refresh_from_db()
+        self.assertEqual(project.title, "Original title")
+
+    def test_student_practice_project_flow_persists_messages_and_completion(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+        project = self.create_seeded_script_project(block, title="Deterministic R output")
+        Enrollment.objects.create(course=course, student=self.student, status=Enrollment.Status.ACTIVE)
+
+        self.client.force_login(self.student)
+        page = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
+        self.assertContains(page, "Deterministic R output")
+
+        open_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "project_open"]),
+            data=json.dumps({"project_id": project.pk}),
+            content_type="application/json",
+        )
+        self.assertEqual(open_response.status_code, 200)
+
+        assignment = ProjectAssignment.objects.get(block_project=project)
+        self.assertEqual(assignment.messages.count(), 1)
+
+        hint_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "project_chat"]),
+            data=json.dumps({"project_id": project.pk, "message": "I need a hint"}),
+            content_type="application/json",
+        )
+        self.assertEqual(hint_response.status_code, 200)
+
+        answer_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "project_submit"]),
+            data=json.dumps({"project_id": project.pk, "answer": assignment.expected_answer_display}),
+            content_type="application/json",
+        )
+        self.assertEqual(answer_response.status_code, 200)
+
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.status, ProjectAssignment.Status.COMPLETE)
+        self.assertGreaterEqual(ProjectMessage.objects.filter(assignment=assignment).count(), 4)
+        self.assertEqual(ProjectSubmission.objects.filter(assignment=assignment).count(), 1)
+
+    def test_teacher_preview_project_flow_is_session_backed(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+        project = self.create_seeded_script_project(block, title="Preview-only project")
+
+        self.client.force_login(self.teacher)
+        open_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "project_open"]),
+            data=json.dumps({"project_id": project.pk}),
+            content_type="application/json",
+        )
+        self.assertEqual(open_response.status_code, 200)
+        block_payload = next(item for item in open_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        project_payload = next(item for item in block_payload["projects"] if item["id"] == project.pk)
+
+        self.assertTrue(project_payload["materialized"])
+        self.assertEqual(ProjectAssignment.objects.count(), 0)
+
+        submit_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "project_submit"]),
+            data=json.dumps({"project_id": project.pk, "answer": project_payload["expected_display_answer"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(submit_response.status_code, 200)
+        self.assertEqual(ProjectAssignment.objects.count(), 0)
+
+    def test_demo_mode_does_not_expose_block_projects(self):
+        course = self.create_course()
+        course.config.demo_enabled = True
+        course.config.save(update_fields=["demo_enabled", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+        self.create_seeded_script_project(block, title="Hidden demo project")
+
+        response = self.client.get(reverse("standalone:demo_practice", args=[access.token]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Hidden demo project")
 
     def test_public_demo_embed_respects_allowed_origins(self):
         course = self.create_course()

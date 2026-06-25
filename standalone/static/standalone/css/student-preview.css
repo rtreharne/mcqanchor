@@ -892,6 +892,17 @@ body {
   gap: 0.45rem;
 }
 
+.preview-project-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.preview-project-switcher[hidden],
+.preview-project-panel[hidden] {
+  display: none !important;
+}
+
 .preview-header-action {
   min-height: 1.9rem;
   padding: 0.25rem 0.7rem;
@@ -912,6 +923,12 @@ body {
   background: rgba(228, 241, 255, 0.92);
   color: var(--ink);
   outline: none;
+}
+
+.preview-header-action.is-active {
+  border-color: rgba(46, 190, 169, 0.28);
+  background: rgba(233, 251, 246, 0.96);
+  color: #0f5f73;
 }
 
 .preview-chat-transcript {
@@ -2356,6 +2373,22 @@ body {
 
 .preview-chat-composer .button[type="submit"] {
   min-width: 5rem;
+}
+
+.preview-project-answer-input {
+  min-width: 0;
+  min-height: 2.65rem;
+  padding: 0.78rem 1rem 0.82rem;
+  border: 1px solid rgba(21, 91, 200, 0.12);
+  border-radius: 1.35rem;
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--ink);
+  font: inherit;
+}
+
+.preview-project-answer-input:focus-visible {
+  outline: 2px solid rgba(46, 190, 169, 0.28);
+  outline-offset: 1px;
 }
 
 .validation-next-row {

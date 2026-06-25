@@ -1,5 +1,7 @@
 import json
+import csv
 from datetime import timedelta
+from pathlib import Path
 import re
 from threading import Thread
 from urllib.parse import quote, urlencode, urlsplit
@@ -23,6 +25,8 @@ from standalone.forms import (
     BlockAvailableFromInlineForm,
     BlockConfigForm,
     BlockConfigTargetQuestionCountInlineForm,
+    BlockProjectCreateForm,
+    BlockProjectEditForm,
     BlockSummaryInlineForm,
     BlockTitleInlineForm,
     ContentAssetForm,
@@ -48,6 +52,7 @@ from standalone.forms import (
 )
 from standalone.models import (
     BlockConfig,
+    BlockProject,
     ContentAsset,
     Course,
     CourseAllowedEmail,
@@ -62,6 +67,8 @@ from standalone.models import (
     PracticeAttempt,
     PracticeAttemptQuestion,
     QuestionBankItem,
+    ProjectArtifact,
+    ProjectAssignment,
     StudentInvitation,
     StudentProfile,
     TeacherInvitation,
@@ -75,6 +82,7 @@ from standalone.models import (
 from standalone.services.content import (
     delete_block_and_resequence,
     delete_learning_objective_and_resequence,
+    move_course_block,
     move_learning_objective,
     regenerate_block_descriptions_and_objectives,
     regenerate_course_descriptions_and_objectives,
@@ -108,6 +116,22 @@ from standalone.services.preview import (
     send_preview_chat_message,
     serialize_preview_state,
     submit_preview_answer,
+)
+from standalone.services.projects import (
+    ProjectAuthoringError,
+    ProjectImmutableError,
+    ProjectSpecError,
+    archive_block_project,
+    build_project_results_rows,
+    generate_block_project_draft,
+    open_preview_project,
+    open_student_project,
+    publish_block_project,
+    send_preview_project_message,
+    send_student_project_message,
+    submit_preview_project_answer,
+    submit_student_project_answer,
+    validate_block_project_spec,
 )
 from standalone.services.preview_validation import (
     confirm_preview_student_validate,
@@ -271,6 +295,12 @@ def _teacher_block_or_404(user: User, block_id: int) -> CourseBlock:
     block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id)
     _teacher_course_or_404(user, block.course_id)
     return block
+
+
+def _teacher_project_or_404(user: User, project_id: int) -> BlockProject:
+    project = get_object_or_404(BlockProject.objects.select_related("block__course"), pk=project_id)
+    _teacher_course_or_404(user, project.block.course_id)
+    return project
 
 
 def _student_enrollment_or_404(user: User, course_id: int) -> Enrollment:
@@ -548,7 +578,13 @@ def _course_detail_context(course: Course, *, request: HttpRequest | None = None
                 distinct=True,
             ),
         )
-        .prefetch_related("assets", "learning_objectives", "learning_objectives__corrections__created_by")
+        .order_by("order", "created_at", "pk")
+        .prefetch_related(
+            "assets",
+            "learning_objectives",
+            "learning_objectives__corrections__created_by",
+            "projects__assignments",
+        )
     )
     _attach_course_practice_average(course)
     magic_links = list(course.magic_links.all())
@@ -563,6 +599,12 @@ def _course_detail_context(course: Course, *, request: HttpRequest | None = None
         except BlockConfig.DoesNotExist:
             block_config = BlockConfig(block=block, target_question_count=block.preview_target_question_count)
         block.block_config_form = BlockConfigForm(instance=block_config, prefix=f"block-{block.pk}")
+        block.project_create_form = BlockProjectCreateForm(prefix=f"project-create-{block.pk}")
+        block.projects_for_course_detail = []
+        for project in block.projects.all():
+            project.edit_form = BlockProjectEditForm(instance=project, prefix=f"project-{project.pk}")
+            project.assignment_count = project.assignments.count()
+            block.projects_for_course_detail.append(project)
         return_to = f"{reverse('standalone:course_detail', args=[course.pk])}#assets-content-{block.pk}"
         block.upload_url = f"{reverse('standalone:asset_upload', args=[block.pk])}?next={quote(return_to, safe='/:?=&')}"
 
@@ -1085,6 +1127,179 @@ def _block_config_form_payload(config: BlockConfig, field_overrides: dict[str, o
     return payload
 
 
+def _course_detail_anchor_url(course: Course, anchor: str = "") -> str:
+    url = reverse("standalone:course_detail", args=[course.pk])
+    return f"{url}#{anchor}" if anchor else url
+
+
+@login_required
+def block_project_create(request: HttpRequest, block_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    block = _teacher_block_or_404(request.user, block_id)
+    form = BlockProjectCreateForm(request.POST)
+    if not form.is_valid():
+        context = _course_detail_context(block.course, request=request)
+        for context_block in context["blocks"]:
+            if context_block.pk == block.pk:
+                context_block.project_create_form = form
+        return render(request, "standalone/course_detail.html", context, status=400)
+
+    project = BlockProject.objects.create(
+        block=block,
+        title="Draft project",
+        teacher_prompt=form.cleaned_data["teacher_prompt"],
+        example_text=form.cleaned_data.get("example_text", ""),
+        generation_status=BlockProject.GenerationStatus.IDLE,
+    )
+    try:
+        generate_block_project_draft(project)
+        messages.success(request, f"Created project draft for {block.title}.")
+    except (ProjectAuthoringError, ProjectSpecError) as exc:
+        project.generation_status = BlockProject.GenerationStatus.FAILED
+        project.generation_error = str(exc)
+        project.save(update_fields=["generation_status", "generation_error", "updated_at"])
+        messages.error(request, str(exc))
+    return redirect(_course_detail_anchor_url(block.course, f"project-{project.pk}"))
+
+
+@login_required
+def block_project_update(request: HttpRequest, project_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    project = _teacher_project_or_404(request.user, project_id)
+    if project.is_locked:
+        messages.error(request, "This published project already has student assignments, so it is now immutable.")
+        return redirect(_course_detail_anchor_url(project.block.course, f"project-{project.pk}"))
+
+    form = BlockProjectEditForm(request.POST, instance=project, prefix=f"project-{project.pk}")
+    if not form.is_valid():
+        context = _course_detail_context(project.block.course, request=request)
+        for context_block in context["blocks"]:
+            for context_project in getattr(context_block, "projects_for_course_detail", []):
+                if context_project.pk == project.pk:
+                    context_project.edit_form = form
+        return render(request, "standalone/course_detail.html", context, status=400)
+
+    updated_project = form.save()
+    try:
+        validate_block_project_spec(updated_project)
+    except ProjectSpecError as exc:
+        updated_project.generation_error = str(exc)
+        updated_project.generation_status = BlockProject.GenerationStatus.FAILED
+        updated_project.save(update_fields=["generation_error", "generation_status", "updated_at"])
+        messages.error(request, str(exc))
+        return redirect(_course_detail_anchor_url(project.block.course, f"project-{project.pk}"))
+
+    updated_project.generation_status = BlockProject.GenerationStatus.READY
+    updated_project.generation_error = ""
+    updated_project.save(update_fields=["generation_status", "generation_error", "updated_at"])
+    messages.success(request, "Project draft updated.")
+    return redirect(_course_detail_anchor_url(project.block.course, f"project-{project.pk}"))
+
+
+@login_required
+def block_project_publish(request: HttpRequest, project_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    project = _teacher_project_or_404(request.user, project_id)
+    try:
+        publish_block_project(project)
+    except (ProjectSpecError, ProjectImmutableError) as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, f"Published project: {project.title}.")
+    return redirect(_course_detail_anchor_url(project.block.course, f"project-{project.pk}"))
+
+
+@login_required
+def block_project_archive_view(request: HttpRequest, project_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    project = _teacher_project_or_404(request.user, project_id)
+    archive_block_project(project)
+    messages.success(request, f"Archived project: {project.title}.")
+    return redirect(_course_detail_anchor_url(project.block.course, f"project-{project.pk}"))
+
+
+@login_required
+def block_project_results_export(request: HttpRequest, block_id: int) -> HttpResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    block = _teacher_block_or_404(request.user, block_id)
+    response = HttpResponse(content_type="text/csv")
+    response["Content-Disposition"] = f'attachment; filename="block-{block.pk}-project-results.csv"'
+    writer = csv.writer(response)
+    writer.writerow(
+        [
+            "course",
+            "block",
+            "project",
+            "student",
+            "seed",
+            "status",
+            "completed_at",
+            "submission_count",
+            "latest_submitted_answer",
+            "expected_display_answer",
+        ]
+    )
+    for row in build_project_results_rows(block):
+        writer.writerow(
+            [
+                row["course"],
+                row["block"],
+                row["project"],
+                row["student"],
+                row["seed"],
+                row["status"],
+                row["completed_at"],
+                row["submission_count"],
+                row["latest_submitted_answer"],
+                row["expected_display_answer"],
+            ]
+        )
+    return response
+
+
+@login_required
+def block_project_preview_artifact_download(request: HttpRequest, project_id: int, artifact_key: str) -> HttpResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    project = _teacher_project_or_404(request.user, project_id)
+    open_preview_project(request, project, viewer_identifier=f"teacher:{request.user.pk}")
+
+    from standalone.services.projects import materialize_project_instance  # local import keeps startup surface small
+
+    project_state = request.session.get("standalone_project_preview", {}).get(str(project.block.course_id), {}).get(str(project.pk), {})
+    materialized = materialize_project_instance(project, project_state.get("seed"))
+    artifact = next((item for item in materialized["artifacts"] if item["key"] == artifact_key), None)
+    if artifact is None:
+        raise Http404
+    response = HttpResponse(
+        artifact["content"],
+        content_type=artifact.get("metadata", {}).get("content_type", "application/octet-stream"),
+    )
+    response["Content-Disposition"] = f'attachment; filename="{Path(artifact["filename"]).name}"'
+    return response
+
+
+@login_required
+def project_artifact_download(request: HttpRequest, artifact_id: int) -> HttpResponse:
+    artifact = get_object_or_404(
+        ProjectArtifact.objects.select_related("assignment__enrollment__student", "assignment__block_project__block__course"),
+        pk=artifact_id,
+    )
+    if _is_teacher(request.user):
+        _teacher_course_or_404(request.user, artifact.assignment.block_project.block.course_id)
+    elif _is_student(request.user):
+        if artifact.assignment.enrollment.student_id != request.user.pk:
+            raise Http404
+    else:
+        raise Http404
+    return FileResponse(artifact.file.open("rb"), as_attachment=True, filename=Path(artifact.file.name).name)
+
+
 @login_required
 def update_course_config_field(request: HttpRequest, course_id: int, field_name: str) -> JsonResponse:
     if request.method != "POST" or not _is_teacher(request.user):
@@ -1170,6 +1385,23 @@ def _preview_payload(request: HttpRequest, course: Course, block: CourseBlock, a
         data = json.loads(request.body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+
+    if action in {"project_open", "project_chat", "project_submit"}:
+        project_id = int(data.get("project_id") or 0)
+        project = block.projects.filter(pk=project_id, status=BlockProject.Status.PUBLISHED).first()
+        if project is None:
+            return JsonResponse({"ok": False, "error": "Choose a published project for this block."}, status=404)
+        viewer_identifier = f"teacher:{request.user.pk}"
+        if action == "project_open":
+            open_preview_project(request, project, viewer_identifier=viewer_identifier)
+        elif action == "project_chat":
+            message_text = str(data.get("message", "")).strip()
+            send_preview_project_message(request, project, viewer_identifier=viewer_identifier, text=message_text)
+        else:
+            raw_answer = str(data.get("answer", "")).strip()
+            submit_preview_project_answer(request, project, viewer_identifier=viewer_identifier, raw_answer=raw_answer)
+        payload = serialize_preview_state(request, course, active_block_id=block.pk)
+        return JsonResponse({"ok": True, "preview": payload})
 
     if action == "answer":
         selected_answers = data.get("answers")
@@ -1280,6 +1512,19 @@ def move_learning_objective_view(request: HttpRequest, objective_id: int, direct
     else:
         messages.info(request, "Learning objective could not be moved further.")
     return redirect("standalone:course_detail", course.pk)
+
+
+@login_required
+def move_block_view(request: HttpRequest, block_id: int, direction: str) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    block = _teacher_block_or_404(request.user, block_id)
+    moved = move_course_block(block, direction)
+    if moved:
+        messages.success(request, "Block order updated.")
+    else:
+        messages.info(request, "Block could not be moved further.")
+    return redirect(f"{reverse('standalone:course_detail', args=[block.course_id])}#course-blocks-heading")
 
 
 @login_required
@@ -3121,6 +3366,22 @@ def _student_practice_payload(enrollment: Enrollment, block: CourseBlock, action
         data = json.loads(request.body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+
+    if action in {"project_open", "project_chat", "project_submit"}:
+        project_id = int(data.get("project_id") or 0)
+        project = block.projects.filter(pk=project_id, status=BlockProject.Status.PUBLISHED).first()
+        if project is None:
+            return JsonResponse({"ok": False, "error": "Choose a published project for this block."}, status=404)
+        if action == "project_open":
+            open_student_project(enrollment, project)
+        elif action == "project_chat":
+            message_text = str(data.get("message", "")).strip()
+            send_student_project_message(enrollment, project, message_text)
+        else:
+            raw_answer = str(data.get("answer", "")).strip()
+            submit_student_project_answer(enrollment, project, raw_answer)
+        payload = serialize_student_practice_state(enrollment, active_block_id=block.pk)
+        return JsonResponse({"ok": True, "preview": payload})
 
     if action == "answer":
         selected_answers = data.get("answers")

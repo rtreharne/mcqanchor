@@ -391,43 +391,60 @@
       <div class="block-list course-block-list">
         {% for block in blocks %}
           <article class="block-card course-block-card" data-block-card>
-            <div
-              class="block-card-header course-block-card-header"
-              data-block-toggle
-              data-block-target="block-content-{{ block.pk }}"
-              aria-expanded="false"
-              aria-controls="block-content-{{ block.pk }}"
-              tabindex="0"
-              role="button"
-            >
-              <div class="course-block-title-group">
-                <span class="block-order-pill">{{ block.order }}</span>
-                <div class="course-block-title-copy">
-                  <h3 class="block-card-title course-block-title">
-                    <span
-                      class="inline-editable inline-editable-title"
-                      data-inline-edit
-                      data-inline-url="{% url 'standalone:update_block_field' block.pk 'title' %}"
-                      data-inline-field="title"
-                      data-inline-label="Block title"
-                      data-inline-placeholder="Enter a block title"
-                      tabindex="0"
-                      role="button"
-                    >{{ block.title }}</span>
-                  </h3>
-                  <div class="block-chip-row" aria-label="Block summary">
-                    <span class="block-chip">Available {{ block.available_from|date:"j M Y" }}</span>
-                    <span class="block-chip">Target {{ block.preview_target_question_count }}</span>
-                    <span class="block-chip">{{ block.objective_count }} objectives</span>
-                    <span class="block-chip">{{ block.asset_count }} uploads</span>
-                    {% if block.regeneration_status != 'idle' %}
-                      <span class="block-chip status-chip is-{{ block.regeneration_status }}">{{ block.get_regeneration_status_display }}</span>
-                    {% endif %}
+            <div class="block-card-header course-block-card-header">
+              <div
+                class="course-block-header-toggle"
+                data-block-toggle
+                data-block-target="block-content-{{ block.pk }}"
+                aria-expanded="false"
+                aria-controls="block-content-{{ block.pk }}"
+                tabindex="0"
+                role="button"
+              >
+                <div class="course-block-title-group">
+                  <span class="block-order-pill">{{ block.order }}</span>
+                  <div class="course-block-title-copy">
+                    <h3 class="block-card-title course-block-title">
+                      <span
+                        class="inline-editable inline-editable-title"
+                        data-inline-edit
+                        data-inline-url="{% url 'standalone:update_block_field' block.pk 'title' %}"
+                        data-inline-field="title"
+                        data-inline-label="Block title"
+                        data-inline-placeholder="Enter a block title"
+                        tabindex="0"
+                        role="button"
+                      >{{ block.title }}</span>
+                    </h3>
+                    <div class="block-chip-row" aria-label="Block summary">
+                      <span class="block-chip">Available {{ block.available_from|date:"j M Y" }}</span>
+                      <span class="block-chip">Target {{ block.preview_target_question_count }}</span>
+                      <span class="block-chip">{{ block.objective_count }} objectives</span>
+                      <span class="block-chip">{{ block.asset_count }} uploads</span>
+                      {% if block.regeneration_status != 'idle' %}
+                        <span class="block-chip status-chip is-{{ block.regeneration_status }}">{{ block.get_regeneration_status_display }}</span>
+                      {% endif %}
+                    </div>
                   </div>
                 </div>
+                <span class="block-card-icon" aria-hidden="true"></span>
               </div>
 
               <div class="block-card-header-actions">
+                <div class="objective-actions">
+                  <form method="post" action="{% url 'standalone:move_block' block.pk 'up' %}">
+                    {% csrf_token %}
+                    <button class="objective-action-button objective-action-icon" type="submit" aria-label="Move block up" title="Move up">
+                      <span aria-hidden="true">&#9652;</span>
+                    </button>
+                  </form>
+                  <form method="post" action="{% url 'standalone:move_block' block.pk 'down' %}">
+                    {% csrf_token %}
+                    <button class="objective-action-button objective-action-icon" type="submit" aria-label="Move block down" title="Move down">
+                      <span aria-hidden="true">&#9662;</span>
+                    </button>
+                  </form>
+                </div>
                 <div class="block-action-menu" data-block-menu>
                   <button
                     class="block-action-menu-trigger"
@@ -453,7 +470,6 @@
                     </form>
                   </div>
                 </div>
-                <span class="block-card-icon" aria-hidden="true"></span>
               </div>
             </div>
 
@@ -569,6 +585,142 @@
                     <p class="course-setting-help">{{ block.block_config_form.advanced_question_start_percent.help_text }}</p>
                     <p class="course-setting-status" data-block-config-status hidden></p>
                   </div>
+                </div>
+              </section>
+
+              <section class="block-detail-section">
+                <div class="course-settings-group-head">
+                  <h4>Projects</h4>
+                  <p>Add optional deterministic mini-projects for this block. These run separately from the normal practice and validation flow.</p>
+                </div>
+                <div class="block-inline-actions">
+                  <a class="button secondary" href="{% url 'standalone:block_project_results_export' block.pk %}">Export project results CSV</a>
+                </div>
+
+                <form method="post" action="{% url 'standalone:block_project_create' block.pk %}" class="course-settings-grid">
+                  {% csrf_token %}
+                  <div class="course-setting-cell course-setting-cell--full">
+                    <label class="course-setting-label" for="{{ block.project_create_form.teacher_prompt.id_for_label }}">{{ block.project_create_form.teacher_prompt.label }}</label>
+                    {{ block.project_create_form.teacher_prompt }}
+                    {% if block.project_create_form.teacher_prompt.errors %}
+                      <p class="upload-error">{{ block.project_create_form.teacher_prompt.errors|join:", " }}</p>
+                    {% endif %}
+                  </div>
+                  <div class="course-setting-cell course-setting-cell--full">
+                    <label class="course-setting-label" for="{{ block.project_create_form.example_text.id_for_label }}">{{ block.project_create_form.example_text.label }}</label>
+                    {{ block.project_create_form.example_text }}
+                    {% if block.project_create_form.example_text.errors %}
+                      <p class="upload-error">{{ block.project_create_form.example_text.errors|join:", " }}</p>
+                    {% endif %}
+                  </div>
+                  <div class="course-setting-cell course-setting-cell--full">
+                    <button class="button" type="submit">Generate project draft</button>
+                  </div>
+                </form>
+
+                <div class="child-block-list">
+                  {% for project in block.projects_for_course_detail %}
+                    <article class="course-block-subsection" id="project-{{ project.pk }}">
+                      <div class="course-block-subsection-header">
+                        <div>
+                          <h4>{{ project.title }}</h4>
+                          <div class="block-chip-row">
+                            <span class="block-chip">{{ project.get_status_display }}</span>
+                            <span class="block-chip">{{ project.get_engine_type_display|default:"Unclassified" }}</span>
+                            <span class="block-chip">{{ project.assignment_count }} assignment{{ project.assignment_count|pluralize }}</span>
+                            <span class="block-chip status-chip is-{{ project.generation_status }}">{{ project.get_generation_status_display }}</span>
+                          </div>
+                        </div>
+                        <div class="workspace-actions">
+                          <form method="post" action="{% url 'standalone:block_project_publish' project.pk %}">
+                            {% csrf_token %}
+                            <button class="button secondary" type="submit"{% if project.status == 'published' %} disabled{% endif %}>Publish</button>
+                          </form>
+                          <form method="post" action="{% url 'standalone:block_project_archive' project.pk %}">
+                            {% csrf_token %}
+                            <button class="button secondary" type="submit"{% if project.status == 'archived' %} disabled{% endif %}>Archive</button>
+                          </form>
+                        </div>
+                      </div>
+                      {% if project.generation_error %}
+                        <p class="upload-error">{{ project.generation_error }}</p>
+                      {% endif %}
+                      {% if project.is_locked %}
+                        <p class="course-setting-help">This published project already has student assignments, so its live runtime definition is now immutable.</p>
+                      {% endif %}
+                      <form method="post" action="{% url 'standalone:block_project_update' project.pk %}" class="course-settings-grid">
+                        {% csrf_token %}
+                        <div class="course-setting-cell">
+                          <label class="course-setting-label" for="{{ project.edit_form.title.id_for_label }}">{{ project.edit_form.title.label }}</label>
+                          {{ project.edit_form.title }}
+                          {% if project.edit_form.title.errors %}
+                            <p class="upload-error">{{ project.edit_form.title.errors|join:", " }}</p>
+                          {% endif %}
+                        </div>
+                        <div class="course-setting-cell">
+                          <label class="course-setting-label" for="{{ project.edit_form.answer_label.id_for_label }}">{{ project.edit_form.answer_label.label }}</label>
+                          {{ project.edit_form.answer_label }}
+                          {% if project.edit_form.answer_label.errors %}
+                            <p class="upload-error">{{ project.edit_form.answer_label.errors|join:", " }}</p>
+                          {% endif %}
+                        </div>
+                        <div class="course-setting-cell">
+                          <label class="course-setting-label" for="{{ project.edit_form.answer_unit.id_for_label }}">{{ project.edit_form.answer_unit.label }}</label>
+                          {{ project.edit_form.answer_unit }}
+                          {% if project.edit_form.answer_unit.errors %}
+                            <p class="upload-error">{{ project.edit_form.answer_unit.errors|join:", " }}</p>
+                          {% endif %}
+                        </div>
+                        <div class="course-setting-cell">
+                          <label class="course-setting-label" for="{{ project.edit_form.decimal_places.id_for_label }}">{{ project.edit_form.decimal_places.label }}</label>
+                          {{ project.edit_form.decimal_places }}
+                          {% if project.edit_form.decimal_places.errors %}
+                            <p class="upload-error">{{ project.edit_form.decimal_places.errors|join:", " }}</p>
+                          {% endif %}
+                        </div>
+                        <div class="course-setting-cell course-setting-cell--full">
+                          <label class="course-setting-label" for="{{ project.edit_form.teacher_prompt.id_for_label }}">{{ project.edit_form.teacher_prompt.label }}</label>
+                          {{ project.edit_form.teacher_prompt }}
+                          {% if project.edit_form.teacher_prompt.errors %}
+                            <p class="upload-error">{{ project.edit_form.teacher_prompt.errors|join:", " }}</p>
+                          {% endif %}
+                        </div>
+                        <div class="course-setting-cell course-setting-cell--full">
+                          <label class="course-setting-label" for="{{ project.edit_form.example_text.id_for_label }}">{{ project.edit_form.example_text.label }}</label>
+                          {{ project.edit_form.example_text }}
+                          {% if project.edit_form.example_text.errors %}
+                            <p class="upload-error">{{ project.edit_form.example_text.errors|join:", " }}</p>
+                          {% endif %}
+                        </div>
+                        <div class="course-setting-cell course-setting-cell--full">
+                          <label class="course-setting-label" for="{{ project.edit_form.student_instructions.id_for_label }}">{{ project.edit_form.student_instructions.label }}</label>
+                          {{ project.edit_form.student_instructions }}
+                          {% if project.edit_form.student_instructions.errors %}
+                            <p class="upload-error">{{ project.edit_form.student_instructions.errors|join:", " }}</p>
+                          {% endif %}
+                        </div>
+                        <div class="course-setting-cell course-setting-cell--full">
+                          <label class="course-setting-label" for="{{ project.edit_form.spec_json_text.id_for_label }}">{{ project.edit_form.spec_json_text.label }}</label>
+                          {{ project.edit_form.spec_json_text }}
+                          {% if project.edit_form.spec_json_text.errors %}
+                            <p class="upload-error">{{ project.edit_form.spec_json_text.errors|join:", " }}</p>
+                          {% endif %}
+                        </div>
+                        <div class="course-setting-cell course-setting-cell--full">
+                          <label class="course-setting-label" for="{{ project.edit_form.hint_plan_json_text.id_for_label }}">{{ project.edit_form.hint_plan_json_text.label }}</label>
+                          {{ project.edit_form.hint_plan_json_text }}
+                          {% if project.edit_form.hint_plan_json_text.errors %}
+                            <p class="upload-error">{{ project.edit_form.hint_plan_json_text.errors|join:", " }}</p>
+                          {% endif %}
+                        </div>
+                        <div class="course-setting-cell course-setting-cell--full">
+                          <button class="button" type="submit"{% if project.is_locked %} disabled{% endif %}>Save project draft</button>
+                        </div>
+                      </form>
+                    </article>
+                  {% empty %}
+                    <p>No projects for this block yet.</p>
+                  {% endfor %}
                 </div>
               </section>
 

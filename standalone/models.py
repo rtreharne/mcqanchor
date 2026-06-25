@@ -1,5 +1,6 @@
 import uuid
 from datetime import timedelta
+from pathlib import Path
 
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
@@ -44,6 +45,12 @@ class TimeStampedModel(models.Model):
 
     class Meta:
         abstract = True
+
+
+def project_artifact_upload_to(instance, filename: str) -> str:
+    safe_name = Path(str(filename or "artifact")).name or "artifact"
+    assignment_id = getattr(instance, "assignment_id", "unassigned")
+    return f"standalone/project_artifacts/{assignment_id}/{safe_name}"
 
 
 class TeacherInvitation(TimeStampedModel):
@@ -752,6 +759,135 @@ class PracticeMessage(TimeStampedModel):
 
     def __str__(self) -> str:
         return f"{self.kind} message for {self.enrollment}"
+
+
+class BlockProject(TimeStampedModel):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        PUBLISHED = "published", "Published"
+        ARCHIVED = "archived", "Archived"
+
+    class EngineType(models.TextChoices):
+        TABULAR_ANALYSIS = "tabular_analysis", "Tabular analysis"
+        SEEDED_SCRIPT_OUTPUT = "seeded_script_output", "Seeded script output"
+
+    class GenerationStatus(models.TextChoices):
+        IDLE = "idle", "Idle"
+        RUNNING = "running", "Running"
+        READY = "ready", "Ready"
+        FAILED = "failed", "Failed"
+        UNSUPPORTED = "unsupported", "Unsupported"
+
+    block = models.ForeignKey(CourseBlock, on_delete=models.CASCADE, related_name="projects")
+    title = models.CharField(max_length=255)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    engine_type = models.CharField(max_length=30, choices=EngineType.choices, blank=True)
+    teacher_prompt = models.TextField()
+    example_text = models.TextField(blank=True)
+    student_instructions = models.TextField(blank=True)
+    answer_label = models.CharField(max_length=120, default="Answer")
+    answer_unit = models.CharField(max_length=40, blank=True)
+    decimal_places = models.PositiveSmallIntegerField(
+        default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(6)],
+    )
+    spec_json = models.JSONField(default=dict, blank=True)
+    hint_plan_json = models.JSONField(default=dict, blank=True)
+    generation_status = models.CharField(
+        max_length=20,
+        choices=GenerationStatus.choices,
+        default=GenerationStatus.IDLE,
+    )
+    generation_error = models.TextField(blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["block__order", "created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.block}: {self.title}"
+
+    @property
+    def is_locked(self) -> bool:
+        return self.status == self.Status.PUBLISHED and self.assignments.exists()
+
+
+class ProjectAssignment(TimeStampedModel):
+    class Status(models.TextChoices):
+        NOT_STARTED = "not_started", "Not started"
+        IN_PROGRESS = "in_progress", "In progress"
+        COMPLETE = "complete", "Complete"
+
+    enrollment = models.ForeignKey(Enrollment, on_delete=models.CASCADE, related_name="project_assignments")
+    block_project = models.ForeignKey(BlockProject, on_delete=models.CASCADE, related_name="assignments")
+    seed = models.CharField(max_length=32)
+    expected_answer_display = models.CharField(max_length=120)
+    normalized_expected_answer = models.CharField(max_length=120)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.NOT_STARTED)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    submission_count = models.PositiveIntegerField(default=0)
+    latest_submitted_answer = models.TextField(blank=True)
+    latest_normalized_answer = models.CharField(max_length=120, blank=True)
+    engine_payload_json = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["enrollment", "block_project", "created_at"]
+        unique_together = ("enrollment", "block_project")
+
+    def __str__(self) -> str:
+        return f"Assignment for {self.enrollment} / {self.block_project}"
+
+
+class ProjectArtifact(TimeStampedModel):
+    class Kind(models.TextChoices):
+        DATASET = "dataset", "Dataset"
+        STARTER_SCRIPT = "starter_script", "Starter script"
+        SUPPORTING_FILE = "supporting_file", "Supporting file"
+
+    assignment = models.ForeignKey(ProjectAssignment, on_delete=models.CASCADE, related_name="artifacts")
+    kind = models.CharField(max_length=30, choices=Kind.choices)
+    label = models.CharField(max_length=120)
+    file = models.FileField(upload_to=project_artifact_upload_to)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["assignment", "created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.label} for {self.assignment}"
+
+
+class ProjectSubmission(TimeStampedModel):
+    assignment = models.ForeignKey(ProjectAssignment, on_delete=models.CASCADE, related_name="submissions")
+    raw_answer = models.TextField(blank=True)
+    normalized_answer = models.CharField(max_length=120, blank=True)
+    is_correct = models.BooleanField(default=False)
+    feedback_code = models.CharField(max_length=40, blank=True)
+    feedback_text = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["assignment", "created_at", "pk"]
+
+    def __str__(self) -> str:
+        return f"Submission for {self.assignment}"
+
+
+class ProjectMessage(TimeStampedModel):
+    assignment = models.ForeignKey(ProjectAssignment, on_delete=models.CASCADE, related_name="messages")
+    message_id = models.CharField(max_length=100)
+    sequence = models.PositiveIntegerField()
+    role = models.CharField(max_length=20)
+    kind = models.CharField(max_length=30)
+    text = models.TextField(blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["assignment", "sequence", "created_at"]
+        unique_together = (("assignment", "message_id"), ("assignment", "sequence"))
+
+    def __str__(self) -> str:
+        return f"{self.kind} project message for {self.assignment}"
 
 
 class ValidationEvent(TimeStampedModel):

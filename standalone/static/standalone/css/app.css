@@ -1875,6 +1875,21 @@ button.button[disabled] {
   background: rgba(255, 255, 255, 0.86);
 }
 
+.course-block-header-toggle {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  cursor: pointer;
+  transition: background-color 0.18s ease;
+}
+
+.course-block-header-toggle:hover,
+.course-block-header-toggle:focus-visible {
+  background: rgba(228, 241, 255, 0.7);
+  outline: none;
+}
+
 .course-block-title-group {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
