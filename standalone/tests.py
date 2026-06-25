@@ -13,6 +13,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from openai import OpenAIError
+from pypdf import PdfReader
 from unittest.mock import patch
 
 from standalone.forms import BlockConfigForm, CourseForm, ValidationEventForm
@@ -62,7 +63,7 @@ from standalone.services.numeric_questions import (
     normalize_numeric_answer_text,
 )
 from standalone.services.projects import ensure_project_assignment
-from standalone.services.validation_flow import _pick_locked_questions, current_room_code, select_stratified_validation_questions
+from standalone.services.validation_flow import _pick_locked_questions, _shuffle_options, current_room_code, select_stratified_validation_questions
 from standalone.services.questions import (
     QuestionGenerationError,
     _create_question_pair,
@@ -900,8 +901,7 @@ class StandaloneFlowTests(TestCase):
                 "validation_weight": 20,
                 "mastery_weight": 40,
                 "coverage_weight": 30,
-                "engagement_weight": 20,
-                "target_weight": 10,
+                "engagement_weight": 30,
                 "distractor_count": 3,
                 "numeric_ratio_percent": 25,
                 "maq_ratio_percent": 35,
@@ -1615,7 +1615,7 @@ class StandaloneFlowTests(TestCase):
         )
         self.assertContains(response, 'data-block-config-input="assistant_guidance"', html=False)
         self.assertContains(response, "Available from")
-        self.assertContains(response, "Target MCQs")
+        self.assertContains(response, "Engagement target")
         self.assertContains(response, "Enrolment routes")
         self.assertContains(response, "Course blocks")
         self.assertContains(response, "Course settings")
@@ -1685,7 +1685,6 @@ class StandaloneFlowTests(TestCase):
             mastery_score=50,
             coverage_score=80,
             engagement_score=20,
-            target_score=100,
         )
         second_student = User.objects.create_user(
             username="student-two",
@@ -1708,15 +1707,14 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, "1 questions")
         self.assertContains(response, "Practice averages")
         self.assertContains(response, "Overall practice")
-        self.assertContains(response, "<strong>29.0%</strong>", html=False)
+        self.assertContains(response, "<strong>25.0%</strong>", html=False)
         self.assertContains(response, "Mastery")
         self.assertContains(response, "<strong>25.0%</strong>", html=False)
         self.assertContains(response, "Coverage")
         self.assertContains(response, "<strong>40.0%</strong>", html=False)
         self.assertContains(response, "Engagement")
         self.assertContains(response, "<strong>10.0%</strong>", html=False)
-        self.assertContains(response, "Target")
-        self.assertContains(response, "<strong>50.0%</strong>", html=False)
+        self.assertNotContains(response, '<span>Target</span>', html=False)
         self.assertContains(response, "Continuous practice. Anchored assessment.")
 
     def test_course_detail_shows_course_practice_averages_across_students(self):
@@ -1728,7 +1726,6 @@ class StandaloneFlowTests(TestCase):
             mastery_score=80,
             coverage_score=60,
             engagement_score=40,
-            target_score=20,
         )
         second_student = User.objects.create_user(
             username="student-three",
@@ -1742,7 +1739,6 @@ class StandaloneFlowTests(TestCase):
             mastery_score=20,
             coverage_score=40,
             engagement_score=60,
-            target_score=80,
         )
 
         self.client.force_login(self.teacher)
@@ -1754,9 +1750,9 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, "Overall practice")
         self.assertContains(response, "Mastery")
         self.assertContains(response, "Coverage")
-        self.assertContains(response, "Engagement")
-        self.assertContains(response, "Target")
-        self.assertContains(response, "<strong>50.0%</strong>", html=False, count=5)
+        self.assertContains(response, '<span>Engagement</span><strong>50.0%</strong>', html=False)
+        self.assertNotContains(response, '<span>Target</span>', html=False)
+        self.assertContains(response, "<strong>50.0%</strong>", html=False, count=4)
 
     def test_standalone_footer_is_omitted_from_student_preview(self):
         course = self.create_course()
@@ -4057,6 +4053,48 @@ print(result)""",
         self.assertEqual(validation.question_type, QuestionBankItem.QuestionType.MCQ)
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_numeric_generation_alignment_rejection_does_not_escape_as_value_error(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, _asset, objective, chunk = self.create_preview_content_block(course, title="Speed")
+        objective.text = "Calculate speed from distance and time"
+        objective.save(update_fields=["text"])
+        chunk.text = "A runner covers 100 m in 20 s. Calculate the speed."
+        chunk.save(update_fields=["text"])
+
+        payload = {
+            "question_type": "num",
+            "stem_template": "A runner covers {distance} m in {time} s. Calculate the speed.",
+            "variables": [
+                {"name": "distance", "value": 100, "unit": "m"},
+                {"name": "time", "value": 20, "unit": "s"},
+            ],
+            "calculation_expression": "distance / time",
+            "answer_unit": "m/s",
+            "significant_figures": 2,
+            "explanation": "Speed is distance divided by time.",
+            "difficulty": "core",
+            "further_study_questions": [
+                "How does doubling time change speed?",
+                "What unit does speed use?",
+                "How would you rearrange the formula for time?",
+            ],
+        }
+
+        with patch("standalone.services.questions._payload_for_generation_attempt", return_value=(payload, QuestionBankItem.QuestionType.NUM, "")):
+            with patch(
+                "standalone.services.questions._create_question_pair",
+                side_effect=ValueError("Generated question does not stay aligned with the target learning objective."),
+            ):
+                practice, validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM)
+
+        self.assertIsNone(practice)
+        self.assertIsNone(validation)
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_numeric_generation_retries_after_placeholder_validation_failure(self):
         course = self.create_course()
         course.config.numeric_ratio_percent = 100
@@ -4557,8 +4595,7 @@ print(result)""",
         enrollment.refresh_from_db()
         self.assertEqual(float(enrollment.mastery_score), 100.0)
         self.assertEqual(float(enrollment.coverage_score), 100.0)
-        self.assertEqual(float(enrollment.engagement_score), 100.0)
-        self.assertEqual(float(enrollment.target_score), 5.0)
+        self.assertEqual(float(enrollment.engagement_score), 5.0)
 
         reload_response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
         self.assertContains(reload_response, "Question one?")
@@ -4642,10 +4679,9 @@ print(result)""",
         course.config.save(update_fields=["engagement_half_life_days", "updated_at"])
         enrollment = Enrollment.objects.create(course=course, student=self.student)
         block, _, objective, chunk = self.create_preview_content_block(course)
-        block.available_from = timezone.localdate() - timedelta(days=7)
-        block.save(update_fields=["available_from", "updated_at"])
         block.config.target_question_count = 1
-        block.config.save(update_fields=["target_question_count", "updated_at"])
+        block.config.release_date = timezone.now() - timedelta(days=7)
+        block.config.save(update_fields=["target_question_count", "release_date", "updated_at"])
         q1 = QuestionBankItem.objects.create(
             course=course,
             block=block,
@@ -4975,9 +5011,8 @@ print(result)""",
         course_metrics = preview["course"]["metrics"]
         self.assertEqual(course_metrics["mastery"], 50.0)
         self.assertEqual(course_metrics["coverage"], 50.0)
-        self.assertEqual(course_metrics["engagement"], 100.0)
-        self.assertEqual(course_metrics["target"], 5.0)
-        self.assertEqual(course_metrics["overall"], 55.5)
+        self.assertEqual(course_metrics["engagement"], 5.0)
+        self.assertEqual(course_metrics["overall"], 36.5)
         self.assertEqual(course_metrics["correct_count"], 1)
         self.assertEqual(course_metrics["incorrect_count"], 1)
         self.assertEqual(course_metrics["completed_count"], 2)
@@ -4992,14 +5027,13 @@ print(result)""",
             {
                 "mastery": 40,
                 "coverage": 30,
-                "engagement": 20,
-                "target": 10,
+                "engagement": 30,
                 "total": 100,
             },
         )
 
         first_block_metrics = next(block["metrics"] for block in preview["blocks"] if block["id"] == first_block.pk)
-        self.assertEqual(first_block_metrics["overall"], 90.5)
+        self.assertEqual(first_block_metrics["overall"], 71.5)
         self.assertEqual(first_block_metrics["correct_count"], 1)
         self.assertEqual(first_block_metrics["incorrect_count"], 0)
         self.assertEqual(first_block_metrics["completed_count"], 1)
@@ -5010,7 +5044,48 @@ print(result)""",
         self.assertIsNone(first_block_metrics["engagement_half_life_days"])
 
         second_block_metrics = next(block["metrics"] for block in preview["blocks"] if block["id"] == second_block.pk)
-        self.assertEqual(second_block_metrics["overall"], 20.5)
+        self.assertEqual(second_block_metrics["overall"], 1.5)
+
+    def test_student_preview_keeps_engagement_visible_when_block_release_date_is_set(self):
+        course = self.create_course()
+        block, _, objective, _ = self.create_preview_content_block(course)
+        block.config.release_date = timezone.now()
+        block.config.save(update_fields=["release_date", "updated_at"])
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Release-dated preview question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="release-dated-preview-question",
+        )
+
+        self.client.force_login(self.teacher)
+        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(answer_response.status_code, 200)
+        preview = answer_response.json()["preview"]
+        block_metrics = next(item["metrics"] for item in preview["blocks"] if item["id"] == block.pk)
+        self.assertEqual(
+            block_metrics["weights"],
+            {
+                "mastery": 40,
+                "coverage": 30,
+                "engagement": 30,
+                "total": 100,
+            },
+        )
+        self.assertEqual(block_metrics["overall"], 71.5)
 
     def test_student_preview_quiz_uses_existing_bank_before_generating_new_pair(self):
         course = self.create_course()
@@ -6070,7 +6145,7 @@ print(result)""",
         self.assertEqual(EnrollmentQuestionState.objects.count(), 0)
         self.assertEqual(PracticeMessage.objects.count(), 0)
 
-    def test_student_preview_answer_adds_progress_message_when_coverage_and_target_complete(self):
+    def test_student_preview_answer_adds_progress_message_when_coverage_and_engagement_target_complete(self):
         course = self.create_course()
         block, _, objective, _ = self.create_preview_content_block(course)
         block.config.target_question_count = 1
@@ -6103,10 +6178,10 @@ print(result)""",
 
         self.assertEqual(len(progress_messages), 1)
         self.assertIn("Coverage is complete for this block", progress_messages[-1]["text"])
-        self.assertIn("You've reached this block's practice target: 1 of 1 questions answered.", progress_messages[-1]["text"])
+        self.assertIn("You've reached this block's engagement target: 1 of 1 questions answered.", progress_messages[-1]["text"])
         self.assertIn("Mastery is 100%.", progress_messages[-1]["text"])
 
-    def test_student_preview_answer_does_not_add_progress_message_when_coverage_and_target_incomplete(self):
+    def test_student_preview_answer_does_not_add_progress_message_when_coverage_and_engagement_target_incomplete(self):
         course = self.create_course()
         block, _, objective, _ = self.create_preview_content_block(course)
         block.config.target_question_count = 4
@@ -6147,7 +6222,7 @@ print(result)""",
 
         self.assertEqual(len(progress_messages), 0)
 
-    def test_student_preview_progress_message_is_only_added_first_time_target_reaches_complete(self):
+    def test_student_preview_progress_message_is_only_added_first_time_engagement_target_reaches_complete(self):
         course = self.create_course()
         block, _, objective, _ = self.create_preview_content_block(course)
         block.config.target_question_count = 2
@@ -6206,7 +6281,7 @@ print(result)""",
             sum("Coverage is complete for this block" in message["text"] for message in progress_messages),
             1,
         )
-        self.assertIn("You've reached this block's practice target: 2 of 2 questions answered.", progress_messages[-1]["text"])
+        self.assertIn("You've reached this block's engagement target: 2 of 2 questions answered.", progress_messages[-1]["text"])
         self.assertIn("Mastery is 100%.", progress_messages[-1]["text"])
 
     def test_student_preview_feedback_includes_varying_keep_going_note(self):
@@ -7382,6 +7457,25 @@ print(result)""",
         self.assertContains(response, "Spaces left 1")
         self.assertContains(response, "Bookings in last 24 hours 1")
 
+    def test_student_dashboard_shows_engagement_without_a_release_date(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        Enrollment.objects.create(
+            course=course,
+            student=self.student,
+            mastery_score=80,
+            coverage_score=60,
+            engagement_score=40,
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:student_dashboard"))
+
+        self.assertContains(response, "Mastery")
+        self.assertContains(response, "Coverage")
+        self.assertContains(response, "Engagement")
+        self.assertNotContains(response, '<span>Target</span>', html=False)
+
     def test_digital_validation_start_samples_all_released_blocks_only(self):
         course = self.create_course()
         enrollment = Enrollment.objects.create(course=course, student=self.student)
@@ -7586,6 +7680,96 @@ print(result)""",
         self.assertEqual(attempt.attempt_questions.count(), 1)
         self.assertFalse(attempt.feedback_visible_immediately)
         self.assertIsNone(attempt.time_limit_minutes)
+        self.assertContains(
+            response,
+            reverse("standalone:validation_practice_pdf", args=[course.pk, attempt.pk]),
+            html=False,
+        )
+        self.assertContains(response, "Download printable PDF")
+
+    def test_validation_practice_pdf_excludes_waq_and_adds_answer_key_page(self):
+        course = self.create_course()
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        mcq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem="Printable single-answer question?",
+            correct_answer="Mitochondria",
+            distractors=["Nucleus", "Golgi apparatus", "Ribosome"],
+            explanation="Mitochondria.",
+            question_hash="printable-validation-practice-mcq",
+        )
+        waq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            stem="Printable written question should be excluded?",
+            correct_answer="Written answer.",
+            written_answer_keywords=["written", "answer"],
+            explanation="Written answer.",
+            question_hash="printable-validation-practice-waq",
+        )
+        maq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            stem="Printable multi-answer question?",
+            correct_answer="Cell membrane",
+            additional_correct_answers=["Cytoplasm"],
+            distractors=["Cell wall", "Chloroplast"],
+            explanation="Cell membrane and cytoplasm.",
+            question_hash="printable-validation-practice-maq",
+        )
+        attempt = PracticeAttempt.objects.create(
+            enrollment=enrollment,
+            attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+            feedback_visible_immediately=False,
+        )
+        PracticeAttemptQuestion.objects.create(attempt=attempt, question=mcq, order=1)
+        PracticeAttemptQuestion.objects.create(attempt=attempt, question=waq, order=2)
+        PracticeAttemptQuestion.objects.create(attempt=attempt, question=maq, order=3)
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:validation_practice_pdf", args=[course.pk, attempt.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn("attachment;", response["Content-Disposition"])
+
+        reader = PdfReader(io.BytesIO(response.content))
+        page_text = [page.extract_text() or "" for page in reader.pages]
+        full_text = "\n".join(page_text)
+        self.assertIn("Printable practice validation", full_text)
+        self.assertIn("Printable single-answer question?", full_text)
+        self.assertIn("Printable multi-answer question?", full_text)
+        self.assertNotIn("Printable written question should be excluded?", full_text)
+        self.assertIn("Answer key", page_text[-1])
+
+        seed_key = f"practice-validation:{attempt.pk}:course:{course.pk}"
+        mcq_options = _shuffle_options(mcq.all_answer_options(), seed_key, mcq.pk)
+        mcq_letter = chr(ord("A") + mcq_options.index(mcq.correct_answer))
+        maq_options = _shuffle_options(maq.all_answer_options(), seed_key, maq.pk)
+        maq_letters = ", ".join(
+            chr(ord("A") + option_index)
+            for option_index, option in enumerate(maq_options)
+            if option in set(maq.correct_answers())
+        )
+        self.assertIn(f"1. {mcq_letter}", page_text[-1])
+        self.assertIn(f"2. {maq_letters}", page_text[-1])
 
     def test_validation_practice_restart_creates_fresh_attempt(self):
         course = self.create_course()
@@ -7938,7 +8122,6 @@ print(result)""",
             mastery_score=50,
             coverage_score=50,
             engagement_score=5,
-            target_score=5,
         )
         block, asset, objective, chunk = self.create_preview_content_block(course)
         question = QuestionBankItem.objects.create(
@@ -7991,7 +8174,6 @@ print(result)""",
             mastery_score=17.9,
             coverage_score=17.9,
             engagement_score=17.9,
-            target_score=17.9,
         )
         block, asset, objective, chunk = self.create_preview_content_block(course)
         question = QuestionBankItem.objects.create(
@@ -8476,6 +8658,30 @@ print(result)""",
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Back to practice")
         self.assertContains(response, reverse("standalone:student_preview", args=[course.pk]), html=False)
+
+    def test_preview_practice_validation_shows_printable_pdf_link(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview printable validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="preview-printable-validation-question",
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Download printable PDF")
+        self.assertContains(response, reverse("standalone:preview_validation_practice_pdf", args=[course.pk]), html=False)
 
     def test_preview_validation_practice_final_submission_returns_score_projection_and_review(self):
         course = self.create_course()

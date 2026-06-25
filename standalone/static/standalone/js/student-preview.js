@@ -576,7 +576,7 @@ if (previewRoot && previewDataNode) {
     if (!threshold || !target) {
       return "Locked";
     }
-    return `Unlocks at ${threshold}% target (${completed}/${target})`;
+    return `Unlocks at ${threshold}% engagement target (${completed}/${target})`;
   }
 
   function syncQuizMenuItems() {
@@ -1112,7 +1112,6 @@ if (previewRoot && previewDataNode) {
       mastery: "Mastery",
       coverage: "Coverage",
       engagement: "Engagement",
-      target: "Target",
     }[metricKey] || "Metric";
   }
 
@@ -1278,7 +1277,6 @@ if (previewRoot && previewDataNode) {
       ${metricButtonMarkup("mastery", metrics.mastery, { scope, blockId, metrics })}
       ${metricButtonMarkup("coverage", metrics.coverage, { scope, blockId, metrics })}
       ${metricButtonMarkup("engagement", metrics.engagement, { scope, blockId, metrics })}
-      ${metricButtonMarkup("target", metrics.target, { scope, blockId, metrics })}
     `;
   }
 
@@ -2051,18 +2049,17 @@ if (previewRoot && previewDataNode) {
     };
 
     if (metricKey === "overall") {
-      const weights = courseMetrics?.weights || {};
+      const weights = metrics?.weights || courseMetrics?.weights || {};
       payload.text = scope === "course"
-        ? `Overall practice is the weighted practice score built from the average mastery, coverage, engagement, and target values across ${liveBlockLabel}.`
-        : "Overall practice for this block is the weighted score built from mastery, coverage, engagement, and target.";
+        ? `Overall practice is the weighted practice score built from the average mastery, coverage, and engagement values across ${liveBlockLabel}.`
+        : "Overall practice for this block is the weighted score built from mastery, coverage, and engagement.";
       payload.metric_rows = [
         `${scope === "course" ? "Average mastery" : "Mastery"}: ${formatPercentage(metrics.mastery)} x ${weights.mastery || 0}`,
         `${scope === "course" ? "Average coverage" : "Coverage"}: ${formatPercentage(metrics.coverage)} x ${weights.coverage || 0}`,
         `${scope === "course" ? "Average engagement" : "Engagement"}: ${formatPercentage(metrics.engagement)} x ${weights.engagement || 0}`,
-        `${scope === "course" ? "Average target" : "Target"}: ${formatPercentage(metrics.target)} x ${weights.target || 0}`,
       ];
       payload.metric_formula = weights.total
-        ? `(${formatMetricNumber(metrics.mastery)} x ${weights.mastery || 0} + ${formatMetricNumber(metrics.coverage)} x ${weights.coverage || 0} + ${formatMetricNumber(metrics.engagement)} x ${weights.engagement || 0} + ${formatMetricNumber(metrics.target)} x ${weights.target || 0}) / ${weights.total} = ${formatPercentage(metrics.overall)}`
+        ? `(${formatMetricNumber(metrics.mastery)} x ${weights.mastery || 0} + ${formatMetricNumber(metrics.coverage)} x ${weights.coverage || 0} + ${formatMetricNumber(metrics.engagement)} x ${weights.engagement || 0}) / ${weights.total} = ${formatPercentage(metrics.overall)}`
         : "No practice-score weightings have been set yet.";
       return payload;
     }
@@ -2090,61 +2087,39 @@ if (previewRoot && previewDataNode) {
     }
 
     if (metricKey === "engagement") {
-      const halfLifeLabel = formatHalfLifeDays(metrics.engagement_half_life_days || 0);
       if (metrics.engagement_is_fixed) {
         payload.text = scope === "course"
-          ? `Average engagement is currently fixed at 100% across ${liveBlockLabel} because no engagement half-life is configured for this course. Engagement decay will start only after a half-life is set.`
-          : "Engagement is currently fixed at 100% for this block because no engagement half-life is configured for this course. Once a half-life is set, engagement will decay exponentially from the block release date.";
+          ? `Average engagement is the mean engagement score across ${liveBlockLabel}. It is based on completed questions against the engagement target.`
+          : "Engagement for this block is based on completed questions against the engagement target.";
         payload.metric_rows = scope === "course"
           ? [
             `Displayed score: ${formatPercentage(metrics.engagement)}`,
-            "Half-life: not set",
-            "Decay status: inactive",
+            `Combined completed questions: ${metrics.completed_count || 0}`,
+            `Combined engagement target: ${metrics.combined_target_question_count || 0}`,
           ]
           : [
             `Displayed score: ${formatPercentage(metrics.engagement)}`,
-            `Release date: ${block?.available_from_label || formatPreviewDate(block?.available_from || "") || "Not set"}`,
-            "Half-life: not set",
-            "Decay status: inactive",
+            `Completed questions: ${metrics.completed_count || 0} of ${metrics.target_question_count || 0}`,
           ];
         return payload;
       }
       if (scope === "course") {
-        payload.text = `Average engagement is the mean engagement score across ${liveBlockLabel}. Each answered question contributes a decayed weight from its block release date using an exponential half-life of ${halfLifeLabel}. A question counts as 100% on release day, 50% after one half-life, 25% after two, and so on.`;
+        payload.text = `Average engagement is the mean engagement score across ${liveBlockLabel}. After a block's release date, older answers count less toward engagement.`;
         payload.metric_rows = [
           `Displayed score: ${formatPercentage(metrics.engagement)}`,
-          `Half-life: ${halfLifeLabel}`,
           `Weighted activity: ${formatMetricNumber(metrics.engagement_weighted_count || 0)}`,
-          `Combined live-block target: ${metrics.combined_target_question_count || 0}`,
+          `Combined engagement target: ${metrics.combined_target_question_count || 0}`,
         ];
         return payload;
       }
 
-      const availableFromLabel = block?.available_from_label || formatPreviewDate(block?.available_from || "");
-      payload.text = `Engagement for this block decays exponentially from its release date using a half-life of ${halfLifeLabel}. Each answered question contributes a weight of 0.5^(days since release / half-life). The displayed score is weighted activity divided by the block target, capped at 100%.`;
+      const releaseDateLabel = formatPreviewDate(metrics.engagement_release_date || "") || "Not set";
+      payload.text = "After this block's release date, older answers count less toward engagement. The displayed score is weighted activity divided by the engagement target, capped at 100%.";
       payload.metric_rows = [
         `Displayed score: ${formatPercentage(metrics.engagement)}`,
-        `Release date: ${availableFromLabel || "Not set"}`,
-        `Half-life: ${halfLifeLabel}`,
+        `Release date: ${releaseDateLabel}`,
         `Weighted activity: ${formatMetricNumber(metrics.engagement_weighted_count || 0)} of ${metrics.target_question_count || 0}`,
       ];
-      return payload;
-    }
-
-    if (metricKey === "target") {
-      payload.text = scope === "course"
-        ? `Average target is the mean target-completion score across ${liveBlockLabel}.`
-        : "Target shows how much of this block's practice target has been completed.";
-      payload.metric_rows = scope === "course"
-        ? [
-          `Displayed score: ${formatPercentage(metrics.target)}`,
-          `Completed questions: ${metrics.completed_count || 0}`,
-          `Combined live-block target: ${metrics.combined_target_question_count || 0}`,
-        ]
-        : [
-          `Displayed score: ${formatPercentage(metrics.target)}`,
-          `Completed questions: ${metrics.completed_count || 0} of ${metrics.target_question_count || 0}`,
-        ];
       return payload;
     }
 

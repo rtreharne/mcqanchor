@@ -13,6 +13,12 @@ from openai import OpenAI
 
 from standalone.models import Course, CourseBlock, LearningObjective, LearningObjectiveCorrection, QuestionBankItem
 from standalone.services.guidance import build_chat_guidance_prompt, merge_assistant_guidance, sanitize_assistant_guidance
+from standalone.services.practice_scoring import (
+    combine_block_practice_metrics,
+    engagement_release_date,
+    weighted_practice_score,
+    base_practice_weights,
+)
 from standalone.services.questions import (
     QuestionGenerationError,
     _trace_generation,
@@ -133,7 +139,7 @@ def _block_progress_milestones(course_state: dict, block: CourseBlock) -> dict:
         str(block.pk),
         {
             "coverage_complete_announced": False,
-            "target_complete_announced": False,
+            "engagement_complete_announced": False,
         },
     )
 
@@ -254,7 +260,7 @@ def _engagement_half_life_days(course: Course) -> int | None:
 
 
 def _engagement_release_date(block: CourseBlock) -> date | None:
-    return getattr(block, "available_from", None)
+    return engagement_release_date(block)
 
 
 def _engagement_decay_weight(days_since_release: int, half_life_days: int) -> float:
@@ -264,11 +270,12 @@ def _engagement_decay_weight(days_since_release: int, half_life_days: int) -> fl
 def _engagement_metrics_from_answer_dates(course: Course, block: CourseBlock, answer_dates: list[date], *, target_question_count: int) -> dict:
     half_life_days = _engagement_half_life_days(course)
     release_date = _engagement_release_date(block)
-    fixed = half_life_days is None or release_date is None
-    if fixed:
+    completed_count = len(answer_dates)
+    raw_score = round(min(100.0, completed_count * 100.0 / max(1, target_question_count)), 2)
+    if half_life_days is None or release_date is None:
         return {
-            "engagement": 100.0,
-            "engagement_weighted_count": float(target_question_count),
+            "engagement": raw_score,
+            "engagement_weighted_count": float(completed_count),
             "engagement_half_life_days": half_life_days,
             "engagement_release_date": release_date.isoformat() if release_date else "",
             "engagement_is_fixed": True,
@@ -279,7 +286,7 @@ def _engagement_metrics_from_answer_dates(course: Course, block: CourseBlock, an
         for answered_on in answer_dates
     )
     return {
-        "engagement": round(min(100.0, weighted_count * 100.0 / max(1, target_question_count)), 2),
+        "engagement": round(min(raw_score, weighted_count * 100.0 / max(1, target_question_count)), 2),
         "engagement_weighted_count": round(weighted_count, 4),
         "engagement_half_life_days": half_life_days,
         "engagement_release_date": release_date.isoformat(),
@@ -1133,7 +1140,7 @@ def _refresh_block_progress_message(course_state: dict, block: CourseBlock) -> N
     completed_count = int(metrics.get("completed_count") or 0)
     target_question_count = int(metrics.get("target_question_count") or 0)
     coverage_complete = total_objective_count > 0 and float(metrics.get("coverage") or 0.0) >= 100.0
-    target_complete = target_question_count > 0 and float(metrics.get("target") or 0.0) >= 100.0
+    engagement_complete = target_question_count > 0 and float(metrics.get("engagement") or 0.0) >= 100.0
 
     lines: list[str] = []
     if coverage_complete and not milestones.get("coverage_complete_announced"):
@@ -1142,11 +1149,11 @@ def _refresh_block_progress_message(course_state: dict, block: CourseBlock) -> N
         )
         milestones["coverage_complete_announced"] = True
 
-    if target_complete and not milestones.get("target_complete_announced"):
+    if engagement_complete and not milestones.get("engagement_complete_announced"):
         lines.append(
-            f"You've reached this block's practice target: {completed_count} of {target_question_count} questions answered."
+            f"You've reached this block's engagement target: {completed_count} of {target_question_count} questions answered."
         )
-        milestones["target_complete_announced"] = True
+        milestones["engagement_complete_announced"] = True
 
     if not lines:
         return
@@ -1620,16 +1627,13 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
     mastery = round((correct_count * 100 / completed_count), 2) if completed_count else 0.0
     coverage = round((covered_objective_count * 100 / total_objectives), 2) if total_objectives else 0.0
     engagement = float(engagement_metrics["engagement"])
-    target = round(min(100, completed_count * 100 / target_question_count), 2)
-    overall = _weighted_practice_score(
-        block.course,
-        {
-            "mastery": mastery,
-            "coverage": coverage,
-            "engagement": engagement,
-            "target": target,
-        },
-    )
+    metric_values = {
+        "mastery": mastery,
+        "coverage": coverage,
+        "engagement": engagement,
+    }
+    overall = _weighted_practice_score(block.course, metric_values)
+    weights = base_practice_weights(block.course)
     advanced_question_start_percent = _advanced_question_start_percent(block)
     advanced_question_types_unlocked = _advanced_question_types_unlocked(block.course, block, course_state)
     return {
@@ -1637,7 +1641,6 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
         "mastery": mastery,
         "coverage": coverage,
         "engagement": engagement,
-        "target": target,
         "completed_count": completed_count,
         "correct_count": correct_count,
         "incorrect_count": incorrect_count,
@@ -1647,6 +1650,7 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
         "engagement_half_life_days": engagement_metrics["engagement_half_life_days"],
         "engagement_release_date": engagement_metrics["engagement_release_date"],
         "engagement_is_fixed": engagement_metrics["engagement_is_fixed"],
+        "weights": weights,
         "target_question_count": target_question_count,
         "advanced_question_start_percent": advanced_question_start_percent,
         "advanced_question_types_unlocked": advanced_question_types_unlocked,
@@ -1654,43 +1658,21 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
 
 
 def _practice_score_weights(course: Course) -> dict:
-    total_weight = (
-        course.config.mastery_weight
-        + course.config.coverage_weight
-        + course.config.engagement_weight
-        + course.config.target_weight
-    )
-    return {
-        "mastery": course.config.mastery_weight,
-        "coverage": course.config.coverage_weight,
-        "engagement": course.config.engagement_weight,
-        "target": course.config.target_weight,
-        "total": total_weight,
-    }
+    return base_practice_weights(course)
 
 
 def _weighted_practice_score(course: Course, metrics: dict) -> float:
-    total_weight = _practice_score_weights(course)["total"]
-    if total_weight <= 0:
-        return 0.0
-    weighted_total = (
-        metrics["mastery"] * course.config.mastery_weight
-        + metrics["coverage"] * course.config.coverage_weight
-        + metrics["engagement"] * course.config.engagement_weight
-        + metrics["target"] * course.config.target_weight
-    )
-    return round(weighted_total / total_weight, 2)
+    return weighted_practice_score(course, metrics)
 
 
-def _course_metrics(course: Course, serialized_blocks: list[dict]) -> dict:
+def _course_metrics(course: Course, serialized_blocks: list[dict], block_metric_pairs: list[dict] | None = None) -> dict:
     metric_blocks = [block for block in serialized_blocks if block.get("counts_in_metrics")] or serialized_blocks
-    weights = _practice_score_weights(course)
     if not metric_blocks:
+        weights = _practice_score_weights(course)
         return {
             "mastery": 0.0,
             "coverage": 0.0,
-            "engagement": 100.0 if _engagement_half_life_days(course) is None else 0.0,
-            "target": 0.0,
+            "engagement": 0.0,
             "overall": 0.0,
             "block_count": 0,
             "completed_count": 0,
@@ -1705,16 +1687,21 @@ def _course_metrics(course: Course, serialized_blocks: list[dict]) -> dict:
             "weights": weights,
         }
 
-    block_count = len(metric_blocks)
-    metrics = {
-        "mastery": round(sum(block["metrics"]["mastery"] for block in metric_blocks) / block_count, 2),
-        "coverage": round(sum(block["metrics"]["coverage"] for block in metric_blocks) / block_count, 2),
-        "engagement": round(sum(block["metrics"]["engagement"] for block in metric_blocks) / block_count, 2),
-        "target": round(sum(block["metrics"]["target"] for block in metric_blocks) / block_count, 2),
-    }
+    block_pairs = block_metric_pairs or []
+    if len(block_pairs) == len(serialized_blocks):
+        filtered_pairs = [
+            pair
+            for pair, block in zip(block_pairs, serialized_blocks)
+            if block.get("counts_in_metrics")
+        ]
+        block_pairs = filtered_pairs or block_pairs
+    elif len(block_pairs) != len(metric_blocks):
+        block_pairs = []
+    block_count = len(block_pairs)
+    metrics = combine_block_practice_metrics(course, block_pairs)
+    weights = metrics.get("weights") or _practice_score_weights(course)
     return {
         **metrics,
-        "overall": _weighted_practice_score(course, metrics),
         "block_count": block_count,
         "completed_count": sum(block["metrics"]["completed_count"] for block in metric_blocks),
         "correct_count": sum(block["metrics"]["correct_count"] for block in metric_blocks),
@@ -1782,6 +1769,7 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None, pr
         include_projects=include_projects,
     )
     serialized_blocks = []
+    course_metric_pairs = []
     pending_questions = course_state.get("pending_questions", {})
     for block in blocks:
         transcript = _ensure_block_transcript(course_state, block)
@@ -1818,13 +1806,14 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None, pr
                 "projects": project_map.get(block.pk, []),
             }
         )
+        course_metric_pairs.append({"block": block, "metrics": block_metrics})
     request.session.modified = True
     return {
         "course": {
             "id": course.pk,
             "title": course.title,
             "summary": course.summary,
-            "metrics": _course_metrics(course, serialized_blocks),
+            "metrics": _course_metrics(course, serialized_blocks, course_metric_pairs),
         },
         "active_block_id": active_block_id,
         "blocks": serialized_blocks,

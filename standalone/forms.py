@@ -71,7 +71,7 @@ def _apply_question_setting_field_attributes(fields, *, block_level: bool = Fals
         if block_level
         else "Target percentage of newly generated questions that should use coding comprehension or debugging snippets when coding content is detected."
     )
-    fields["advanced_question_start_percent"].label = "Start MAQ/WAQ after target progress (%)"
+    fields["advanced_question_start_percent"].label = "Start MAQ/WAQ after engagement progress (%)"
     fields["advanced_question_start_percent"].help_text = (
         "Leave blank to inherit the course default."
         if block_level
@@ -279,9 +279,8 @@ class CourseConfigForm(forms.ModelForm):
         self.fields["engagement_half_life_days"].help_text = (
             "Optional. Engagement decays exponentially from each block release date. "
             "After one half-life, an answered question counts for 50%; after two, 25%. "
-            "Leave blank to keep engagement fixed at 100%."
+            "Leave blank to measure engagement by completed questions only."
         )
-        self.fields["target_weight"].help_text = "Weighting of progress toward the block question target."
         self.fields["revalidation_attempts"].help_text = "Number of additional validation attempts permitted after the first."
         self.fields["show_validation_feedback_immediately"].label = "Release validation feedback immediately"
         self.fields["show_validation_feedback_immediately"].help_text = (
@@ -507,12 +506,16 @@ class BlockConfigTargetQuestionCountInlineForm(forms.ModelForm):
         model = BlockConfig
         fields = ["target_question_count"]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["target_question_count"].label = "Engagement target"
+
     def clean_target_question_count(self):
         value = self.cleaned_data["target_question_count"]
         if value is None:
-            raise forms.ValidationError("Please enter a target question count.")
+            raise forms.ValidationError("Please enter an engagement target.")
         if value < 1:
-            raise forms.ValidationError("Target question count must be at least 1.")
+            raise forms.ValidationError("Engagement target must be at least 1 question.")
         return value
 
 

@@ -38,7 +38,6 @@
             <span class="practice-average-metric"><span>Mastery</span><strong>{{ course.practice_mastery_average|floatformat:1 }}%</strong></span>
             <span class="practice-average-metric"><span>Coverage</span><strong>{{ course.practice_coverage_average|floatformat:1 }}%</strong></span>
             <span class="practice-average-metric{% if not course.config.engagement_half_life_days %} is-fixed-engagement{% endif %}"><span>Engagement</span><strong>{{ course.practice_engagement_average|floatformat:1 }}%</strong></span>
-            <span class="practice-average-metric"><span>Target</span><strong>{{ course.practice_target_average|floatformat:1 }}%</strong></span>
           </div>
         </div>
         <div class="workspace-actions course-primary-actions">
@@ -235,12 +234,6 @@
               <p class="course-setting-help">{{ course_config_form.engagement_half_life_days.help_text }}</p>
               <p class="course-setting-status" data-course-config-status hidden></p>
             </div>
-            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.target_weight.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'target_weight' %}">
-              <label class="course-setting-label" for="{{ course_config_form.target_weight.id_for_label }}">{{ course_config_form.target_weight.label }}</label>
-              {{ course_config_form.target_weight }}
-              <p class="course-setting-help">{{ course_config_form.target_weight.help_text }}</p>
-              <p class="course-setting-status" data-course-config-status hidden></p>
-            </div>
           </div>
         </article>
 
@@ -418,7 +411,7 @@
                     </h3>
                     <div class="block-chip-row" aria-label="Block summary">
                       <span class="block-chip">Available {{ block.available_from|date:"j M Y" }}</span>
-                      <span class="block-chip">Target {{ block.preview_target_question_count }}</span>
+                      <span class="block-chip">Engagement target {{ block.preview_target_question_count }}</span>
                       <span class="block-chip">{{ block.objective_count }} objectives</span>
                       <span class="block-chip">{{ block.asset_count }} uploads</span>
                       {% if block.regeneration_status != 'idle' %}
@@ -522,7 +515,7 @@
                   >{{ block.available_from|date:"j M Y" }}</strong>
                 </div>
                 <div class="block-meta-tile">
-                  <span class="block-meta-label">Target MCQs</span>
+                  <span class="block-meta-label">Engagement target</span>
                   <strong
                     class="inline-editable inline-editable-date"
                     data-inline-edit
@@ -530,7 +523,7 @@
                     data-inline-field="target_question_count"
                     data-inline-input-type="number"
                     data-inline-value="{{ block.preview_target_question_count }}"
-                    data-inline-label="Target MCQs"
+                    data-inline-label="Engagement target"
                     tabindex="0"
                     role="button"
                   >{{ block.preview_target_question_count }}</strong>

@@ -106,7 +106,8 @@ from standalone.services.demo_mode import (
     submit_demo_preview_answer,
     submit_demo_validation_practice_answer,
 )
-from standalone.services.metrics import refresh_enrollment_metrics
+from standalone.services.metrics import enrollment_practice_metrics_snapshot, refresh_enrollment_metrics
+from standalone.services.practice_scoring import weighted_practice_score
 from standalone.services.notifications import send_logged_email
 from standalone.services.preview import (
     draft_preview_written_answer,
@@ -134,6 +135,9 @@ from standalone.services.projects import (
     validate_block_project_spec,
 )
 from standalone.services.preview_validation import (
+    _course_state,
+    _preview_practice_seed_key,
+    _question_map,
     confirm_preview_student_validate,
     draft_preview_student_validate_answer,
     draft_preview_validation_answer,
@@ -158,7 +162,11 @@ from standalone.services.student_practice import (
     serialize_student_practice_state,
     submit_student_practice_answer,
 )
-from standalone.services.validation_pdf import build_validation_pack_pdf
+from standalone.services.validation_pdf import (
+    build_preview_validation_practice_pdf,
+    build_validation_pack_pdf,
+    build_validation_practice_pdf,
+)
 from standalone.services.validation_flow import (
     ValidationFlowError,
     confirm_official_validation_instructions,
@@ -381,9 +389,9 @@ def dashboard(request: HttpRequest) -> HttpResponse:
 def teacher_dashboard(request: HttpRequest) -> HttpResponse:
     if not _is_teacher(request.user):
         raise Http404
-    courses = Course.objects.filter(teacher=request.user).select_related("config")
+    courses = Course.objects.filter(teacher=request.user).select_related("config").prefetch_related("blocks__config")
     if request.user.role == User.Role.INTERNAL or request.user.is_superuser:
-        courses = Course.objects.all().select_related("config", "teacher")
+        courses = Course.objects.all().select_related("config", "teacher").prefetch_related("blocks__config")
     courses = courses.annotate(
         student_count=Count("enrollments", distinct=True),
         question_count=Count("question_bank_items", distinct=True),
@@ -396,7 +404,6 @@ def teacher_dashboard(request: HttpRequest) -> HttpResponse:
         practice_mastery_average=Avg("enrollments__mastery_score"),
         practice_coverage_average=Avg("enrollments__coverage_score"),
         practice_engagement_average=Avg("enrollments__engagement_score"),
-        practice_target_average=Avg("enrollments__target_score"),
     )
     course_list = list(courses)
     _attach_course_practice_averages(course_list)
@@ -430,7 +437,7 @@ def student_dashboard(request: HttpRequest) -> HttpResponse:
     enrollments = list(
         Enrollment.objects.filter(student=request.user)
         .select_related("course", "course__config")
-        .prefetch_related("validation_bookings__event")
+        .prefetch_related("validation_bookings__event", "course__blocks__config")
     )
     course_ids = [enrollment.course_id for enrollment in enrollments]
     now = timezone.now()
@@ -641,7 +648,6 @@ def _attach_course_practice_average(course: Course) -> None:
         practice_mastery_average=Avg("mastery_score"),
         practice_coverage_average=Avg("coverage_score"),
         practice_engagement_average=Avg("engagement_score"),
-        practice_target_average=Avg("target_score"),
     )
     for key, value in averages.items():
         setattr(course, key, value)
@@ -650,12 +656,16 @@ def _attach_course_practice_average(course: Course) -> None:
 
 def _normalise_course_practice_averages(course: Course) -> None:
     metrics = {}
-    for metric_name in ("mastery", "coverage", "engagement", "target"):
+    for metric_name in ("mastery", "coverage", "engagement"):
         attr_name = f"practice_{metric_name}_average"
         metric_value = round(float(getattr(course, attr_name, 0) or 0), 2)
         setattr(course, attr_name, metric_value)
         metrics[metric_name] = metric_value
     course.practice_overall_average = _weighted_practice_average(course, metrics)
+    enrollments = list(course.enrollments.select_related("course", "course__config"))
+    if enrollments:
+        enrollment_overalls = [enrollment_practice_metrics_snapshot(enrollment)["overall"] for enrollment in enrollments]
+        course.practice_overall_average = round(sum(enrollment_overalls) / len(enrollment_overalls), 2)
 
 
 def _demo_embed_origin_from_request(request: HttpRequest) -> str:
@@ -955,31 +965,8 @@ def _serialize_preview_booking_sessions(course: Course, *, now=None) -> list[dic
     return sessions
 
 
-def _course_config(course: Course) -> CourseConfig:
-    try:
-        return course.config
-    except CourseConfig.DoesNotExist:
-        config, _created = CourseConfig.objects.get_or_create(course=course)
-        return config
-
-
 def _weighted_practice_average(course: Course, metrics: dict) -> float:
-    config = _course_config(course)
-    total_weight = (
-        config.mastery_weight
-        + config.coverage_weight
-        + config.engagement_weight
-        + config.target_weight
-    )
-    if total_weight <= 0:
-        return 0.0
-    weighted_total = (
-        metrics["mastery"] * config.mastery_weight
-        + metrics["coverage"] * config.coverage_weight
-        + metrics["engagement"] * config.engagement_weight
-        + metrics["target"] * config.target_weight
-    )
-    return round(weighted_total / total_weight, 2)
+    return weighted_practice_score(course, metrics)
 
 
 def _refresh_course_summary_after_asset_change(course: Course) -> None:
@@ -2382,6 +2369,7 @@ def validation_practice_session(request: HttpRequest, course_id: int) -> HttpRes
             "sidebar_state": sidebar_state,
             "practice_url": reverse("standalone:practice_quiz", args=[course_id]),
             "session_action_url": reverse("standalone:validation_practice_action", args=[course_id, attempt.pk, "ACTION"]),
+            "validation_practice_pdf_url": reverse("standalone:validation_practice_pdf", args=[course_id, attempt.pk]),
             "exit_url": reverse("standalone:practice_quiz", args=[course_id]),
             "exit_label": "Back to practice",
         },
@@ -2419,6 +2407,11 @@ def preview_validation_practice(request: HttpRequest, course_id: int) -> HttpRes
         course,
         session_state,
         sidebar_state,
+        validation_practice_pdf_url=(
+            reverse("standalone:preview_validation_practice_pdf", args=[course.pk])
+            if review_history_id <= 0
+            else ""
+        ),
         exit_url=reverse("standalone:student_preview", args=[course.pk]),
         exit_label="Back to practice",
         session_action_url=(
@@ -2488,6 +2481,7 @@ def _render_teacher_preview_validate(
     sidebar_state: dict,
     *,
     session_action_url: str = "",
+    validation_practice_pdf_url: str = "",
     exit_url: str | None = None,
     exit_label: str | None = None,
 ):
@@ -2502,6 +2496,7 @@ def _render_teacher_preview_validate(
             "practice_validation_url": _preview_practice_validation_url(course.pk, restart=True),
             "validation_sidebar_cta": _preview_practice_validation_sidebar_cta(request, course),
             "session_action_url": session_action_url,
+            "validation_practice_pdf_url": validation_practice_pdf_url,
             "exit_url": exit_url or reverse("standalone:student_preview", args=[course.pk]),
             "exit_label": exit_label or "Exit student view",
         },
@@ -3235,6 +3230,55 @@ def validation_pack_pdf(request: HttpRequest, event_id: int) -> HttpResponse:
     pack = ValidationPack.objects.create(event=event, generated_by=request.user, generated_for_booking_count=len(bookings))
     pdf_bytes = build_validation_pack_pdf(pack, bookings)
     return HttpResponse(pdf_bytes, content_type="application/pdf", headers={"Content-Disposition": f'inline; filename="validation-pack-{event.pk}.pdf"'})
+
+
+@login_required
+def validation_practice_pdf(request: HttpRequest, course_id: int, attempt_id: int) -> HttpResponse:
+    if not _is_student(request.user):
+        raise Http404
+    enrollment = _student_enrollment_or_404(request.user, course_id)
+    attempt = get_object_or_404(
+        PracticeAttempt.objects.select_related("enrollment", "enrollment__course", "enrollment__student"),
+        pk=attempt_id,
+        enrollment=enrollment,
+        attempt_type=PracticeAttempt.AttemptType.VALIDATION_PRACTICE,
+    )
+    if not attempt.attempt_questions.exclude(question__question_type=QuestionBankItem.QuestionType.WAQ).exists():
+        messages.error(request, "This practice validation does not contain any printable questions yet.")
+        redirect_url = reverse("standalone:validation_practice_session", args=[course_id])
+        if attempt.completed_at:
+            redirect_url = f"{redirect_url}?review={attempt.pk}"
+        return redirect(redirect_url)
+    pdf_bytes = build_validation_practice_pdf(attempt)
+    return HttpResponse(
+        pdf_bytes,
+        content_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="validation-practice-{course_id}-{attempt.pk}.pdf"'},
+    )
+
+
+@login_required
+def preview_validation_practice_pdf(request: HttpRequest, course_id: int) -> HttpResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    state = _course_state(request, course)
+    question_ids = list(state.get("question_ids") or [])
+    questions = [_question_map(course, question_ids).get(question_id) for question_id in question_ids]
+    questions = [question for question in questions if question is not None]
+    if not any(question.question_type != QuestionBankItem.QuestionType.WAQ for question in questions):
+        messages.error(request, "This practice validation preview does not contain any printable questions yet.")
+        return redirect("standalone:preview_validation_practice", course.pk)
+    pdf_bytes = build_preview_validation_practice_pdf(
+        course.title,
+        questions,
+        seed_key=_preview_practice_seed_key(course, state),
+    )
+    return HttpResponse(
+        pdf_bytes,
+        content_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="preview-validation-practice-{course_id}.pdf"'},
+    )
 
 
 def _legacy_practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:

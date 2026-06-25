@@ -25,6 +25,7 @@ from standalone.models import (
     ValidationBooking,
     ValidationEvent,
 )
+from standalone.services.metrics import enrollment_practice_metrics_snapshot
 from standalone.services.preview import (
     PREVIEW_WAQ_MIN_SUBSTANTIVE_WORDS,
     WAQ_ALIGNMENT_THRESHOLD,
@@ -36,6 +37,7 @@ from standalone.services.preview import (
     _normalize_written_answer_text,
     normalize_explanation_text,
 )
+from standalone.services.practice_scoring import base_practice_weights, weighted_practice_score
 from standalone.services.questions import (
     block_has_coding_signal,
     coding_question_matches_expected_language,
@@ -1159,45 +1161,15 @@ def _merge_written_answer_text(existing_text: str, new_text: str) -> str:
 
 
 def _practice_component_weights(course) -> dict:
-    total = (
-        int(course.config.mastery_weight or 0)
-        + int(course.config.coverage_weight or 0)
-        + int(course.config.engagement_weight or 0)
-        + int(course.config.target_weight or 0)
-    )
-    return {
-        "mastery": int(course.config.mastery_weight or 0),
-        "coverage": int(course.config.coverage_weight or 0),
-        "engagement": int(course.config.engagement_weight or 0),
-        "target": int(course.config.target_weight or 0),
-        "total": total,
-    }
+    return base_practice_weights(course)
 
 
 def _weighted_practice_score(course, metrics: dict) -> float:
-    weights = _practice_component_weights(course)
-    if weights["total"] <= 0:
-        return 0.0
-    weighted_total = (
-        float(metrics.get("mastery", 0) or 0) * weights["mastery"]
-        + float(metrics.get("coverage", 0) or 0) * weights["coverage"]
-        + float(metrics.get("engagement", 0) or 0) * weights["engagement"]
-        + float(metrics.get("target", 0) or 0) * weights["target"]
-    )
-    return round(weighted_total / weights["total"], 2)
+    return weighted_practice_score(course, metrics)
 
 
 def _enrollment_practice_metrics(enrollment: Enrollment) -> dict:
-    metrics = {
-        "mastery": float(enrollment.mastery_score or 0),
-        "coverage": float(enrollment.coverage_score or 0),
-        "engagement": float(enrollment.engagement_score or 0),
-        "target": float(enrollment.target_score or 0),
-    }
-    return {
-        **metrics,
-        "overall": _weighted_practice_score(enrollment.course, metrics),
-    }
+    return enrollment_practice_metrics_snapshot(enrollment)
 
 
 def _projected_course_score(course, practice_overall: float, validation_score: float) -> tuple[float, int, float, bool]:

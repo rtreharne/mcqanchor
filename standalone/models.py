@@ -113,14 +113,13 @@ class CourseConfig(TimeStampedModel):
     validation_weight = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
     mastery_weight = models.PositiveSmallIntegerField(default=40, validators=[MinValueValidator(0), MaxValueValidator(100)])
     coverage_weight = models.PositiveSmallIntegerField(default=30, validators=[MinValueValidator(0), MaxValueValidator(100)])
-    engagement_weight = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
+    engagement_weight = models.PositiveSmallIntegerField(default=30, validators=[MinValueValidator(0), MaxValueValidator(100)])
     allow_pre_engagement = models.BooleanField(default=False)
     engagement_half_life_days = models.PositiveSmallIntegerField(
         null=True,
         blank=True,
         validators=[MinValueValidator(1), MaxValueValidator(3650)],
     )
-    target_weight = models.PositiveSmallIntegerField(default=10, validators=[MinValueValidator(0), MaxValueValidator(100)])
     distractor_count = models.PositiveSmallIntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(5)])
     numeric_ratio_percent = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
     maq_ratio_percent = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
@@ -208,11 +207,9 @@ class Enrollment(TimeStampedModel):
     mastery_score = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     coverage_score = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     engagement_score = models.DecimalField(max_digits=5, decimal_places=2, default=0)
-    target_score = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     mastery_delta = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     coverage_delta = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     engagement_delta = models.DecimalField(max_digits=5, decimal_places=2, default=0)
-    target_delta = models.DecimalField(max_digits=5, decimal_places=2, default=0)
 
     class Meta:
         unique_together = ("course", "student")
@@ -364,11 +361,6 @@ class BlockConfig(TimeStampedModel):
     block = models.OneToOneField(CourseBlock, on_delete=models.CASCADE, related_name="config")
     release_date = models.DateTimeField(null=True, blank=True)
     target_question_count = models.PositiveSmallIntegerField(default=20)
-    target_weight_override = models.PositiveSmallIntegerField(
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(0), MaxValueValidator(100)],
-    )
     assistant_guidance = models.TextField(blank=True)
     distractor_count = models.PositiveSmallIntegerField(
         null=True,
@@ -703,7 +695,6 @@ class PracticeAttempt(TimeStampedModel):
     mastery_delta = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     coverage_delta = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     engagement_delta = models.DecimalField(max_digits=5, decimal_places=2, default=0)
-    target_delta = models.DecimalField(max_digits=5, decimal_places=2, default=0)
 
     class Meta:
         ordering = ["-started_at"]

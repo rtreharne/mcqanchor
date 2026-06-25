@@ -38,7 +38,6 @@
               <span class="practice-average-metric"><span>Mastery</span><strong>{{ course.practice_mastery_average|floatformat:1 }}%</strong></span>
               <span class="practice-average-metric"><span>Coverage</span><strong>{{ course.practice_coverage_average|floatformat:1 }}%</strong></span>
               <span class="practice-average-metric{% if not course.config.engagement_half_life_days %} is-fixed-engagement{% endif %}"><span>Engagement</span><strong>{{ course.practice_engagement_average|floatformat:1 }}%</strong></span>
-              <span class="practice-average-metric"><span>Target</span><strong>{{ course.practice_target_average|floatformat:1 }}%</strong></span>
             </div>
           </div>
           <span class="course-card-link">Open course</span>

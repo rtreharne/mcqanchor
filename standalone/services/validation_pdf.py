@@ -4,16 +4,16 @@ import qrcode
 from django.utils import timezone
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
-from reportlab.lib.utils import ImageReader
+from reportlab.lib.utils import ImageReader, simpleSplit
 from reportlab.pdfgen import canvas
 
-from standalone.models import ValidationBooking, ValidationPack, ValidationSubmission
-from standalone.services.validation_flow import get_or_create_official_attempt
+from standalone.models import PracticeAttempt, QuestionBankItem, ValidationBooking, ValidationPack, ValidationSubmission
+from standalone.services.validation_flow import _shuffle_options, get_or_create_official_attempt
 
 
 def build_validation_pack_pdf(pack: ValidationPack, bookings: list[ValidationBooking]) -> bytes:
     buffer = BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
+    pdf = canvas.Canvas(buffer, pagesize=A4, pageCompression=0)
     width, height = A4
 
     for booking in bookings:
@@ -65,3 +65,211 @@ def build_validation_pack_pdf(pack: ValidationPack, bookings: list[ValidationBoo
     pdf.save()
     buffer.seek(0)
     return buffer.read()
+
+
+def _draw_wrapped_lines(
+    pdf: canvas.Canvas,
+    text: str,
+    *,
+    x: float,
+    y: float,
+    width: float,
+    font_name: str = "Helvetica",
+    font_size: int = 11,
+    leading: float = 5.5 * mm,
+) -> float:
+    pdf.setFont(font_name, font_size)
+    for line in simpleSplit(str(text or ""), font_name, font_size, width):
+        pdf.drawString(x, y, line)
+        y -= leading
+    return y
+
+
+def _option_letter(index: int) -> str:
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return letters[index] if 0 <= index < len(letters) else f"Option {index + 1}"
+
+
+def _build_validation_practice_pdf_document(
+    *,
+    title: str,
+    owner_label: str,
+    questions: list[QuestionBankItem],
+    seed_key: str,
+) -> bytes:
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4, pageCompression=0)
+    width, height = A4
+    left = 18 * mm
+    right = width - (18 * mm)
+    printable_width = right - left
+    top = height - (20 * mm)
+    bottom = 18 * mm
+    line_gap = 5.5 * mm
+    paragraph_gap = 2.5 * mm
+    printable_questions = [question for question in questions if question.question_type != QuestionBankItem.QuestionType.WAQ]
+
+    if not printable_questions:
+        raise ValueError("No printable questions are available for this validation practice attempt.")
+
+    answer_rows: list[tuple[int, str]] = []
+    y = top
+
+    pdf.setTitle(f"Validation practice - {title}")
+    pdf.setFont("Helvetica-Bold", 18)
+    pdf.drawString(left, y, title)
+    y -= 9 * mm
+    pdf.setFont("Helvetica-Bold", 14)
+    pdf.drawString(left, y, "Printable practice validation")
+    y -= 7 * mm
+    pdf.setFont("Helvetica", 11)
+    pdf.drawString(left, y, owner_label)
+    y -= 6 * mm
+    pdf.drawString(left, y, f"Generated: {timezone.localtime(timezone.now()):%d %b %Y %H:%M}")
+    y -= 6 * mm
+    pdf.drawString(left, y, "Written-answer questions are excluded from this printable version.")
+    y -= 10 * mm
+
+    for index, question in enumerate(printable_questions, start=1):
+        options = _shuffle_options(question.all_answer_options(), seed_key, question.pk)
+        option_labels = {_option_letter(option_index): option for option_index, option in enumerate(options)}
+        correct_letters = [
+            label
+            for label, option_text in option_labels.items()
+            if option_text in set(question.correct_answers())
+        ]
+        answer_text = ", ".join(correct_letters) if correct_letters else question.correct_answer
+        answer_rows.append((index, answer_text))
+
+        estimated_lines = len(simpleSplit(question.stem, "Helvetica", 11, printable_width))
+        estimated_lines += sum(len(simpleSplit(f"{_option_letter(option_index)}. {option}", "Helvetica", 10, printable_width - (6 * mm))) for option_index, option in enumerate(options))
+        estimated_lines += 5
+        estimated_height = estimated_lines * line_gap
+        if y - estimated_height < bottom:
+            pdf.showPage()
+            y = top
+
+        pdf.setFont("Helvetica-Bold", 12)
+        header = f"{index}. {question.question_type_label()}"
+        if question.is_multiple_answer():
+            header += " (Select all that apply)"
+        pdf.drawString(left, y, header)
+        y -= 6 * mm
+
+        if question.block_id and question.block:
+            pdf.setFont("Helvetica", 9)
+            pdf.drawString(left, y, f"Block: {question.block.title}")
+            y -= 4.5 * mm
+        if question.learning_objective_id and question.learning_objective:
+            y = _draw_wrapped_lines(
+                pdf,
+                f"Objective: {question.learning_objective.text}",
+                x=left,
+                y=y,
+                width=printable_width,
+                font_name="Helvetica",
+                font_size=9,
+                leading=4.5 * mm,
+            )
+            y -= paragraph_gap
+
+        y = _draw_wrapped_lines(
+            pdf,
+            question.stem,
+            x=left,
+            y=y,
+            width=printable_width,
+            font_name="Helvetica",
+            font_size=11,
+            leading=line_gap,
+        )
+        y -= paragraph_gap
+
+        if question.code_snippet:
+            pdf.setFont("Courier", 9)
+            y = _draw_wrapped_lines(
+                pdf,
+                question.code_snippet,
+                x=left + (4 * mm),
+                y=y,
+                width=printable_width - (4 * mm),
+                font_name="Courier",
+                font_size=9,
+                leading=4.5 * mm,
+            )
+            y -= paragraph_gap
+
+        pdf.setFont("Helvetica", 10)
+        for option_index, option in enumerate(options):
+            y = _draw_wrapped_lines(
+                pdf,
+                f"{_option_letter(option_index)}. {option}",
+                x=left + (4 * mm),
+                y=y,
+                width=printable_width - (4 * mm),
+                font_name="Helvetica",
+                font_size=10,
+                leading=line_gap,
+            )
+            y -= 1.5 * mm
+
+        y -= 6 * mm
+
+    pdf.showPage()
+    y = top
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(left, y, "Answer key")
+    y -= 9 * mm
+    pdf.setFont("Helvetica", 11)
+    pdf.drawString(left, y, "Use this final page to mark the printable practice validation.")
+    y -= 8 * mm
+
+    for index, answer_text in answer_rows:
+        if y < bottom:
+            pdf.showPage()
+            y = top
+            pdf.setFont("Helvetica-Bold", 16)
+            pdf.drawString(left, y, "Answer key")
+            y -= 9 * mm
+            pdf.setFont("Helvetica", 11)
+        y = _draw_wrapped_lines(
+            pdf,
+            f"{index}. {answer_text}",
+            x=left,
+            y=y,
+            width=printable_width,
+            font_name="Helvetica",
+            font_size=11,
+            leading=line_gap,
+        )
+        y -= 1.5 * mm
+
+    pdf.save()
+    buffer.seek(0)
+    return buffer.read()
+
+
+def build_validation_practice_pdf(attempt: PracticeAttempt) -> bytes:
+    questions = [
+        attempt_question.question
+        for attempt_question in attempt.attempt_questions.select_related(
+            "question",
+            "question__block",
+            "question__learning_objective",
+        ).order_by("order", "created_at")
+    ]
+    return _build_validation_practice_pdf_document(
+        title=attempt.enrollment.course.title,
+        owner_label=f"Student: {attempt.enrollment.student.get_full_name() or attempt.enrollment.student.email}",
+        questions=questions,
+        seed_key=f"practice-validation:{attempt.pk}:course:{attempt.enrollment.course_id}",
+    )
+
+
+def build_preview_validation_practice_pdf(course_title: str, questions: list[QuestionBankItem], *, seed_key: str) -> bytes:
+    return _build_validation_practice_pdf_document(
+        title=course_title,
+        owner_label="Student preview",
+        questions=questions,
+        seed_key=seed_key,
+    )

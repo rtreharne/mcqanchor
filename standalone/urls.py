@@ -24,6 +24,11 @@ urlpatterns = [
     ),
     path("teacher/courses/<int:course_id>/validation-practice/", views.preview_validation_practice, name="preview_validation_practice"),
     path(
+        "teacher/courses/<int:course_id>/validation-practice/paper/",
+        views.preview_validation_practice_pdf,
+        name="preview_validation_practice_pdf",
+    ),
+    path(
         "teacher/courses/<int:course_id>/validation-practice/<str:action>/",
         views.preview_validation_practice_action,
         name="preview_validation_practice_action",
@@ -97,6 +102,11 @@ urlpatterns = [
         name="validation_attempt_action",
     ),
     path("student/courses/<int:course_id>/validation-practice/", views.validation_practice_session, name="validation_practice_session"),
+    path(
+        "student/courses/<int:course_id>/validation-practice/<int:attempt_id>/paper/",
+        views.validation_practice_pdf,
+        name="validation_practice_pdf",
+    ),
     path(
         "student/courses/<int:course_id>/validation-practice/<int:attempt_id>/<str:action>/",
         views.validation_practice_action,

@@ -107,7 +107,6 @@ class EnrollmentAdmin(CsvExportMixin, admin.ModelAdmin):
         "mastery_score",
         "coverage_score",
         "engagement_score",
-        "target_score",
         "created_at",
     )
 

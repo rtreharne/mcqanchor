@@ -1613,6 +1613,11 @@ def _attempt_numeric_generation_for_chunk(
                 numeric_avoid_question_angles.extend(_retry_notes_for_numeric_validation_error(last_generation_error, payload))
                 continue
             break
+        except ValueError as exc:
+            last_generation_error = str(exc)
+            _trace_generation_rejection(block, QuestionBankItem.QuestionType.NUM, last_generation_error, chunk=chunk, objective=objective)
+            numeric_avoid_question_angles.extend(_retry_notes_for_numeric_validation_error(last_generation_error, payload))
+            continue
 
         if practice is not None and validation is not None:
             return practice, validation, ""

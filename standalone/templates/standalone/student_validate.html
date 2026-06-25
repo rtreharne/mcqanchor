@@ -83,13 +83,9 @@
               <span>Coverage</span>
               <strong>{{ metrics.coverage|floatformat:1 }}%</strong>
             </div>
-            <div class="preview-block-metric">
+            <div class="preview-block-metric{% if metrics.engagement_is_fixed %} is-fixed-engagement{% endif %}">
               <span>Engagement</span>
               <strong>{{ metrics.engagement|floatformat:1 }}%</strong>
-            </div>
-            <div class="preview-block-metric">
-              <span>Target</span>
-              <strong>{{ metrics.target|floatformat:1 }}%</strong>
             </div>
           </div>
         </section>
@@ -147,6 +143,11 @@
           <p class="validation-chat-subtitle">{{ session_state.course_title }}</p>
         {% endif %}
       </div>
+      {% if validation_practice_pdf_url %}
+        <div class="preview-chat-header-actions">
+          <a class="preview-header-action" href="{{ validation_practice_pdf_url }}">Download printable PDF</a>
+        </div>
+      {% endif %}
       {% if session_state.attempt_id %}
         <div class="validation-chat-meta">
           <div class="validation-meta-pill validation-meta-pill--progress">
