@@ -179,6 +179,30 @@ function syncDemoSettingsVisibility(root = document) {
   });
 }
 
+function isTextLikeAutosaveInput(input) {
+  if (!input) {
+    return false;
+  }
+  if (input.tagName === "TEXTAREA") {
+    return true;
+  }
+  if (input.tagName !== "INPUT") {
+    return false;
+  }
+  const type = (input.type || "text").toLowerCase();
+  return !["checkbox", "radio", "range", "color", "file", "hidden"].includes(type);
+}
+
+function shouldSyncSavedValueToInput(input, submittedValue) {
+  if (!isTextLikeAutosaveInput(input)) {
+    return true;
+  }
+  if (document.activeElement === input) {
+    return false;
+  }
+  return input.value === submittedValue;
+}
+
 async function saveCourseConfigInput(input) {
   const row = input.closest("[data-course-config-row]");
   const fieldName = row?.dataset.courseConfigField;
@@ -193,12 +217,15 @@ async function saveCourseConfigInput(input) {
   }
 
   const body = new URLSearchParams();
+  let submittedValue = "";
   if (input.type === "checkbox") {
     if (input.checked) {
       body.set(fieldName, "on");
     }
+    submittedValue = input.checked ? "on" : "";
   } else {
-    body.set(fieldName, input.value);
+    submittedValue = input.value;
+    body.set(fieldName, submittedValue);
   }
 
   row.dataset.saving = "true";
@@ -222,7 +249,11 @@ async function saveCourseConfigInput(input) {
     }
     if (input.type === "checkbox" && typeof payload.checked === "boolean") {
       input.checked = payload.checked;
-    } else if (payload.raw_value !== undefined && payload.raw_value !== null) {
+    } else if (
+      payload.raw_value !== undefined &&
+      payload.raw_value !== null &&
+      shouldSyncSavedValueToInput(input, submittedValue)
+    ) {
       input.value = `${payload.raw_value}`;
     }
     setCourseConfigRowState(row, "saved", "Saved");
@@ -257,7 +288,8 @@ async function saveBlockConfigInput(input) {
   }
 
   const body = new URLSearchParams();
-  body.set(fieldName, input.value);
+  const submittedValue = input.value;
+  body.set(fieldName, submittedValue);
 
   row.dataset.saving = "true";
   row.dataset.pendingSave = "false";
@@ -278,10 +310,12 @@ async function saveBlockConfigInput(input) {
     if (!response.ok || !payload.ok) {
       throw new Error((payload.errors || ["Unable to save this setting."]).join(" "));
     }
-    if (payload.raw_value === null || payload.raw_value === undefined || payload.raw_value === "") {
-      input.value = "";
-    } else {
-      input.value = `${payload.raw_value}`;
+    if (shouldSyncSavedValueToInput(input, submittedValue)) {
+      if (payload.raw_value === null || payload.raw_value === undefined || payload.raw_value === "") {
+        input.value = "";
+      } else {
+        input.value = `${payload.raw_value}`;
+      }
     }
     setBlockConfigRowState(row, "saved", "Saved");
     showSettingsToast(payload.message || "Block settings updated.");

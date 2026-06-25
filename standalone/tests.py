@@ -572,7 +572,7 @@ class StandaloneFlowTests(TestCase):
         payload = _normalize_generated_payload(
             {
                 "question_type": "mcq",
-                "stem": 'Consider this R snippet: ```r\nlibrary(tibble)\ndf <- data.frame(x = 1:5)\n``` What does it print?',
+                "stem": 'Consider this R snippet: ```r\nlibrary(tibble)\ndf <- data.frame(x = 1:5)\n``` Which statement best explains how tibble-style printing affects the displayed output?',
                 "correct_answers": ["A tibble-style print output."],
                 "distractors": ["It opens a file.", "It performs a network call.", "It deletes a column."],
                 "further_study_questions": ["Why does tibble printing differ?"],
@@ -588,7 +588,71 @@ class StandaloneFlowTests(TestCase):
         )
 
         self.assertNotIn("```", payload["stem"])
-        self.assertEqual(payload["stem"], "Consider this R snippet: What does it print?")
+        self.assertEqual(payload["stem"], "Consider this R snippet: Which statement best explains how tibble-style printing affects the displayed output?")
+
+    def test_coding_question_payload_rejects_external_file_dependency(self):
+        with self.assertRaisesMessage(ValueError, "Coding question snippet depends on an external file or service."):
+            _normalize_generated_payload(
+                {
+                    "question_type": "mcq",
+                    "stem": "Which statement best explains how this R code prepares the plot data?",
+                    "correct_answers": ["It reads a CSV and derives a converted measurement column before plotting."],
+                    "distractors": ["It only renames variables.", "It only changes colours.", "It performs no data preparation."],
+                    "further_study_questions": ["Why convert units before plotting?"],
+                    "explanation": "The code reads external data and transforms it before plotting.",
+                    "difficulty": "core",
+                    "is_coding_question": True,
+                    "coding_language": "r",
+                    "coding_question_kind": "comprehension",
+                    "code_snippet": 'data <- read.csv(\"compost_999.csv\")\ndata$vbc <- data$viable.counts * 2e5 / 1e7\nplot(data$vbc)',
+                },
+                QuestionBankItem.QuestionType.MCQ,
+                distractor_count=3,
+            )
+
+    def test_coding_question_payload_rejects_loop_stem_when_snippet_has_no_loop(self):
+        with self.assertRaisesMessage(ValueError, "Coding question stem refers to loop behaviour that is not present in the code snippet."):
+            _normalize_generated_payload(
+                {
+                    "question_type": "mcq",
+                    "stem": "Which statement best explains how state changes across the loop in this R example?",
+                    "correct_answers": ["The code updates an accumulator each iteration."],
+                    "distractors": ["The code sorts the rows once.", "The code only defines a static plot.", "The code never revisits any value."],
+                    "further_study_questions": ["How would a real loop change this example?"],
+                    "explanation": "A loop would repeatedly update state, but this code does not contain one.",
+                    "difficulty": "core",
+                    "is_coding_question": True,
+                    "coding_language": "r",
+                    "coding_question_kind": "comprehension",
+                    "code_snippet": "library(plotly)\nfig <- plot_ly(data = data, x = ~Temperature, y = ~Moisture, z = ~vbc, type = 'scatter3d')",
+                },
+                QuestionBankItem.QuestionType.MCQ,
+                distractor_count=3,
+            )
+
+    def test_coding_question_payload_rejects_generic_meta_distractors(self):
+        with self.assertRaisesMessage(ValueError, "Single-answer payload uses meta-commentary distractors instead of direct content alternatives."):
+            _normalize_generated_payload(
+                {
+                    "question_type": "mcq",
+                    "stem": "Which statement best explains how indexing affects the returned column in this R example?",
+                    "correct_answers": ["Using [[ returns the column vector rather than a one-column data frame."],
+                    "distractors": [
+                        "The later lines do not depend on the earlier logic, so code structure is irrelevant here.",
+                        "The key behaviour comes from an external file or network service rather than the code shown.",
+                        "Reading the code line by line is enough; there is no need to reason about control flow or data movement.",
+                    ],
+                    "further_study_questions": ["When would [ return a data frame instead?"],
+                    "explanation": "Different indexing operators return different object types.",
+                    "difficulty": "core",
+                    "is_coding_question": True,
+                    "coding_language": "r",
+                    "coding_question_kind": "comprehension",
+                    "code_snippet": "df <- data.frame(a = 1:3)\nvalue <- df[[\"a\"]]\nprint(value)",
+                },
+                QuestionBankItem.QuestionType.MCQ,
+                distractor_count=3,
+            )
 
     def test_pdf_import_outline_selection_prefers_chapter_depth_below_part_headings(self):
         items = _select_outline_items(
@@ -5873,7 +5937,7 @@ print(result)""",
         self.assertIn("You've reached this block's practice target: 1 of 1 questions answered.", progress_messages[-1]["text"])
         self.assertIn("Mastery is 100%.", progress_messages[-1]["text"])
 
-    def test_student_preview_answer_adds_progress_message_when_coverage_and_target_incomplete(self):
+    def test_student_preview_answer_does_not_add_progress_message_when_coverage_and_target_incomplete(self):
         course = self.create_course()
         block, _, objective, _ = self.create_preview_content_block(course)
         block.config.target_question_count = 4
@@ -5912,9 +5976,68 @@ print(result)""",
         block_payload = next(item for item in answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
         progress_messages = [message for message in block_payload["transcript"] if message["kind"] == "progress_coach"]
 
-        self.assertEqual(len(progress_messages), 1)
-        self.assertIn("Coverage is 50% (1 of 2 objectives). Keep going until you reach 100% coverage.", progress_messages[-1]["text"])
-        self.assertIn("Target progress is 25% (1 of 4 questions). Keep going until you reach 100%.", progress_messages[-1]["text"])
+        self.assertEqual(len(progress_messages), 0)
+
+    def test_student_preview_progress_message_is_only_added_first_time_target_reaches_complete(self):
+        course = self.create_course()
+        block, _, objective, _ = self.create_preview_content_block(course)
+        block.config.target_question_count = 2
+        block.config.save(update_fields=["target_question_count", "updated_at"])
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview question one?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows from the approved notes.",
+            question_hash="preview-progress-target-1",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview question two?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows from the approved notes.",
+            question_hash="preview-progress-target-2",
+        )
+        self.client.force_login(self.teacher)
+
+        first_quiz_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        first_question_id = [message for message in first_quiz_response.json()["preview"]["blocks"][0]["transcript"] if message["kind"] == "question"][-1]["question_id"]
+        first_answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": first_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+        first_block_payload = next(item for item in first_answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        self.assertEqual(len([message for message in first_block_payload["transcript"] if message["kind"] == "progress_coach"]), 1)
+
+        second_quiz_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        second_question_id = [message for message in second_quiz_response.json()["preview"]["blocks"][0]["transcript"] if message["kind"] == "question"][-1]["question_id"]
+        second_answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": second_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        second_block_payload = next(item for item in second_answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        progress_messages = [message for message in second_block_payload["transcript"] if message["kind"] == "progress_coach"]
+
+        self.assertEqual(len(progress_messages), 2)
+        self.assertEqual(
+            sum("Coverage is complete for this block" in message["text"] for message in progress_messages),
+            1,
+        )
+        self.assertIn("You've reached this block's practice target: 2 of 2 questions answered.", progress_messages[-1]["text"])
         self.assertIn("Mastery is 100%.", progress_messages[-1]["text"])
 
     def test_student_preview_feedback_includes_varying_keep_going_note(self):
@@ -6821,6 +6944,75 @@ print(result)""",
         self.assertEqual(latest_question["question_id"], practice.pk)
         self.assertEqual(latest_question["learning_objective_id"], objective.pk)
         self.assertEqual(latest_question["question_type"], QuestionBankItem.QuestionType.MAQ)
+
+    def test_preview_generation_error_uses_fallback_question_instead_of_internal_error_message(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        validation = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem="Fallback validation question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Fallback validation explanation.",
+            question_hash="preview-fallback-validation-hash",
+        )
+        practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem="Fallback practice question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Fallback practice explanation.",
+            question_hash="preview-fallback-practice-hash",
+            linked_question=validation,
+        )
+        validation.linked_question = practice
+        validation.save(update_fields=["linked_question", "updated_at"])
+
+        self.client.force_login(self.teacher)
+        with patch("standalone.services.preview._pick_unseen_question", return_value=None), patch(
+            "standalone.services.preview._pick_retry_question",
+            return_value=None,
+        ), patch(
+            "standalone.services.preview.generate_question_pair_for_block",
+            side_effect=[
+                QuestionGenerationError(
+                    "Could not generate a high-quality question for this block. Generated question does not stay aligned with the target learning objective."
+                ),
+                (practice, validation),
+            ],
+        ) as generate_mock:
+            response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+                data=json.dumps({"question_type": QuestionBankItem.QuestionType.MAQ}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(generate_mock.call_count, 2)
+        transcript = response.json()["preview"]["blocks"][0]["transcript"]
+        self.assertFalse(
+            any(
+                "Generated question does not stay aligned with the target learning objective." in message.get("text", "")
+                for message in transcript
+            )
+        )
+        latest_question = [message for message in transcript if message["kind"] == "question"][-1]
+        self.assertEqual(latest_question["question_id"], practice.pk)
+        self.assertEqual(latest_question["question_type"], QuestionBankItem.QuestionType.MCQ)
 
     def test_teacher_preview_guardrail_action_appends_objective_guidance(self):
         course = self.create_course()

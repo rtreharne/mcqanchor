@@ -855,6 +855,10 @@ def _single_answer_style_signal_error(correct_answer: str, distractors: list[str
         r"\bpartially relevant fact\b",
         r"\bsounds plausible\b",
         r"\bcentral mechanism or role\b",
+        r"\blater lines do not depend on the earlier logic\b",
+        r"\bexternal file or network service\b",
+        r"\bworks the same way no matter how\b",
+        r"\bthere is no need to reason about control flow or data movement\b",
     )
     if any(
         any(re.search(pattern, distractor, flags=re.IGNORECASE) for pattern in meta_distractor_patterns)
@@ -971,6 +975,71 @@ def _objective_alignment_error(
     required_overlap = 2 if len(objective_tokens) >= 8 else 1
     if overlap < required_overlap:
         return "Generated question does not stay aligned with the target learning objective."
+    return ""
+
+
+def _coding_question_alignment_error(
+    *,
+    stem: str,
+    correct_answers: list[str],
+    explanation: str,
+    code_snippet: str,
+    objective: LearningObjective | None,
+) -> str:
+    if objective is None:
+        return ""
+    objective_tokens = _keyword_set(objective.text)
+    if not objective_tokens:
+        return ""
+    combined = " ".join([stem, explanation, code_snippet, *correct_answers])
+    question_tokens = _keyword_set(combined)
+    overlap = _keywords_overlap_count(objective_tokens, question_tokens)
+    if overlap < 1:
+        return "Coding question does not stay aligned with the target learning objective."
+    return ""
+
+
+def _coding_question_external_dependency_error(code_snippet: str) -> str:
+    snippet = str(code_snippet or "")
+    dependency_patterns = (
+        r"\bread\.(?:csv|table|delim)\s*\(",
+        r"\bwrite\.(?:csv|table|delim)\s*\(",
+        r"\bload\s*\(",
+        r"\bsource\s*\(",
+        r"\bfile\s*\(",
+        r"\burl\s*\(",
+        r"\bdownload\.file\s*\(",
+        r"\bhttr::",
+        r"\breadr::(?:read|write)_(?:csv|tsv|delim)\s*\(",
+        r"\bjsonlite::fromJSON\s*\(",
+        r"\bfetch\s*\(",
+        r"\brequests?\.",
+        r"\burllib\.",
+        r"\bopen\s*\([^)]*['\"][^'\"]+\.(?:csv|tsv|txt|json|xlsx?)['\"]",
+    )
+    if any(re.search(pattern, snippet, flags=re.IGNORECASE | re.MULTILINE) for pattern in dependency_patterns):
+        return "Coding question snippet depends on an external file or service."
+    return ""
+
+
+def _coding_question_focus_mismatch_error(stem: str, code_snippet: str) -> str:
+    lowered_stem = re.sub(r"\s+", " ", str(stem or "").strip().lower())
+    snippet = str(code_snippet or "")
+    if not lowered_stem or not snippet:
+        return ""
+
+    if any(term in lowered_stem for term in ("loop", "iteration", "iterative", "across iterations")):
+        if not re.search(r"\b(for|while|repeat)\b", snippet, flags=re.IGNORECASE | re.MULTILINE):
+            return "Coding question stem refers to loop behaviour that is not present in the code snippet."
+
+    if any(term in lowered_stem for term in ("branch", "conditional", "condition", "if statement", "switch")):
+        if not re.search(r"\b(if|else|elif|switch|case)\b", snippet, flags=re.IGNORECASE | re.MULTILINE):
+            return "Coding question stem refers to conditional logic that is not present in the code snippet."
+
+    if any(term in lowered_stem for term in ("index", "indexing", "subsetting", "subset")):
+        if not re.search(r"\[[^\]]+\]|\[\[|\$[A-Za-z_]\w*", snippet, flags=re.MULTILINE):
+            return "Coding question stem refers to indexing or subsetting that is not present in the code snippet."
+
     return ""
 
 
@@ -2215,20 +2284,6 @@ def _normalize_generated_payload(
     else:
         numeric_metadata = {}
 
-    if normalized_type == QuestionBankItem.QuestionType.MCQ:
-        option_balance_error = (
-            _single_answer_option_balance_error(
-                correct_answers[0] if correct_answers else "",
-                distractors,
-            )
-            or _single_answer_style_signal_error(
-                correct_answers[0] if correct_answers else "",
-                distractors,
-            )
-        )
-        if option_balance_error:
-            raise ValueError(option_balance_error)
-
     further_study_questions = further_study_questions or fallback_further_study_questions(
         stem=stem,
         objective_text="",
@@ -2257,10 +2312,30 @@ def _normalize_generated_payload(
             coding_question_kind = QuestionBankItem.CodingQuestionKind.COMPREHENSION
         if _is_low_value_coding_stem(stem, code_snippet):
             raise ValueError("Coding question stem is too trivial.")
+        coding_dependency_error = _coding_question_external_dependency_error(code_snippet)
+        if coding_dependency_error:
+            raise ValueError(coding_dependency_error)
+        coding_focus_error = _coding_question_focus_mismatch_error(stem, code_snippet)
+        if coding_focus_error:
+            raise ValueError(coding_focus_error)
     else:
         coding_language = ""
         coding_question_kind = ""
         code_snippet = ""
+
+    if normalized_type == QuestionBankItem.QuestionType.MCQ:
+        option_balance_error = (
+            _single_answer_option_balance_error(
+                correct_answers[0] if correct_answers else "",
+                distractors,
+            )
+            or _single_answer_style_signal_error(
+                correct_answers[0] if correct_answers else "",
+                distractors,
+            )
+        )
+        if option_balance_error:
+            raise ValueError(option_balance_error)
 
     return {
         "question_type": normalized_type,
@@ -2296,14 +2371,22 @@ def _create_question_pair(
         block.question_distractor_count,
         expected_coding_language=expected_coding_language,
     )
-    if not normalized_payload["is_coding_question"]:
+    if normalized_payload["is_coding_question"]:
+        objective_alignment_error = _coding_question_alignment_error(
+            stem=normalized_payload["stem"],
+            correct_answers=normalized_payload["correct_answers"],
+            explanation=normalized_payload["explanation"],
+            code_snippet=normalized_payload["code_snippet"],
+            objective=objective,
+        )
+    else:
         objective_alignment_error = _objective_alignment_error(
             stem=normalized_payload["stem"],
             correct_answers=normalized_payload["correct_answers"],
             objective=objective,
         )
-        if objective_alignment_error:
-            raise ValueError(objective_alignment_error)
+    if objective_alignment_error:
+        raise ValueError(objective_alignment_error)
     stem = _normalize_question_stem(normalized_payload["stem"])
     if (
         normalized_payload["question_type"] != QuestionBankItem.QuestionType.NUM

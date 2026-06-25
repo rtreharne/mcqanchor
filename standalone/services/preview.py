@@ -15,6 +15,7 @@ from standalone.models import Course, CourseBlock, LearningObjective, LearningOb
 from standalone.services.guidance import build_chat_guidance_prompt, merge_assistant_guidance, sanitize_assistant_guidance
 from standalone.services.questions import (
     QuestionGenerationError,
+    _trace_generation,
     block_has_coding_signal,
     coding_question_matches_expected_language,
     coding_question_quality_sort_key,
@@ -60,6 +61,7 @@ def _empty_course_state() -> dict:
         "pending_questions": {},
         "written_answer_drafts": {},
         "completed_events": [],
+        "progress_milestones": {},
     }
 
 
@@ -122,6 +124,17 @@ def _append_message(course_state: dict, block: CourseBlock, role: str, kind: str
     }
     transcript.append(message)
     return message
+
+
+def _block_progress_milestones(course_state: dict, block: CourseBlock) -> dict:
+    milestone_root = course_state.setdefault("progress_milestones", {})
+    return milestone_root.setdefault(
+        str(block.pk),
+        {
+            "coverage_complete_announced": False,
+            "target_complete_announced": False,
+        },
+    )
 
 
 def _first_active_block(course: Course):
@@ -306,6 +319,32 @@ def _effective_preview_question_type(
     if normalized_type in ADVANCED_QUESTION_TYPES or normalized_type is None:
         return QuestionBankItem.QuestionType.MCQ
     return normalized_type
+
+
+def _fallback_preview_question_types(
+    course: Course,
+    block: CourseBlock,
+    course_state: dict,
+    requested_question_type: str | None,
+) -> list[str]:
+    unlocked = _advanced_question_types_unlocked(course, block, course_state)
+    ordered: list[str | None] = [
+        _effective_preview_question_type(course, block, course_state, requested_question_type),
+        QuestionBankItem.QuestionType.MCQ,
+        QuestionBankItem.QuestionType.NUM,
+    ]
+    if unlocked:
+        ordered.extend(
+            [
+                QuestionBankItem.QuestionType.MAQ,
+                QuestionBankItem.QuestionType.WAQ,
+            ]
+        )
+    fallback_types: list[str] = []
+    for question_type in ordered:
+        if question_type and question_type not in fallback_types:
+            fallback_types.append(question_type)
+    return fallback_types
 
 
 def _course_question_queryset(course: Course, block: CourseBlock, course_state: dict, question_type: str | None = None):
@@ -545,6 +584,60 @@ def _ensure_question_for_block(
     return question, True
 
 
+def _fallback_question_for_block(
+    course: Course,
+    block: CourseBlock,
+    course_state: dict,
+    requested_question_type: str | None,
+    *,
+    preferred_objective_id: int | None = None,
+) -> tuple[QuestionBankItem | None, bool]:
+    preferred_objective = _objective_for_block(block, preferred_objective_id)
+    fallback_types = _fallback_preview_question_types(course, block, course_state, requested_question_type)
+
+    for question_type in fallback_types:
+        question = _pick_unseen_question(course, block, course_state, question_type)
+        if question is not None:
+            return question, False
+
+    for question_type in fallback_types:
+        question = _pick_retry_question(course, block, course_state, question_type)
+        if question is not None:
+            return question, False
+
+    preferred_objective_ids = _generation_objective_ids_for_block(course_state, block)
+    if preferred_objective is not None:
+        preferred_objective_ids = [preferred_objective.pk] + [
+            objective_id for objective_id in preferred_objective_ids if objective_id != preferred_objective.pk
+        ]
+
+    requested_type = _normalize_requested_question_type(requested_question_type)
+    for question_type in fallback_types:
+        if question_type == requested_type:
+            continue
+        question, _validation = generate_question_pair_for_block(
+            block,
+            preferred_objective_ids=preferred_objective_ids,
+            strict_preferred_objectives=False,
+            question_type=question_type,
+            raise_generation_errors=False,
+        )
+        if question is not None:
+            return question, True
+
+    question, _validation = generate_question_pair_for_block(
+        block,
+        preferred_objective_ids=preferred_objective_ids,
+        strict_preferred_objectives=False,
+        question_type=None,
+        raise_generation_errors=False,
+    )
+    if question is not None:
+        return question, True
+
+    return None, False
+
+
 def _mark_question_presented(course_state: dict, block: CourseBlock, question: QuestionBankItem):
     state = _question_state(course_state, question.pk)
     state["times_presented"] += 1
@@ -586,16 +679,46 @@ def request_preview_quiz(
             force_new=force_new,
         )
     except QuestionGenerationError as exc:
-        _append_message(
-            course_state,
+        question, is_new_request = _fallback_question_for_block(
+            course,
             block,
-            "assistant",
-            "text",
-            text=str(exc),
-            source_blocks=[block.title],
+            course_state,
+            requested_question_type,
+            preferred_objective_id=preferred_objective_id,
         )
-        request.session.modified = True
-        return serialize_preview_state(request, course, active_block_id=block.pk)
+        if question is not None:
+            _trace_generation(
+                "preview_generation_fallback",
+                block=block.title,
+                block_id=block.pk,
+                requested_type=QuestionBankItem.display_label_for_question_type(
+                    _normalize_requested_question_type(requested_question_type) or QuestionBankItem.QuestionType.MCQ
+                ),
+                original_error=str(exc),
+                fallback_type=QuestionBankItem.display_label_for_question_type(question.question_type),
+                fallback_question_id=question.pk,
+            )
+        else:
+            _trace_generation(
+                "preview_generation_failed_without_fallback",
+                block=block.title,
+                block_id=block.pk,
+                requested_type=QuestionBankItem.display_label_for_question_type(
+                    _normalize_requested_question_type(requested_question_type) or QuestionBankItem.QuestionType.MCQ
+                ),
+                original_error=str(exc),
+            )
+        if question is None:
+            _append_message(
+                course_state,
+                block,
+                "assistant",
+                "text",
+                text="I couldn't get a fresh question for this block just now. Please try Quiz again.",
+                source_blocks=[block.title],
+            )
+            request.session.modified = True
+            return serialize_preview_state(request, course, active_block_id=block.pk)
     if question is None:
         _append_message(
             course_state,
@@ -1002,39 +1125,30 @@ def _format_progress_percent(value: float) -> str:
 
 
 def _refresh_block_progress_message(course_state: dict, block: CourseBlock) -> None:
-    transcript = _ensure_block_transcript(course_state, block)
-    transcript[:] = [message for message in transcript if message.get("kind") != "progress_coach"]
-
     metrics = _block_metrics(course_state, block)
+    milestones = _block_progress_milestones(course_state, block)
     covered_objective_count = int(metrics.get("covered_objective_count") or 0)
     total_objective_count = int(metrics.get("total_objective_count") or 0)
     completed_count = int(metrics.get("completed_count") or 0)
     target_question_count = int(metrics.get("target_question_count") or 0)
+    coverage_complete = total_objective_count > 0 and float(metrics.get("coverage") or 0.0) >= 100.0
+    target_complete = target_question_count > 0 and float(metrics.get("target") or 0.0) >= 100.0
 
     lines: list[str] = []
-    if total_objective_count > 0:
-        if float(metrics.get("coverage") or 0.0) >= 100.0:
-            lines.append(
-                f"Coverage is complete for this block: you've covered all {covered_objective_count} learning objectives."
-            )
-        else:
-            lines.append(
-                f"Coverage is {_format_progress_percent(metrics.get('coverage') or 0.0)} "
-                f"({covered_objective_count} of {total_objective_count} objectives). "
-                "Keep going until you reach 100% coverage."
-            )
+    if coverage_complete and not milestones.get("coverage_complete_announced"):
+        lines.append(
+            f"Coverage is complete for this block: you've covered all {covered_objective_count} learning objectives."
+        )
+        milestones["coverage_complete_announced"] = True
 
-    if target_question_count > 0:
-        if float(metrics.get("target") or 0.0) >= 100.0:
-            lines.append(
-                f"You've reached this block's practice target: {completed_count} of {target_question_count} questions answered."
-            )
-        else:
-            lines.append(
-                f"Target progress is {_format_progress_percent(metrics.get('target') or 0.0)} "
-                f"({completed_count} of {target_question_count} questions). "
-                "Keep going until you reach 100%."
-            )
+    if target_complete and not milestones.get("target_complete_announced"):
+        lines.append(
+            f"You've reached this block's practice target: {completed_count} of {target_question_count} questions answered."
+        )
+        milestones["target_complete_announced"] = True
+
+    if not lines:
+        return
 
     lines.append(
         f"Mastery is {_format_progress_percent(metrics.get('mastery') or 0.0)}. "
