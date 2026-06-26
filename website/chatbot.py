@@ -18,7 +18,8 @@ Learn and Practise:
 - AI creates candidate MCQs from approved text-based course materials.
 - Questions are mapped to topics, learning outcomes and difficulty levels.
 - Students complete regular online MCQs in their own time.
-- Online practice includes immediate feedback, explanations, accuracy tracking, coverage tracking, sustained engagement tracking, weak-area identification and multiple difficulty levels.
+- Students receive immediate feedback and explanations after every practice question.
+- Online practice includes accuracy tracking, coverage tracking, sustained engagement tracking, weak-area identification and multiple difficulty levels.
 - Practice is for learning, so students may use notes, resources or generative AI during online practice if they choose.
 - Students can also use practice validation whenever they want, as often as they like, to rehearse the validation experience.
 - LTI 1.3 enabled. Integrate into your VLE seamlessly or use it as a standalone product.
@@ -39,6 +40,7 @@ Question design:
 Scoring:
 - Scoring is configurable by the institution.
 - An illustrative model is 80 percent online practice and 20 percent controlled validation.
+- Practice scoring has three components only: mastery, coverage and engagement.
 - An illustrative online-practice breakdown is 40 percent accuracy and mastery, 30 percent curriculum coverage, and 30 percent engagement.
 - An illustrative calibration rule is that the online-practice score cannot sit more than 20 percentage points above the controlled validation score.
 - In plain English, strong online performance is rewarded when it is supported by validation.

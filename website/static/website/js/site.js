@@ -64,7 +64,7 @@ const WALKTHROUGH_SCENARIOS = {
         stage: "Stage 2",
         title: "Practising little and often",
         body: [
-          "Each week, the student completes short online MCQ sets generated dynamically from the course materials they have just studied.",
+          "Each week, the student works through online MCQ questions generated dynamically from the course materials they have just studied.",
           "This is practice for learning, so they can work in their own time, use notes if appropriate, and build confidence through regular low-stakes activity.",
           "They can also open practice validation whenever they want, as often as they like, to rehearse the validation experience before any booked session.",
         ],
@@ -74,7 +74,7 @@ const WALKTHROUGH_SCENARIOS = {
         title: "Using feedback to improve",
         body: [
           "Because the practice MCQs are built directly from approved course materials, the feedback stays closely tied to the actual content of the course.",
-          "After each practice set, the student receives immediate feedback, explanations, and a clearer sense of which topics still need attention.",
+          "After every practice question, the student receives immediate feedback, explanations, and a clearer sense of which topics still need attention.",
           "Over the semester, they build coverage across the curriculum instead of relying on one last-minute revision push.",
         ],
       },
@@ -82,7 +82,7 @@ const WALKTHROUGH_SCENARIOS = {
         stage: "Stage 4",
         title: "Building a learning record",
         body: [
-          "As the term progresses, MCQ Anchor tracks a fuller picture than a single raw score alone, such as accuracy, coverage, sustained engagement, and completion against targets.",
+          "As the term progresses, MCQ Anchor tracks a fuller picture than a single raw score alone, such as mastery, coverage, and sustained engagement.",
           "That means steady effort throughout the semester still counts, not just performance on one day.",
         ],
       },
@@ -106,7 +106,7 @@ const WALKTHROUGH_SCENARIOS = {
     ],
   },
   teacher: {
-    title: "Teacher walkthrough",
+    title: "Teacher Perspective",
     steps: [
       {
         stage: "Stage 1",
@@ -136,7 +136,7 @@ const WALKTHROUGH_SCENARIOS = {
         stage: "Stage 4",
         title: "Monitoring progress across the cohort",
         body: [
-          "As students work through the term, the teacher can review patterns in accuracy, topic coverage, engagement, and completion.",
+          "As students work through the term, the teacher can review patterns in mastery, topic coverage, and engagement.",
           "This gives a richer picture of learning progress than a single online percentage score viewed in isolation.",
         ],
       },

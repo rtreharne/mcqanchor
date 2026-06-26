@@ -19,6 +19,9 @@
         <img src="{% static 'website/images/mcq-anchor-logo.png' %}" alt="MCQ Anchor logo">
       </a>
       <div class="nav-links" id="nav-links">
+        {% if homepage_demos %}
+          <a href="#demos">Demo</a>
+        {% endif %}
         <a href="#handout">Overview</a>
         <a href="#contact">Contact</a>
         <a href="{% url 'standalone:login' %}">Log in</a>
@@ -35,7 +38,9 @@
         <p class="hero-text">MCQ Anchor rewards regular online learning while using a short, controlled validation test to establish what students can do independently.</p>
         <div class="hero-actions">
           <a class="button button-primary" href="#contact">Pilot for free</a>
-          <a class="button button-secondary" href="#handout">Download overview</a>
+          {% if homepage_demos %}
+            <a class="button button-secondary demo-now-button" href="#demos">Demo Now</a>
+          {% endif %}
         </div>
       </div>
     </section>

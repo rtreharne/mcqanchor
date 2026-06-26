@@ -259,6 +259,39 @@ p {
   margin-top: 1.9rem;
 }
 
+.demo-now-button {
+  position: relative;
+  isolation: isolate;
+  border-color: rgba(64, 216, 187, 0.46);
+  box-shadow:
+    0 0 0 1px rgba(64, 216, 187, 0.12),
+    0 0 1.1rem rgba(64, 216, 187, 0.18);
+  animation: demo-now-border-pulse 2.8s ease-in-out infinite;
+  overflow: visible;
+}
+
+.demo-now-button:hover,
+.demo-now-button:focus-visible {
+  border-color: rgba(64, 216, 187, 0.62);
+  box-shadow:
+    0 0 0 1px rgba(64, 216, 187, 0.18),
+    0 0 1.4rem rgba(64, 216, 187, 0.28);
+}
+
+@keyframes demo-now-border-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(64, 216, 187, 0.12),
+      0 0 0.85rem rgba(64, 216, 187, 0.24);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(64, 216, 187, 0.2),
+      0 0 1.35rem rgba(64, 216, 187, 0.38);
+  }
+}
+
 .handout-section {
   padding-top: 3.5rem;
   padding-bottom: 3.5rem;
