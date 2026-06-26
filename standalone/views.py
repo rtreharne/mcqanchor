@@ -1,6 +1,7 @@
 import json
 import csv
 from datetime import timedelta
+from functools import lru_cache
 from pathlib import Path
 import re
 from threading import Thread
@@ -12,7 +13,7 @@ from django.contrib.auth import authenticate, login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LogoutView
 from django import forms
-from django.db import close_old_connections, transaction
+from django.db import IntegrityError, close_old_connections, connection, transaction
 from django.db.models import Avg, Count, Q
 from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -96,6 +97,7 @@ from standalone.services.demo_mode import (
     ensure_demo_access,
     get_or_create_demo_validation_session,
     new_demo_visitor_key,
+    record_demo_access_hit,
     request_demo_preview_quiz,
     reveal_demo_validation_practice_next,
     rotate_demo_access_token,
@@ -540,7 +542,7 @@ def course_create(request: HttpRequest) -> HttpResponse:
         course = form.save(commit=False)
         course.teacher = request.user if request.user.role == User.Role.TEACHER else request.user
         course.save()
-        CourseConfig.objects.create(course=course)
+        _ensure_course_config(course)
         messages.success(request, "Course created. You can add blocks manually or import a PDF textbook to detect chapters.")
         return redirect("standalone:course_detail", course.pk)
     return render(request, "standalone/form_page.html", {"title": "Create course", "form": form})
@@ -571,9 +573,61 @@ def course_delete(request: HttpRequest, course_id: int) -> HttpResponse:
     return redirect("standalone:teacher_dashboard")
 
 
+@lru_cache(maxsize=1)
+def _course_config_table_columns() -> frozenset[str]:
+    with connection.cursor() as cursor:
+        description = connection.introspection.get_table_description(cursor, CourseConfig._meta.db_table)
+    return frozenset(column.name for column in description)
+
+
+def _create_course_config_with_legacy_columns(course: Course) -> CourseConfig:
+    config = CourseConfig(course=course)
+    now = timezone.now()
+    present_columns = _course_config_table_columns()
+    values: dict[str, object] = {"created_at": now, "updated_at": now}
+
+    for field in CourseConfig._meta.local_fields:
+        if field.primary_key or field.name in {"course", "created_at", "updated_at"}:
+            continue
+        if field.column in present_columns:
+            values[field.column] = getattr(config, field.attname)
+
+    values["course_id"] = course.pk
+    if "target_weight" in present_columns:
+        values["target_weight"] = 0
+
+    quoted_table = connection.ops.quote_name(CourseConfig._meta.db_table)
+    quoted_columns = ", ".join(connection.ops.quote_name(column) for column in values)
+    placeholders = ", ".join(["%s"] * len(values))
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})",
+            list(values.values()),
+        )
+    return CourseConfig.objects.get(course=course)
+
+
+def _ensure_course_config(course: Course) -> tuple[CourseConfig, bool]:
+    existing = CourseConfig.objects.filter(course=course).first()
+    if existing is not None:
+        return existing, False
+
+    if "target_weight" not in _course_config_table_columns():
+        return CourseConfig.objects.get_or_create(course=course)
+
+    try:
+        return _create_course_config_with_legacy_columns(course), True
+    except IntegrityError:
+        existing = CourseConfig.objects.filter(course=course).first()
+        if existing is not None:
+            return existing, False
+        raise
+
+
 def _course_detail_context(course: Course, *, request: HttpRequest | None = None):
-    config, _ = CourseConfig.objects.get_or_create(course=course)
+    config, _ = _ensure_course_config(course)
     demo_access = ensure_demo_access(course)
+    can_edit_homepage_demo = bool(request and request.user.is_superuser)
     blocks = list(
         course.blocks.select_related("config")
         .annotate(
@@ -622,7 +676,7 @@ def _course_detail_context(course: Course, *, request: HttpRequest | None = None
     )
     return {
         "course": course,
-        "course_config_form": CourseConfigForm(instance=config),
+        "course_config_form": CourseConfigForm(instance=config, can_edit_homepage_demo=can_edit_homepage_demo),
         "blocks": blocks,
         "course_student_count": course.enrollments.count(),
         "draft_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.DRAFT).count(),
@@ -635,11 +689,14 @@ def _course_detail_context(course: Course, *, request: HttpRequest | None = None
         "active_magic_link_count": active_magic_link_count,
         "demo_access": demo_access,
         "demo_access_context": _demo_access_context(request, demo_access) if request is not None else {},
+        "can_edit_homepage_demo": can_edit_homepage_demo,
     }
 
 
 def _attach_course_practice_averages(courses):
     for course in courses:
+        config, _ = _ensure_course_config(course)
+        course.config = config
         _normalise_course_practice_averages(course)
 
 
@@ -1085,9 +1142,14 @@ def update_course_field(request: HttpRequest, course_id: int, field_name: str) -
     return JsonResponse({"ok": True, "value": getattr(updated_course, field_name), "display_value": getattr(updated_course, field_name)})
 
 
-def _course_config_form_payload(config: CourseConfig, field_overrides: dict[str, object] | None = None) -> dict[str, object]:
+def _course_config_form_payload(
+    config: CourseConfig,
+    field_overrides: dict[str, object] | None = None,
+    *,
+    can_edit_homepage_demo: bool = False,
+) -> dict[str, object]:
     field_overrides = field_overrides or {}
-    form = CourseConfigForm(instance=config)
+    form = CourseConfigForm(instance=config, can_edit_homepage_demo=can_edit_homepage_demo)
     payload: dict[str, object] = {}
     for name, field in form.fields.items():
         if name in field_overrides:
@@ -1292,8 +1354,9 @@ def update_course_config_field(request: HttpRequest, course_id: int, field_name:
     if request.method != "POST" or not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
-    config, _ = CourseConfig.objects.get_or_create(course=course)
-    config_form = CourseConfigForm(instance=config)
+    config, _ = _ensure_course_config(course)
+    can_edit_homepage_demo = request.user.is_superuser
+    config_form = CourseConfigForm(instance=config, can_edit_homepage_demo=can_edit_homepage_demo)
     if field_name not in config_form.fields:
         raise Http404
 
@@ -1304,7 +1367,15 @@ def update_course_config_field(request: HttpRequest, course_id: int, field_name:
     else:
         override_value = request.POST.get(field_name, "")
 
-    form = CourseConfigForm(_course_config_form_payload(config, {field_name: override_value}), instance=config)
+    form = CourseConfigForm(
+        _course_config_form_payload(
+            config,
+            {field_name: override_value},
+            can_edit_homepage_demo=can_edit_homepage_demo,
+        ),
+        instance=config,
+        can_edit_homepage_demo=can_edit_homepage_demo,
+    )
     if not form.is_valid():
         return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
 
@@ -1565,8 +1636,8 @@ def course_config_edit(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
-    config, _ = CourseConfig.objects.get_or_create(course=course)
-    form = CourseConfigForm(request.POST or None, instance=config)
+    config, _ = _ensure_course_config(course)
+    form = CourseConfigForm(request.POST or None, instance=config, can_edit_homepage_demo=request.user.is_superuser)
     if request.method == "POST" and form.is_valid():
         form.save()
         messages.success(request, "Course configuration updated.")
@@ -1850,6 +1921,8 @@ def demo_practice(request: HttpRequest, token) -> HttpResponse:
     blocked = _blocked_demo_embed_response_if_needed(request, access)
     if blocked is not None:
         return blocked
+    if not _demo_embed_mode(request):
+        access = record_demo_access_hit(access)
     preview_state = serialize_demo_preview_state(access)
     embed_mode = _demo_embed_mode(request)
     response = render(

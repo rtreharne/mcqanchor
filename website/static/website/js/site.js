@@ -66,6 +66,7 @@ const WALKTHROUGH_SCENARIOS = {
         body: [
           "Each week, the student completes short online MCQ sets generated dynamically from the course materials they have just studied.",
           "This is practice for learning, so they can work in their own time, use notes if appropriate, and build confidence through regular low-stakes activity.",
+          "They can also open practice validation whenever they want, as often as they like, to rehearse the validation experience before any booked session.",
         ],
       },
       {
@@ -90,7 +91,8 @@ const WALKTHROUGH_SCENARIOS = {
         title: "Taking the short validation",
         body: [
           "At the planned point in the course, the student books a short controlled validation session, typically around 15 to 20 minutes.",
-          "They complete an unseen paper-based MCQ check without notes, phones, or generative AI, giving the course team a credible snapshot of independent knowledge.",
+          "They complete the validation digitally on a single device, such as their phone, with the session designed to flag use of external resources or generative AI tools.",
+          "That gives the course team a credible snapshot of what the student can do independently under controlled conditions.",
         ],
       },
       {
@@ -142,9 +144,9 @@ const WALKTHROUGH_SCENARIOS = {
         stage: "Stage 5",
         title: "Running the controlled validation",
         body: [
-          "When the course reaches the validation point, the teacher arranges a short controlled paper-based MCQ session, typically around 15 to 20 minutes.",
-          "Ahead of the booked sessions, the teacher prints the personalised student papers and answer sheets so each validation is ready to run smoothly.",
+          "When the course reaches the validation point, the teacher arranges a short controlled digital session, typically around 15 to 20 minutes.",
           "Students complete unseen questions drawn from a secure validation pool that matches the same outcomes and difficulty blueprint as the practice layer.",
+          "Validation runs on a single device per student, such as a phone, with the session designed to flag use of external resources or generative AI tools.",
         ],
       },
       {

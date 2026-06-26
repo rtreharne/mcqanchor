@@ -1,4 +1,5 @@
 {% extends "standalone/base.html" %}
+{% load static %}
 {% block content %}
 <section class="teacher-dashboard workspace-page">
   <div class="workspace-hero teacher-dashboard-hero">
@@ -14,13 +15,25 @@
     </div>
   </div>
 
-  <section class="dashboard-course-section" aria-labelledby="courses-heading">
-    <div class="section-head compact dashboard-section-head">
+  <section class="dashboard-course-section course-section-card" aria-labelledby="courses-heading" data-block-card>
+    <div
+      class="section-head compact dashboard-section-head course-section-head course-section-toggle"
+      data-block-toggle
+      data-block-target="teacher-dashboard-courses-content"
+      aria-expanded="false"
+      aria-controls="teacher-dashboard-courses-content"
+      tabindex="0"
+      role="button"
+    >
       <div>
         <h2 id="courses-heading">Course workspace</h2>
       </div>
+      <div class="workspace-actions course-section-actions">
+        <span class="block-card-icon" aria-hidden="true"></span>
+      </div>
     </div>
-    <div class="dashboard-course-grid">
+    <div id="teacher-dashboard-courses-content" class="block-card-content course-section-content" hidden>
+      <div class="dashboard-course-grid">
       {% for course in courses %}
         <a class="course-card dashboard-course-card" href="{% url 'standalone:course_detail' course.pk %}">
           <span class="course-card-status{% if course.is_active %} is-active{% endif %}">{% if course.is_active %}Active{% else %}Inactive{% endif %}</span>
@@ -50,16 +63,29 @@
           <a class="button" href="{% url 'standalone:course_create' %}">Create course</a>
         </div>
       {% endfor %}
+      </div>
     </div>
   </section>
 
-  <section class="dashboard-course-section" aria-labelledby="validation-sessions-heading">
-    <div class="section-head compact dashboard-section-head">
+  <section class="dashboard-course-section course-section-card" aria-labelledby="validation-sessions-heading" data-block-card>
+    <div
+      class="section-head compact dashboard-section-head course-section-head course-section-toggle"
+      data-block-toggle
+      data-block-target="teacher-dashboard-validations-content"
+      aria-expanded="false"
+      aria-controls="teacher-dashboard-validations-content"
+      tabindex="0"
+      role="button"
+    >
       <div>
         <h2 id="validation-sessions-heading">Validation sessions</h2>
       </div>
+      <div class="workspace-actions course-section-actions">
+        <span class="block-card-icon" aria-hidden="true"></span>
+      </div>
     </div>
-    <div class="course-import-status-list">
+    <div id="teacher-dashboard-validations-content" class="block-card-content course-section-content" hidden>
+      <div class="course-import-status-list">
       {% for event in validation_events %}
         <article class="course-import-status-row">
           <span>
@@ -94,7 +120,12 @@
       {% empty %}
         <p>No validation sessions yet.</p>
       {% endfor %}
+      </div>
     </div>
   </section>
 </section>
+{% endblock %}
+{% block extra_body %}
+  {{ block.super }}
+  <script src="{% static 'standalone/js/teacher-dashboard.js' %}"></script>
 {% endblock %}

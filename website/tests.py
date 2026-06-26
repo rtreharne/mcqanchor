@@ -10,6 +10,9 @@ from django.core.management import call_command
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
+from standalone.models import Course, CourseConfig
+from standalone.services.demo_mode import ensure_demo_access
+
 from .models import ChatConversation, ChatMessage, PilotEnquiry
 
 
@@ -38,6 +41,46 @@ class HomePageTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, reverse("standalone:dashboard"))
+
+    def test_home_page_shows_featured_public_demos_only(self):
+        teacher = get_user_model().objects.create_user(
+            username="demo-teacher",
+            email="demo-teacher@example.com",
+            password="password123",
+            role="teacher",
+        )
+        featured_course = Course.objects.create(
+            teacher=teacher,
+            title="Featured Demo Course",
+            slug="featured-demo-course",
+            summary="A public practice demo.",
+            is_active=True,
+        )
+        CourseConfig.objects.create(course=featured_course, demo_enabled=True, homepage_demo_enabled=True)
+        featured_access = ensure_demo_access(featured_course)
+        featured_access.access_count = 7
+        featured_access.save(update_fields=["access_count", "updated_at"])
+
+        hidden_course = Course.objects.create(
+            teacher=teacher,
+            title="Hidden Demo Course",
+            slug="hidden-demo-course",
+            summary="Should not appear on the homepage.",
+            is_active=True,
+        )
+        CourseConfig.objects.create(course=hidden_course, demo_enabled=True, homepage_demo_enabled=False)
+        ensure_demo_access(hidden_course)
+
+        response = self.client.get(reverse("website:home"))
+
+        self.assertContains(response, "Try MCQ Anchor with real course demos.")
+        self.assertContains(response, "Featured Demo Course")
+        self.assertContains(response, "Accessed 7 times")
+        self.assertContains(response, reverse("standalone:demo_practice", args=[featured_access.token]), html=False)
+        self.assertContains(response, 'target="_blank"', html=False)
+        self.assertContains(response, 'rel="noopener noreferrer"', html=False)
+        self.assertNotContains(response, "Open practice validation")
+        self.assertNotContains(response, "Hidden Demo Course")
 
 
 class ContactFormTests(TestCase):
@@ -188,7 +231,7 @@ class AdminCsvExportTests(TestCase):
         ChatMessage.objects.create(
             conversation=conversation,
             role=ChatMessage.Role.ASSISTANT,
-            content="It uses a short controlled paper-based MCQ.",
+            content="It uses a short controlled digital validation session on a single device.",
         )
 
         response = self.client.post(
@@ -206,7 +249,7 @@ class AdminCsvExportTests(TestCase):
         self.assertIn(str(conversation.public_id), content)
         self.assertIn("session-123", content)
         self.assertIn("How does validation work?", content)
-        self.assertIn("assistant: It uses a short controlled paper-based MCQ.", content)
+        self.assertIn("assistant: It uses a short controlled digital validation session on a single device.", content)
 
 
 @override_settings(
@@ -282,7 +325,7 @@ class ProductChatTests(TestCase):
         mock_client.responses.create.side_effect = RuntimeError("boom")
         openai_class.return_value = mock_client
 
-        response = self._post_json({"question": "How does the paper validation work?"})
+        response = self._post_json({"question": "How does the digital validation work?"})
 
         self.assertEqual(response.status_code, 502)
         self.assertIn("unavailable", response.json()["error"])

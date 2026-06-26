@@ -6,7 +6,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MCQ Anchor | Continuous practice. Anchored assessment.</title>
   <meta name="description" content="MCQ Anchor is a pilot-stage assessment concept that rewards regular online practice and uses short controlled validation to anchor marks fairly in the age of generative AI.">
-  <link rel="icon" href="{% static 'website/images/mcq-anchor-logo.png' %}">
+  <link rel="icon" type="image/x-icon" href="{% static 'website/images/favicon.ico' %}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{% static 'website/images/favicon-32x32.png' %}">
+  <link rel="icon" type="image/png" sizes="16x16" href="{% static 'website/images/favicon-16x16.png' %}">
+  <link rel="apple-touch-icon" sizes="180x180" href="{% static 'website/images/apple-touch-icon.png' %}">
   <link rel="stylesheet" href="{% static 'website/css/styles.css' %}">
 </head>
 <body>
@@ -36,6 +39,37 @@
         </div>
       </div>
     </section>
+
+    {% if homepage_demos %}
+      <section class="section demo-section" id="demos">
+        <div class="section-heading">
+          <p class="eyebrow">LIVE DEMOS</p>
+          <h2>Try MCQ Anchor with real course demos.</h2>
+          <p>Open a public course space and see how practice feels from the student side.</p>
+        </div>
+        <div class="demo-grid">
+          {% for demo in homepage_demos %}
+            <article class="demo-card">
+              <div class="demo-card-copy">
+                <p class="demo-card-kicker">Public demo</p>
+                <h3>{{ demo.title }}</h3>
+                <p>{{ demo.summary }}</p>
+                <p class="demo-card-meta">
+                  {% if demo.access_count == 1 %}
+                    Accessed 1 time
+                  {% else %}
+                    Accessed {{ demo.access_count }} times
+                  {% endif %}
+                </p>
+              </div>
+              <div class="demo-card-actions">
+                <a class="button button-primary" href="{{ demo.practice_url }}" target="_blank" rel="noopener noreferrer">Open Demo</a>
+              </div>
+            </article>
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
 
     <section class="section handout-section" id="handout">
       <div class="handout-card">

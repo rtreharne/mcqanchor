@@ -237,6 +237,7 @@ class CourseConfigForm(forms.ModelForm):
         exclude = ["course"]
 
     def __init__(self, *args, **kwargs):
+        can_edit_homepage_demo = kwargs.pop("can_edit_homepage_demo", False)
         super().__init__(*args, **kwargs)
         self.fields["self_enrol_enabled"].label = "Enable self-enrol allowlist"
         self.fields["self_enrol_enabled"].help_text = (
@@ -250,6 +251,13 @@ class CourseConfigForm(forms.ModelForm):
         self.fields["demo_enabled"].help_text = (
             "Publishes a no-login student demo link for this course. Demo practice is shared across all visitors."
         )
+        if can_edit_homepage_demo:
+            self.fields["homepage_demo_enabled"].label = "Show this demo on the MCQ Anchor homepage"
+            self.fields["homepage_demo_enabled"].help_text = (
+                "Superusers only. Adds this course's public demo to the public homepage demo section."
+            )
+        else:
+            self.fields.pop("homepage_demo_enabled", None)
         self.fields["demo_iframe_allowed_origins"].label = "Allowed iframe origins"
         self.fields["demo_iframe_allowed_origins"].help_text = (
             "Optional. Enter exact origins such as https://yourinstitution.instructure.com, separated by commas or new lines."

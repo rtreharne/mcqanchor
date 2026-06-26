@@ -18,19 +18,17 @@ Learn and Practise:
 - AI creates candidate MCQs from approved text-based course materials.
 - Questions are mapped to topics, learning outcomes and difficulty levels.
 - Students complete regular online MCQs in their own time.
-- Online practice includes immediate feedback, explanations, accuracy tracking, coverage tracking, sustained engagement tracking, target completion tracking, weak-area identification and multiple difficulty levels.
+- Online practice includes immediate feedback, explanations, accuracy tracking, coverage tracking, sustained engagement tracking, weak-area identification and multiple difficulty levels.
 - Practice is for learning, so students may use notes, resources or generative AI during online practice if they choose.
+- Students can also use practice validation whenever they want, as often as they like, to rehearse the validation experience.
 - LTI 1.3 enabled. Integrate into your VLE seamlessly or use it as a standalone product.
 
 Validate:
-- Students book a short controlled paper-based MCQ validation session, typically around 15 to 20 minutes.
-- Each student receives an unseen paper sampled from a secure validation pool.
+- Students book a short controlled digital validation session, typically around 15 to 20 minutes.
+- Students complete the validation on a single device, typically a phone.
+- Each student receives unseen questions sampled from a secure validation pool.
 - Validation questions assess the same learning outcomes and difficulty blueprint as practice questions.
-- The paper is completed under controlled conditions without notes, phones or generative AI.
-- Before booked sessions, staff print the relevant personalised student papers and answer sheets in advance so each validation is ready to run smoothly.
-- Personalised QR-coded answer sheets are pre-populated with student details.
-- Answer sheets can be photographed on a phone or tablet.
-- Optical mark recognition processes responses and low-confidence scans are sent for manual review.
+- Validation sessions are designed to prevent and detect use of external resources or AI tools. It is just students and their brains.
 - The validation test provides a credible baseline of unaided knowledge.
 
 Question design:
@@ -41,7 +39,7 @@ Question design:
 Scoring:
 - Scoring is configurable by the institution.
 - An illustrative model is 80 percent online practice and 20 percent controlled validation.
-- An illustrative online-practice breakdown is 40 percent accuracy and mastery, 30 percent curriculum coverage, 20 percent sustained engagement, and 10 percent target completion.
+- An illustrative online-practice breakdown is 40 percent accuracy and mastery, 30 percent curriculum coverage, and 30 percent engagement.
 - An illustrative calibration rule is that the online-practice score cannot sit more than 20 percentage points above the controlled validation score.
 - In plain English, strong online performance is rewarded when it is supported by validation.
 - Institutions may also configure validation pass gates, reassessment rules, and low-practice rescue rules.

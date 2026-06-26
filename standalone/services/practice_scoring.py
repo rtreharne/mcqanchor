@@ -20,9 +20,14 @@ def engagement_release_date(block) -> date | None:
 
 
 def base_practice_weights(course) -> dict[str, int]:
-    mastery = int(course.config.mastery_weight or 0)
-    coverage = int(course.config.coverage_weight or 0)
-    engagement = int(course.config.engagement_weight or 0)
+    if not hasattr(course, "config"):
+        mastery = 40
+        coverage = 30
+        engagement = 30
+    else:
+        mastery = int(course.config.mastery_weight or 0)
+        coverage = int(course.config.coverage_weight or 0)
+        engagement = int(course.config.engagement_weight or 0)
     return {
         "mastery": mastery,
         "coverage": coverage,

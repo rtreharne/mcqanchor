@@ -264,6 +264,61 @@ p {
   padding-bottom: 3.5rem;
 }
 
+.demo-section {
+  padding-top: 2.5rem;
+  padding-bottom: 2.5rem;
+}
+
+.demo-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.demo-card {
+  display: grid;
+  gap: 1.25rem;
+  padding: 1.5rem;
+  border-radius: 30px;
+  border: 1px solid rgba(65, 133, 219, 0.14);
+  background:
+    linear-gradient(135deg, rgba(232, 250, 245, 0.84), rgba(239, 247, 255, 0.98) 52%, rgba(255, 255, 255, 0.98) 100%);
+  box-shadow: var(--shadow);
+}
+
+.demo-card-copy {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.demo-card-kicker {
+  color: #0f6a5d;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.demo-card h3 {
+  font-size: clamp(1.45rem, 3vw, 2rem);
+  letter-spacing: -0.03em;
+}
+
+.demo-card p:last-child {
+  max-width: 42rem;
+}
+
+.demo-card-meta {
+  color: #2a597f;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.demo-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.85rem;
+}
+
 .handout-card {
   display: grid;
   gap: 1.5rem;
@@ -811,6 +866,7 @@ textarea {
   left: 1rem;
   bottom: 5.5rem;
   z-index: 70;
+  height: min(78vh, 48rem);
   max-height: min(78vh, 48rem);
   border-radius: 28px;
   padding: 0.9rem;
@@ -866,10 +922,6 @@ textarea {
 
 .chat-panel[hidden] {
   display: none;
-}
-
-body.chat-open {
-  overflow: hidden;
 }
 
 .chat-header,
@@ -998,11 +1050,11 @@ body.chat-open {
   gap: 0.75rem;
   min-height: 0;
   padding-right: 0.2rem;
-  padding-bottom: max(1.5rem, var(--chat-form-clearance, 6rem));
+  padding-bottom: 0.4rem;
   overflow-y: auto;
   align-content: start;
   overscroll-behavior: contain;
-  scroll-padding-bottom: max(6rem, var(--chat-form-clearance, 6rem));
+  scroll-padding-bottom: 1rem;
   scrollbar-gutter: stable;
 }
 
@@ -1247,6 +1299,7 @@ body.chat-open {
 }
 
 .chat-form {
+  min-height: 0;
   align-self: end;
   padding-top: 0.5rem;
   border-top: 1px solid rgba(65, 133, 219, 0.12);
@@ -1310,6 +1363,10 @@ body.chat-open {
 
   .hero-copy {
     max-width: 60rem;
+  }
+
+  .demo-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .handout-card {
@@ -1422,6 +1479,11 @@ body.chat-open {
     margin-top: 1.35rem;
   }
 
+  .demo-card-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
   .challenge-section {
     padding: 3.5rem 1.25rem;
     background:
@@ -1478,6 +1540,11 @@ body.chat-open {
   }
 
   .handout-card {
+    padding: 1rem;
+    border-radius: 24px;
+  }
+
+  .demo-card {
     padding: 1rem;
     border-radius: 24px;
   }

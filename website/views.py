@@ -7,7 +7,11 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.views.decorators.http import require_http_methods
+
+from standalone.models import Course
+from standalone.services.demo_mode import ensure_demo_access
 
 from .chatbot import ChatbotError, get_chatbot_reply
 from .forms import PilotEnquiryForm
@@ -28,9 +32,31 @@ def home(request: HttpRequest) -> HttpResponse:
     else:
         form = PilotEnquiryForm()
 
+    homepage_demos = []
+    featured_courses = (
+        Course.objects.filter(
+            is_active=True,
+            config__demo_enabled=True,
+            config__homepage_demo_enabled=True,
+        )
+        .select_related("config")
+        .order_by("title")
+    )
+    for course in featured_courses:
+        access = ensure_demo_access(course)
+        homepage_demos.append(
+            {
+                "title": course.title,
+                "summary": course.summary or "Open a live MCQ Anchor demo for this course.",
+                "practice_url": reverse("standalone:demo_practice", args=[access.token]),
+                "access_count": int(access.access_count or 0),
+            }
+        )
+
     context = {
         "contact_email": settings.CONTACT_EMAIL,
         "form": form,
+        "homepage_demos": homepage_demos,
     }
     return render(request, "website/home.html", context)
 

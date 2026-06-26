@@ -9874,6 +9874,38 @@ print(result)""",
         self.assertContains(response, reverse("standalone:demo_practice", args=[access.token]), html=False)
         self.assertContains(response, "Canvas iframe snippet")
 
+    def test_course_detail_shows_homepage_demo_control_only_to_superuser(self):
+        course = self.create_course()
+        superuser = User.objects.create_user(
+            username="superdemo",
+            email="superdemo@example.com",
+            password="password123",
+            role=User.Role.INTERNAL,
+            is_staff=True,
+            is_superuser=True,
+        )
+
+        self.client.force_login(self.teacher)
+        teacher_response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
+        self.assertNotContains(teacher_response, "Show this demo on the MCQ Anchor homepage")
+
+        self.client.force_login(superuser)
+        superuser_response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
+        self.assertContains(superuser_response, "Show this demo on the MCQ Anchor homepage")
+
+    def test_non_superuser_cannot_toggle_homepage_demo_setting(self):
+        course = self.create_course()
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(
+            reverse("standalone:update_course_config_field", args=[course.pk, "homepage_demo_enabled"]),
+            {"homepage_demo_enabled": "on"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        course.config.refresh_from_db()
+        self.assertFalse(course.config.homepage_demo_enabled)
+
     def test_public_demo_practice_is_shared_and_does_not_touch_real_student_persistence(self):
         course = self.create_course()
         course.config.demo_enabled = True
@@ -9938,6 +9970,19 @@ print(result)""",
         access.refresh_from_db()
 
         self.assertEqual(access.updated_at, initial_updated_at)
+
+    def test_public_demo_practice_page_view_increments_access_count(self):
+        course = self.create_course()
+        course.config.demo_enabled = True
+        course.config.save(update_fields=["demo_enabled", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+        self.create_preview_content_block(course)
+
+        response = self.client.get(reverse("standalone:demo_practice", args=[access.token]))
+
+        self.assertEqual(response.status_code, 200)
+        access.refresh_from_db()
+        self.assertEqual(access.access_count, 1)
 
     def test_public_demo_validation_practice_is_private_per_browser(self):
         course = self.create_course()

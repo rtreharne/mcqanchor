@@ -57,7 +57,7 @@ def consolidate_practice_scoring(apps, schema_editor):
         config.save(update_fields=["engagement_weight", "updated_at"])
 
     today = timezone.localdate()
-    practice_attempt_type = PracticeAttempt.AttemptType.PRACTICE
+    practice_attempt_type = "practice"
     block_config_map = {config.block_id: config for config in BlockConfig.objects.all()}
 
     for enrollment in Enrollment.objects.select_related("course"):

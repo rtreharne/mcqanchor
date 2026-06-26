@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from django.db import OperationalError, transaction
+from django.db.models import F
 
 from standalone.models import Course, CourseDemoAccess, CourseDemoValidationSession
 from standalone.services.preview import (
@@ -65,6 +66,12 @@ def ensure_demo_access(course: Course) -> CourseDemoAccess:
 def rotate_demo_access_token(access: CourseDemoAccess) -> CourseDemoAccess:
     access.token = uuid.uuid4()
     access.save(update_fields=["token", "updated_at"])
+    return access
+
+
+def record_demo_access_hit(access: CourseDemoAccess) -> CourseDemoAccess:
+    CourseDemoAccess.objects.filter(pk=access.pk).update(access_count=F("access_count") + 1)
+    access.refresh_from_db(fields=["access_count", "updated_at"])
     return access
 
 

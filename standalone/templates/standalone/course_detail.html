@@ -111,6 +111,16 @@
               <p class="course-setting-help">{{ course_config_form.demo_enabled.help_text }}</p>
               <p class="course-setting-status" data-course-config-status hidden></p>
             </div>
+            {% if can_edit_homepage_demo %}
+              <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.homepage_demo_enabled.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'homepage_demo_enabled' %}">
+                <label class="course-setting-label course-setting-label-checkbox" for="{{ course_config_form.homepage_demo_enabled.id_for_label }}">
+                  {{ course_config_form.homepage_demo_enabled }}
+                  <span>{{ course_config_form.homepage_demo_enabled.label }}</span>
+                </label>
+                <p class="course-setting-help">{{ course_config_form.homepage_demo_enabled.help_text }}</p>
+                <p class="course-setting-status" data-course-config-status hidden></p>
+              </div>
+            {% endif %}
             <div class="course-setting-cell course-setting-cell--full" data-course-config-row data-course-config-field="{{ course_config_form.demo_iframe_allowed_origins.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'demo_iframe_allowed_origins' %}">
               <label class="course-setting-label" for="{{ course_config_form.demo_iframe_allowed_origins.id_for_label }}">{{ course_config_form.demo_iframe_allowed_origins.label }}</label>
               {{ course_config_form.demo_iframe_allowed_origins }}
@@ -263,12 +273,12 @@
     </div>
   </section>
 
-  <section class="course-import-status-panel course-section-card is-expanded" aria-labelledby="course-imports-heading" data-block-card>
+  <section class="course-import-status-panel course-section-card" aria-labelledby="course-imports-heading" data-block-card>
     <div
       class="section-head compact course-section-head course-section-toggle"
       data-block-toggle
       data-block-target="course-imports-content"
-      aria-expanded="true"
+      aria-expanded="false"
       aria-controls="course-imports-content"
       tabindex="0"
       role="button"
@@ -281,7 +291,7 @@
         <span class="block-card-icon" aria-hidden="true"></span>
       </div>
     </div>
-    <div id="course-imports-content" class="block-card-content course-section-content">
+    <div id="course-imports-content" class="block-card-content course-section-content" hidden>
       {% if recent_imports %}
         <div class="course-import-status-list">
           {% for import in recent_imports %}
@@ -302,12 +312,12 @@
     </div>
   </section>
 
-  <section class="course-import-status-panel course-section-card is-expanded" aria-labelledby="course-validation-heading" data-block-card>
+  <section class="course-import-status-panel course-section-card" aria-labelledby="course-validation-heading" data-block-card>
     <div
       class="section-head compact course-section-head course-section-toggle"
       data-block-toggle
       data-block-target="course-validation-content"
-      aria-expanded="true"
+      aria-expanded="false"
       aria-controls="course-validation-content"
       tabindex="0"
       role="button"
@@ -320,7 +330,7 @@
           <span class="block-card-icon" aria-hidden="true"></span>
         </div>
       </div>
-    <div id="course-validation-content" class="block-card-content course-section-content">
+    <div id="course-validation-content" class="block-card-content course-section-content" hidden>
       <div class="course-import-status-list">
         {% for event in events %}
           <article class="course-import-status-row">
@@ -361,12 +371,12 @@
     </div>
   </section>
 
-  <section class="course-blocks-section course-section-card is-expanded" aria-labelledby="course-blocks-heading" data-block-card>
+  <section class="course-blocks-section course-section-card" aria-labelledby="course-blocks-heading" data-block-card>
     <div
       class="section-head compact course-section-head course-blocks-head course-section-toggle"
       data-block-toggle
       data-block-target="course-blocks-content"
-      aria-expanded="true"
+      aria-expanded="false"
       aria-controls="course-blocks-content"
       tabindex="0"
       role="button"
@@ -380,7 +390,7 @@
       </div>
     </div>
 
-    <div id="course-blocks-content" class="block-card-content course-section-content">
+    <div id="course-blocks-content" class="block-card-content course-section-content" hidden>
       <div class="block-list course-block-list">
         {% for block in blocks %}
           <article class="block-card course-block-card" data-block-card>

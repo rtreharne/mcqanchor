@@ -107,6 +107,7 @@ class CourseConfig(TimeStampedModel):
     self_enrol_enabled = models.BooleanField(default=True)
     self_enrol_domain = models.CharField(max_length=255, blank=True)
     demo_enabled = models.BooleanField(default=False)
+    homepage_demo_enabled = models.BooleanField(default=False)
     demo_iframe_allowed_origins = models.TextField(blank=True)
     assistant_guidance = models.TextField(blank=True)
     practice_weight = models.PositiveSmallIntegerField(default=80, validators=[MinValueValidator(0), MaxValueValidator(100)])
@@ -172,6 +173,7 @@ class CourseMagicLink(TimeStampedModel):
 class CourseDemoAccess(TimeStampedModel):
     course = models.OneToOneField(Course, on_delete=models.CASCADE, related_name="demo_access")
     token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    access_count = models.PositiveIntegerField(default=0)
     shared_practice_state = models.JSONField(default=dict, blank=True)
 
     class Meta:
