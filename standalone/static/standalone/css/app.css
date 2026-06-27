@@ -1525,17 +1525,83 @@ button.button[disabled] {
   text-decoration: none;
 }
 
+.dashboard-course-card-topline {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
 .dashboard-course-card:hover,
 .dashboard-course-card:focus-visible {
   border-color: rgba(46, 190, 169, 0.36);
   box-shadow: 0 16px 34px rgba(47, 93, 161, 0.11);
   outline: none;
+  transform: none;
 }
 
 .dashboard-course-card h3 {
   margin: 0;
   font-size: 1.1rem;
   line-height: 1.2;
+}
+
+.builder-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+
+.builder-toggle-track {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 2.6rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  background: rgba(23, 48, 82, 0.18);
+  transition: background 0.18s ease;
+}
+
+.builder-toggle-thumb {
+  width: 1.15rem;
+  height: 1.15rem;
+  margin-left: 0.18rem;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(23, 48, 82, 0.18);
+  transition: transform 0.18s ease;
+}
+
+.builder-toggle[aria-checked="true"] .builder-toggle-track {
+  background: rgba(46, 190, 169, 0.9);
+}
+
+.builder-toggle[aria-checked="true"] .builder-toggle-thumb {
+  transform: translateX(1.08rem);
+}
+
+.builder-toggle:focus-visible {
+  outline: 3px solid rgba(21, 91, 200, 0.18);
+  outline-offset: 2px;
+  border-radius: 999px;
+}
+
+.builder-toggle-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.builder-toggle.is-pending {
+  opacity: 0.68;
+  pointer-events: none;
 }
 
 .dashboard-course-card p {
@@ -1811,10 +1877,6 @@ button.button[disabled] {
   line-height: 1.1;
 }
 
-.practice-average-metric.is-fixed-engagement span,
-.practice-average-metric.is-fixed-engagement strong {
-  color: rgba(23, 48, 82, 0.62);
-}
 
 .course-card-link {
   color: #155bc8;

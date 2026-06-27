@@ -35,9 +35,34 @@
     <div id="teacher-dashboard-courses-content" class="block-card-content course-section-content" hidden>
       <div class="dashboard-course-grid">
       {% for course in courses %}
-        <a class="course-card dashboard-course-card" href="{% url 'standalone:course_detail' course.pk %}">
+        <article class="course-card dashboard-course-card">
           <span class="course-card-status{% if course.is_active %} is-active{% endif %}">{% if course.is_active %}Active{% else %}Inactive{% endif %}</span>
-          <h3>{{ course.title }}</h3>
+          <div class="dashboard-course-card-topline">
+            <h3>{{ course.title }}</h3>
+            <form
+              method="post"
+              action="{% if course.question_bank_builder_enabled %}{{ course.question_bank_builder_pause_url }}{% else %}{{ course.question_bank_builder_start_url }}{% endif %}"
+              class="inline-form"
+              data-builder-toggle-form
+            >
+              {% csrf_token %}
+              <input type="hidden" name="next" value="{% url 'standalone:teacher_dashboard' %}">
+              <button
+                class="builder-toggle"
+                type="submit"
+                role="switch"
+                aria-checked="{% if course.question_bank_builder_enabled %}true{% else %}false{% endif %}"
+                aria-label="Toggle periodic question generation for {{ course.title }}"
+                title="{% if course.question_bank_builder_enabled %}Pause periodic question generation{% else %}Run or resume periodic question generation{% endif %}"
+                data-builder-toggle-button
+              >
+                <span class="builder-toggle-track" aria-hidden="true">
+                  <span class="builder-toggle-thumb"></span>
+                </span>
+                <span class="builder-toggle-label" data-builder-toggle-label>{% if course.question_bank_builder_enabled %}Builder on{% else %}Builder off{% endif %}</span>
+              </button>
+            </form>
+          </div>
           <p>{{ course.summary|default:"No summary yet."|truncatechars:150 }}</p>
           <div class="course-card-meta" aria-label="Course totals">
             <span>{{ course.block_count }} blocks</span>
@@ -50,11 +75,13 @@
               <span class="practice-average-metric practice-average-metric--overall"><span>Overall practice</span><strong>{{ course.practice_overall_average|floatformat:1 }}%</strong></span>
               <span class="practice-average-metric"><span>Mastery</span><strong>{{ course.practice_mastery_average|floatformat:1 }}%</strong></span>
               <span class="practice-average-metric"><span>Coverage</span><strong>{{ course.practice_coverage_average|floatformat:1 }}%</strong></span>
-              <span class="practice-average-metric{% if not course.config.engagement_half_life_days %} is-fixed-engagement{% endif %}"><span>Engagement</span><strong>{{ course.practice_engagement_average|floatformat:1 }}%</strong></span>
+              <span class="practice-average-metric"><span>Engagement</span><strong>{{ course.practice_engagement_average|floatformat:1 }}%</strong></span>
             </div>
           </div>
-          <span class="course-card-link">Open course</span>
-        </a>
+          <div class="workspace-actions">
+            <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}">Open course</a>
+          </div>
+        </article>
       {% empty %}
         <div class="empty-state">
           <p class="eyebrow">No courses yet</p>

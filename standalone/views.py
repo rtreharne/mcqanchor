@@ -419,6 +419,10 @@ def teacher_dashboard(request: HttpRequest) -> HttpResponse:
     )
     course_list = list(courses)
     _attach_course_practice_averages(course_list)
+    for course in course_list:
+        course.question_bank_builder_enabled = bool(course.config.question_bank_builder_enabled)
+        course.question_bank_builder_start_url = reverse("standalone:start_course_question_bank_builder", args=[course.pk])
+        course.question_bank_builder_pause_url = reverse("standalone:pause_course_question_bank_builder", args=[course.pk])
     validation_events = list(
         ValidationEvent.objects.filter(
             course_id__in=[course.pk for course in course_list],
@@ -2363,6 +2367,12 @@ def generate_course_bank(request: HttpRequest, course_id: int) -> HttpResponse:
     return redirect("standalone:course_detail", course.pk)
 
 
+def _prefers_json_response(request: HttpRequest) -> bool:
+    accept = str(request.headers.get("Accept") or "")
+    requested_with = str(request.headers.get("X-Requested-With") or "")
+    return "application/json" in accept or requested_with == "XMLHttpRequest"
+
+
 @login_required
 def start_course_question_bank_builder(request: HttpRequest, course_id: int) -> HttpResponse:
     if request.method != "POST" or not _is_teacher(request.user):
@@ -2381,10 +2391,24 @@ def start_course_question_bank_builder(request: HttpRequest, course_id: int) -> 
         ]
     )
     result = run_course_question_bank_builder_pass(course.pk)
+    if _prefers_json_response(request):
+        return JsonResponse(
+            {
+                "ok": True,
+                "enabled": True,
+                "label": "Builder on",
+                "title": "Pause periodic question generation",
+                "action_url": reverse("standalone:pause_course_question_bank_builder", args=[course.pk]),
+                "generated": bool(result.generated),
+            }
+        )
     if result.generated:
         messages.success(request, "Question bank builder resumed and generated a new linked practice/validation pair.")
     else:
         messages.success(request, "Question bank builder resumed.")
+    next_url = request.POST.get("next") or request.GET.get("next")
+    if next_url:
+        return redirect(next_url)
     return redirect("standalone:course_detail", course.pk)
 
 
@@ -2405,7 +2429,21 @@ def pause_course_question_bank_builder(request: HttpRequest, course_id: int) -> 
             "updated_at",
         ]
     )
+    if _prefers_json_response(request):
+        return JsonResponse(
+            {
+                "ok": True,
+                "enabled": False,
+                "label": "Builder off",
+                "title": "Run or resume periodic question generation",
+                "action_url": reverse("standalone:start_course_question_bank_builder", args=[course.pk]),
+                "generated": False,
+            }
+        )
     messages.success(request, "Question bank builder paused.")
+    next_url = request.POST.get("next") or request.GET.get("next")
+    if next_url:
+        return redirect(next_url)
     return redirect("standalone:course_detail", course.pk)
 
 
