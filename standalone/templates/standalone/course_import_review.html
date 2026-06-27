@@ -8,7 +8,7 @@
   <a class="button secondary app-nav-menu-action" href="{% url 'standalone:course_detail' course.pk %}">Course</a>
 {% endblock %}
 {% block content %}
-{% if course_import.status == 'analyzing' or course_import.status == 'creating' %}
+{% if course_import.status == 'queued_analysis' or course_import.status == 'analyzing' or course_import.status == 'queued_creation' or course_import.status == 'creating' %}
   <meta http-equiv="refresh" content="5">
 {% endif %}
 <section class="panel course-import-review">
@@ -22,7 +22,7 @@
     </div>
   </div>
 
-  <div class="regeneration-status-panel{% if course_import.status == 'analyzing' or course_import.status == 'creating' %} is-running{% elif course_import.status == 'completed' %} is-complete{% elif course_import.status == 'failed' %} is-failed{% endif %}">
+  <div class="regeneration-status-panel{% if course_import.status == 'queued_analysis' or course_import.status == 'analyzing' or course_import.status == 'queued_creation' or course_import.status == 'creating' %} is-running{% elif course_import.status == 'completed' or course_import.status == 'ready' %} is-complete{% elif course_import.status == 'failed' %} is-failed{% endif %}">
     <div class="regeneration-status-head">
       <strong>{{ course_import.get_status_display }}</strong>
       <span>{{ course_import.progress }}%</span>
@@ -30,72 +30,129 @@
     <div class="regeneration-progress" aria-hidden="true">
       <span style="width: {{ course_import.progress }}%"></span>
     </div>
-    {% if course_import.status == 'uploaded' or course_import.status == 'analyzing' %}
-      <p class="regeneration-status-copy">Detecting chapters from the uploaded PDF.</p>
+    {% if course_import.status == 'queued_analysis' %}
+      <p class="regeneration-status-copy">The PDF is queued for bounded chapter detection.</p>
+    {% elif course_import.status == 'analyzing' %}
+      <p class="regeneration-status-copy">Detecting chapters from the uploaded PDF in safe bounded windows.</p>
+    {% elif course_import.status == 'queued_creation' %}
+      <p class="regeneration-status-copy">Selected chapters are queued for one-at-a-time block creation.</p>
     {% elif course_import.status == 'ready' %}
-      <p class="regeneration-status-copy">Select the chapters to convert into course blocks.</p>
+      <p class="regeneration-status-copy">Select up to the next {{ course_import_max_selected_chapters }} chapters to convert into course blocks.</p>
     {% elif course_import.status == 'creating' %}
-      <p class="regeneration-status-copy">Creating course blocks and generating descriptions and learning objectives.</p>
+      <p class="regeneration-status-copy">Creating one course block at a time and generating descriptions and learning objectives safely.</p>
+    {% elif course_import.status == 'paused' %}
+      <p class="regeneration-status-copy">The import is paused. Resume it when you are ready.</p>
+    {% elif course_import.status == 'attention' %}
+      <p class="regeneration-status-copy">One or more chapters failed. Retry the failed chapters or move on to a new batch.</p>
     {% elif course_import.status == 'completed' %}
       <p class="regeneration-status-copy">Selected chapters have been converted into course blocks.</p>
     {% elif course_import.status == 'failed' %}
       <p class="regeneration-status-copy">The import did not complete successfully.</p>
     {% endif %}
+    {% if course_import.current_step %}
+      <p class="regeneration-status-copy"><strong>Current step:</strong> {{ course_import.current_step }}</p>
+    {% endif %}
+    {% if course_import.current_chapter %}
+      <p class="regeneration-status-copy"><strong>Current chapter:</strong> {{ course_import.current_chapter.title }}</p>
+    {% endif %}
+    <p class="regeneration-status-copy">
+      Processed {{ course_import_completed_count }} · Failed {{ course_import_failed_count }} ·
+      Queued {{ course_import_queued_count }} · Remaining {{ course_import_remaining_count }}
+    </p>
     {% if course_import.error %}
       <p class="regeneration-status-error">{{ course_import.error }}</p>
     {% endif %}
+    <div class="action-row">
+      {% if course_import.status == 'queued_analysis' or course_import.status == 'analyzing' or course_import.status == 'queued_creation' or course_import.status == 'creating' %}
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="pause">
+          <button class="button secondary" type="submit">Pause import</button>
+        </form>
+      {% endif %}
+      {% if course_import.status == 'paused' or course_import.status == 'attention' %}
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="continue">
+          <button class="button secondary" type="submit">Continue import</button>
+        </form>
+      {% endif %}
+      {% if course_import_failed_count > 0 and course_import.status != 'creating' and course_import.status != 'queued_creation' %}
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="retry_failed">
+          <button class="button secondary" type="submit">Retry failed chapters</button>
+        </form>
+      {% endif %}
+    </div>
   </div>
 
-  {% if course_import.status == 'ready' %}
+  {% if course_import.status == 'ready' or course_import.status == 'attention' %}
     <form method="post" class="stack-form course-import-chapter-form">
       {% csrf_token %}
+      <input type="hidden" name="action" value="select">
       {{ form.non_field_errors }}
       {% if form.selected_chapters.errors %}
         {% for error in form.selected_chapters.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
       {% endif %}
-      {% if course_import_max_selected_chapters > 0 %}
-        <p class="help-text">Select up to {{ course_import_max_selected_chapters }} chapters at a time for this deployment.</p>
+      <p class="help-text">Select up to {{ course_import_max_selected_chapters }} chapters for the next safe import batch. Chapters are processed one at a time.</p>
+      {% if form.fields.selected_chapters.choices %}
+        <div class="course-import-chapter-list">
+          {% for chapter in form.chapters %}
+            <label class="course-import-chapter-row">
+              <input
+                type="checkbox"
+                name="selected_chapters"
+                value="{{ chapter.pk }}"
+                {% if chapter.status == 'queued' %}checked{% endif %}
+              >
+              <span class="course-import-chapter-main">
+                <strong>{{ chapter.title }}</strong>
+                <small>Pages {{ chapter.start_page }}-{{ chapter.end_page }} · confidence {{ chapter.confidence }}%</small>
+              </span>
+            </label>
+          {% endfor %}
+        </div>
+        <div class="action-row">
+          <button class="button" type="submit">Queue selected chapters</button>
+          <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}">Back to course</a>
+        </div>
       {% else %}
-        <p class="help-text">Selected chapters will be queued one at a time for block creation.</p>
+        <p class="help-text">No pending chapters are available for a new batch right now.</p>
       {% endif %}
-      <div class="course-import-chapter-list">
-        {% for chapter in chapters %}
-          <label class="course-import-chapter-row">
-            <input
-              type="checkbox"
-              name="selected_chapters"
-              value="{{ chapter.pk }}"
-              {% if chapter.selected and not chapter.created_block_id %}checked{% endif %}
-            >
-            <span class="course-import-chapter-main">
-              <strong>{{ chapter.title }}</strong>
-              <small>Pages {{ chapter.start_page }}-{{ chapter.end_page }} · confidence {{ chapter.confidence }}%</small>
-            </span>
-          </label>
-        {% endfor %}
-      </div>
-      <div class="action-row">
-        <button class="button" type="submit">Create selected blocks</button>
-        <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}">Cancel</a>
-      </div>
     </form>
-  {% elif course_import.status == 'completed' %}
+  {% endif %}
+
+  {% if chapters %}
     <div class="course-import-chapter-list">
       {% for chapter in chapters %}
         <div class="course-import-chapter-row">
           <span class="course-import-chapter-main">
             <strong>{{ chapter.title }}</strong>
-            <small>Pages {{ chapter.start_page }}-{{ chapter.end_page }}</small>
+            <small>
+              Pages {{ chapter.start_page }}-{{ chapter.end_page }} · confidence {{ chapter.confidence }}% ·
+              {{ chapter.get_status_display }}
+            </small>
+            {% if chapter.last_error %}
+              <small class="regeneration-status-error">{{ chapter.last_error }}</small>
+            {% endif %}
           </span>
           {% if chapter.created_block %}
             <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}#block-content-{{ chapter.created_block.pk }}">Open block</a>
+          {% elif chapter.status == 'failed' %}
+            <span class="block-chip status-chip is-failed">Failed</span>
+          {% elif chapter.status == 'queued' or chapter.status == 'processing' %}
+            <span class="block-chip status-chip is-queued">Queued</span>
+          {% elif chapter.status == 'completed' %}
+            <span class="block-chip status-chip is-completed">Completed</span>
           {% else %}
-            <span class="block-chip">Not selected</span>
+            <span class="block-chip">Pending</span>
           {% endif %}
         </div>
       {% endfor %}
     </div>
-  {% elif course_import.status == 'failed' %}
+  {% endif %}
+  {% if course_import.status == 'failed' %}
     <div class="action-row">
       <a class="button" href="{% url 'standalone:course_import_upload' course.pk %}">Try another PDF</a>
       <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}">Back to course</a>

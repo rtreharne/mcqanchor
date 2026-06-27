@@ -1784,14 +1784,21 @@ button.button[disabled] {
   color: #4a5d73;
 }
 
-.status-chip.is-uploaded,
+.status-chip.is-queued_analysis,
 .status-chip.is-analyzing,
+.status-chip.is-queued_creation,
 .status-chip.is-creating,
 .status-chip.is-queued,
 .status-chip.is-running {
   border-color: rgba(179, 119, 26, 0.2);
   background: rgba(255, 247, 230, 0.96);
   color: #87560d;
+}
+
+.status-chip.is-attention {
+  border-color: rgba(191, 95, 22, 0.22);
+  background: rgba(255, 243, 233, 0.96);
+  color: #9a4d10;
 }
 
 .status-chip.is-failed {

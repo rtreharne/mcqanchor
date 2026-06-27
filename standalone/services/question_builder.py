@@ -6,6 +6,7 @@ from django.db.models import Count, Q
 from django.utils import timezone
 
 from standalone.models import ContentChunk, Course, CourseConfig, LearningObjective, QuestionBankItem
+from standalone.services.course_imports import course_import_work_is_active
 
 
 @dataclass(frozen=True)
@@ -248,6 +249,8 @@ def ordered_builder_targets(course: Course) -> list[BuilderTarget]:
 
 def run_course_question_bank_builder_pass(course_id: int, *, now=None) -> QuestionBankBuilderPassResult:
     now = now or timezone.now()
+    if course_import_work_is_active():
+        return QuestionBankBuilderPassResult(course_id=course_id, generated=False, skipped_reason="course_import_active")
     config = CourseConfig.objects.select_related("course").filter(course_id=course_id).first()
     if config is None:
         return QuestionBankBuilderPassResult(course_id=course_id, generated=False, skipped_reason="missing_config")

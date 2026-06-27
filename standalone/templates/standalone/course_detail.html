@@ -347,7 +347,7 @@
                 <strong>{{ import.original_filename }}</strong>
                 <small>{{ import.created_at|date:"j M Y H:i" }}</small>
               </span>
-              <span class="block-chip status-chip is-{{ import.status }}">{{ import.get_status_display }}{% if import.status == 'analyzing' or import.status == 'creating' %} {{ import.progress }}%{% endif %}</span>
+              <span class="block-chip status-chip is-{{ import.status }}">{{ import.get_status_display }}{% if import.status == 'queued_analysis' or import.status == 'analyzing' or import.status == 'queued_creation' or import.status == 'creating' %} {{ import.progress }}%{% endif %}</span>
             </a>
           {% endfor %}
         </div>

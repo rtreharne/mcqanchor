@@ -497,10 +497,13 @@ class ContentChunk(TimeStampedModel):
 
 class CourseImport(TimeStampedModel):
     class Status(models.TextChoices):
-        UPLOADED = "uploaded", "Uploaded"
+        QUEUED_ANALYSIS = "queued_analysis", "Queued for analysis"
         ANALYZING = "analyzing", "Analyzing"
         READY = "ready", "Ready"
+        QUEUED_CREATION = "queued_creation", "Queued for block creation"
         CREATING = "creating", "Creating blocks"
+        PAUSED = "paused", "Paused"
+        ATTENTION = "attention", "Needs attention"
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
 
@@ -508,9 +511,22 @@ class CourseImport(TimeStampedModel):
     uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="course_imports")
     source_file = models.FileField(upload_to="standalone/imports/%Y/%m/%d")
     original_filename = models.CharField(max_length=255)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.UPLOADED)
+    status = models.CharField(max_length=30, choices=Status.choices, default=Status.QUEUED_ANALYSIS)
     progress = models.PositiveSmallIntegerField(default=0)
     error = models.TextField(blank=True)
+    lease_owner = models.CharField(max_length=120, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    current_step = models.CharField(max_length=255, blank=True)
+    current_chapter = models.ForeignKey(
+        "CourseImportChapter",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="active_imports",
+    )
+    processed_chapter_count = models.PositiveSmallIntegerField(default=0)
+    failed_chapter_count = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         ordering = ["-created_at"]
@@ -518,8 +534,20 @@ class CourseImport(TimeStampedModel):
     def __str__(self) -> str:
         return f"{self.original_filename} for {self.course}"
 
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in {self.Status.READY, self.Status.PAUSED, self.Status.ATTENTION, self.Status.COMPLETED, self.Status.FAILED}
+
 
 class CourseImportChapter(TimeStampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        QUEUED = "queued", "Queued"
+        PROCESSING = "processing", "Processing"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+        SKIPPED = "skipped", "Skipped"
+
     course_import = models.ForeignKey(CourseImport, on_delete=models.CASCADE, related_name="chapters")
     title = models.CharField(max_length=255)
     order = models.PositiveSmallIntegerField(default=1)
@@ -527,7 +555,11 @@ class CourseImportChapter(TimeStampedModel):
     end_page = models.PositiveIntegerField(default=1)
     confidence = models.PositiveSmallIntegerField(default=50)
     extracted_text = models.TextField(blank=True)
+    preview_text = models.TextField(blank=True)
     selected = models.BooleanField(default=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    last_error = models.TextField(blank=True)
     created_block = models.ForeignKey(
         CourseBlock,
         on_delete=models.SET_NULL,

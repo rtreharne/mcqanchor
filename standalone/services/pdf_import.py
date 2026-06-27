@@ -60,6 +60,7 @@ _TIMESTAMP_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}$")
 _OCR_PROBE_PAGE_COUNT = 40
 _END_BOUNDARY_TITLE = "__END_OF_CHAPTERS__"
 _ANALYSIS_PAGE_TEXT_CHAR_LIMIT = 2500
+_SYNTHETIC_SECTION_PREVIEW_CHAR_LIMIT = 1800
 
 
 class PdfOcrUnavailableError(RuntimeError):
@@ -162,29 +163,55 @@ def analyze_pdf_chapters(file_path: str | Path) -> list[PdfChapterCandidate]:
     boundaries = _outline_boundaries(reader)
     if boundaries:
         chapters = _empty_chapters_from_boundaries(boundaries, page_count)
-        return _cleanup_with_openai(chapters) if settings.OPENAI_API_KEY else chapters
+        return _finalize_chapter_candidates(reader, file_path, chapters)
 
-    pages = _extract_page_texts(
-        reader,
-        file_path,
-        range(1, page_count + 1),
-        max_chars_per_page=_ANALYSIS_PAGE_TEXT_CHAR_LIMIT,
-    )
-    if not _has_readable_text(pages):
-        probe_end = min(len(pages), _OCR_PROBE_PAGE_COUNT)
+    scan_window_pages = max(1, int(getattr(settings, "COURSE_IMPORT_SCAN_WINDOW_PAGES", 10) or 10))
+    early_page_map: dict[int, str] = {}
+    top_level_candidates: list[tuple[int, int, str]] = []
+    heading_boundaries: list[_ChapterBoundary] = []
+    seen_heading_titles: set[str] = set()
+    any_readable_text = False
+
+    for window_start in range(1, page_count + 1, scan_window_pages):
+        window_end = min(page_count, window_start + scan_window_pages - 1)
+        page_numbers = range(window_start, window_end + 1)
+        pages = _extract_page_texts(
+            reader,
+            file_path,
+            page_numbers,
+            max_chars_per_page=_ANALYSIS_PAGE_TEXT_CHAR_LIMIT,
+        )
+        if _has_readable_text(pages):
+            any_readable_text = True
+        for offset, page_text in enumerate(pages):
+            page_number = window_start + offset
+            if page_number <= max(_OCR_PROBE_PAGE_COUNT, scan_window_pages * 2):
+                early_page_map[page_number] = page_text
+            title = _top_level_numbered_title_from_page(page_text)
+            if title:
+                section_number, display_title = title
+                top_level_candidates.append((page_number, section_number, display_title))
+            boundary = _heading_boundary_from_page(page_text, page_number, seen_heading_titles)
+            if boundary is not None:
+                heading_boundaries.append(boundary)
+
+    if not any_readable_text:
+        probe_end = min(page_count, _OCR_PROBE_PAGE_COUNT)
         probe_pages = _ocr_pdf_pages(file_path, range(1, probe_end + 1), dpi=135)
         boundaries = _toc_boundaries_from_ocr(probe_pages, page_count) or _heading_boundaries_from_page_map(probe_pages)
         if not boundaries:
-            return []
+            return _synthetic_section_candidates(reader, file_path, page_count)
         chapters = _empty_chapters_from_boundaries(boundaries, page_count)
-        return _cleanup_with_openai(chapters) if settings.OPENAI_API_KEY else chapters
+        return _finalize_chapter_candidates(reader, file_path, chapters)
 
-    boundaries = _top_level_numbered_section_boundaries(pages) or _heading_boundaries(pages)
+    boundaries = _toc_boundaries_from_ocr(early_page_map, page_count)
     if not boundaries:
-        boundaries = [_ChapterBoundary("Imported PDF", 1, 35)]
+        boundaries = _validated_top_level_boundaries(top_level_candidates) or _dedupe_boundaries(heading_boundaries)
+    if not boundaries:
+        return _synthetic_section_candidates(reader, file_path, page_count)
 
     chapters = _empty_chapters_from_boundaries(boundaries, page_count)
-    return _cleanup_with_openai(chapters) if settings.OPENAI_API_KEY else chapters
+    return _finalize_chapter_candidates(reader, file_path, chapters)
 
 
 def _has_readable_text(pages: list[str]) -> bool:
@@ -401,6 +428,26 @@ def _heading_boundaries_from_page_map(page_map: dict[int, str]) -> list[_Chapter
     return _heading_boundaries(pages)
 
 
+def _heading_boundary_from_page(page_text: str, page_index: int, seen_titles: set[str]) -> _ChapterBoundary | None:
+    lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+    for line_index, line in enumerate(lines[:16]):
+        title = _heading_title_from_line(line)
+        if not title:
+            continue
+        if _is_noise_heading(title):
+            continue
+        normalized_title = title.lower()
+        if normalized_title in seen_titles:
+            continue
+        seen_titles.add(normalized_title)
+        if re.match(r"^(chapter|unit|part)\s+\S+$", title, flags=re.IGNORECASE):
+            next_title = _next_title_line(lines, line_index + 1)
+            if next_title:
+                title = f"{title}: {next_title}"
+        return _ChapterBoundary(_clean_title(title), page_index, 80)
+    return None
+
+
 def _top_level_numbered_section_boundaries(pages: list[str]) -> list[_ChapterBoundary]:
     candidates: list[tuple[int, int, str]] = []
 
@@ -522,22 +569,9 @@ def _heading_boundaries(pages: list[str]) -> list[_ChapterBoundary]:
     seen_titles: set[str] = set()
 
     for page_index, page_text in enumerate(pages, start=1):
-        lines = [line.strip() for line in page_text.splitlines() if line.strip()]
-        for line_index, line in enumerate(lines[:16]):
-            title = _heading_title_from_line(line)
-            if not title:
-                continue
-            if _is_noise_heading(title):
-                continue
-            if title.lower() in seen_titles:
-                continue
-            seen_titles.add(title.lower())
-            if re.match(r"^(chapter|unit|part)\s+\S+$", title, flags=re.IGNORECASE):
-                next_title = _next_title_line(lines, line_index + 1)
-                if next_title:
-                    title = f"{title}: {next_title}"
-            boundaries.append(_ChapterBoundary(_clean_title(title), page_index, 80))
-            break
+        boundary = _heading_boundary_from_page(page_text, page_index, seen_titles)
+        if boundary is not None:
+            boundaries.append(boundary)
 
     return _dedupe_boundaries(boundaries)
 
@@ -776,6 +810,43 @@ def _boundaries_to_chapters(boundaries: list[_ChapterBoundary], pages: list[str]
             extracted_text=normalize_text("\n\n".join(pages)),
         )
     ]
+
+
+def _synthetic_section_candidates(reader: PdfReader, file_path: str | Path, page_count: int) -> list[PdfChapterCandidate]:
+    max_pages = max(1, int(getattr(settings, "COURSE_IMPORT_SYNTHETIC_SECTION_MAX_PAGES", 12) or 12))
+    chapters: list[PdfChapterCandidate] = []
+    for section_index, start_page in enumerate(range(1, page_count + 1, max_pages), start=1):
+        end_page = min(page_count, start_page + max_pages - 1)
+        preview_text = extract_pdf_page_range(file_path, start_page, min(end_page, start_page + 1))
+        chapters.append(
+            PdfChapterCandidate(
+                title=f"Section {section_index}",
+                start_page=start_page,
+                end_page=end_page,
+                confidence=35,
+                extracted_text=preview_text[:_SYNTHETIC_SECTION_PREVIEW_CHAR_LIMIT].strip(),
+            )
+        )
+    return chapters
+
+
+def _finalize_chapter_candidates(
+    reader: PdfReader,
+    file_path: str | Path,
+    chapters: list[PdfChapterCandidate],
+) -> list[PdfChapterCandidate]:
+    if not chapters:
+        return chapters
+    for chapter in chapters:
+        if not chapter.extracted_text:
+            chapter.extracted_text = _extract_page_text_with_poppler(
+                file_path,
+                chapter.start_page,
+                max_chars_per_page=_SYNTHETIC_SECTION_PREVIEW_CHAR_LIMIT,
+            ) if shutil.which("pdftotext") else normalize_text(reader.pages[chapter.start_page - 1].extract_text() or "")[:_SYNTHETIC_SECTION_PREVIEW_CHAR_LIMIT]
+    if settings.OPENAI_API_KEY and bool(getattr(settings, "COURSE_IMPORT_ANALYSIS_OPENAI_CLEANUP", False)):
+        return _cleanup_with_openai(chapters)
+    return chapters
 
 
 def _cleanup_with_openai(chapters: list[PdfChapterCandidate]) -> list[PdfChapterCandidate]:

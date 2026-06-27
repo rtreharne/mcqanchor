@@ -60,6 +60,7 @@ from standalone.models import (
     CourseConfig,
     CourseDemoAccess,
     CourseImport,
+    CourseImportChapter,
     CourseMagicLink,
     Enrollment,
     LearningObjective,
@@ -87,6 +88,17 @@ from standalone.services.content import (
     regenerate_block_descriptions_and_objectives,
     regenerate_course_descriptions_and_objectives,
     summarize_block_content,
+)
+from standalone.services.course_imports import (
+    course_import_has_runnable_work,
+    course_import_lease_is_active,
+    course_import_work_is_active,
+    ensure_course_import_worker_running,
+    pause_course_import,
+    queue_course_import_analysis,
+    queue_course_import_creation,
+    resume_course_import,
+    retry_failed_course_import_chapters,
 )
 from standalone.services.demo_mode import (
     demo_iframe_origin_allowed,
@@ -208,13 +220,9 @@ from standalone.services.validation_flow import (
     submit_validation_practice_response,
 )
 from standalone.tasks import (
-    analyze_course_pdf_import_task,
-    create_blocks_from_course_import_task,
     process_content_asset_task,
     run_block_creation_processing,
     run_content_asset_processing,
-    run_course_import_analysis,
-    run_course_import_block_creation,
 )
 
 
@@ -258,19 +266,11 @@ def _queue_block_creation_processing(block_id: int) -> None:
 
 
 def _queue_course_import_analysis(import_id: int) -> None:
-    if _celery_is_enabled():
-        analyze_course_pdf_import_task.delay(import_id)
-        return
-
-    enqueue_registered_background_task("course_import_analysis", import_id)
+    queue_course_import_analysis(import_id)
 
 
 def _queue_course_import_block_creation(import_id: int, selected_chapter_ids: list[int]) -> None:
-    if _celery_is_enabled():
-        create_blocks_from_course_import_task.delay(import_id, selected_chapter_ids)
-        return
-
-    enqueue_registered_background_task("course_import_block_creation", import_id, selected_chapter_ids)
+    queue_course_import_creation(import_id, selected_chapter_ids)
 
 def _background_job_status_context() -> dict[str, object]:
     if _celery_is_enabled():
@@ -2233,7 +2233,7 @@ def course_import_upload(request: HttpRequest, course_id: int) -> HttpResponse:
     if request.method == "POST" and form.is_valid():
         course_import = form.save(course=course, uploaded_by=request.user)
         _queue_course_import_analysis(course_import.pk)
-        messages.success(request, "PDF uploaded. Chapter detection is running in the background.")
+        messages.success(request, "PDF uploaded. Chapter detection is queued and will run safely in the background.")
         return redirect("standalone:course_import_review", course_import.pk)
     return render(
         request,
@@ -2255,30 +2255,66 @@ def course_import_review(request: HttpRequest, import_id: int) -> HttpResponse:
         raise Http404
     course_import = get_object_or_404(CourseImport.objects.select_related("course", "uploaded_by"), pk=import_id)
     course = _teacher_course_or_404(request.user, course_import.course_id)
+    if request.method == "GET" and course_import.status in {
+        CourseImport.Status.QUEUED_ANALYSIS,
+        CourseImport.Status.ANALYZING,
+        CourseImport.Status.QUEUED_CREATION,
+        CourseImport.Status.CREATING,
+    } and (not course_import_lease_is_active(course_import)) and course_import_has_runnable_work(course_import):
+        ensure_course_import_worker_running(course_import.pk)
+        course_import.refresh_from_db()
     chapters = list(course_import.chapters.order_by("order", "pk"))
     initial = {
         "selected_chapters": [
             str(chapter.pk)
             for chapter in chapters
-            if chapter.selected and chapter.created_block_id is None
+            if chapter.status == CourseImportChapter.Status.QUEUED and chapter.created_block_id is None
         ]
     }
     form = CourseImportChapterSelectionForm(
         request.POST or None,
-        chapters=chapters,
+        chapters=[
+            chapter
+            for chapter in chapters
+            if chapter.created_block_id is None and chapter.status in {CourseImportChapter.Status.PENDING, CourseImportChapter.Status.SKIPPED}
+        ],
         initial=initial,
         max_selected_chapters=settings.COURSE_IMPORT_MAX_SELECTED_CHAPTERS,
     )
 
     if request.method == "POST":
-        if course_import.status != CourseImport.Status.READY:
+        action = str(request.POST.get("action") or "select").strip()
+        if action == "pause":
+            pause_course_import(course_import.pk)
+            messages.success(request, "The import is paused. Any active step will stop after the current chapter finishes.")
+            return redirect("standalone:course_import_review", course_import.pk)
+        if action == "continue":
+            if course_import.status in {CourseImport.Status.PAUSED, CourseImport.Status.ATTENTION} and resume_course_import(course_import.pk):
+                messages.success(request, "The import has been resumed.")
+            else:
+                messages.error(request, "There is no paused import work ready to continue.")
+            return redirect("standalone:course_import_review", course_import.pk)
+        if action == "retry_failed":
+            retry_failed_course_import_chapters(course_import.pk)
+            messages.success(request, "Failed chapters have been queued for another attempt.")
+            return redirect("standalone:course_import_review", course_import.pk)
+        if course_import.status not in {CourseImport.Status.READY, CourseImport.Status.ATTENTION}:
             messages.error(request, "This import is not ready for chapter selection yet.")
             return redirect("standalone:course_import_review", course_import.pk)
         if form.is_valid():
             selected_chapter_ids = form.cleaned_data["selected_chapters"]
             _queue_course_import_block_creation(course_import.pk, selected_chapter_ids)
-            messages.success(request, "Selected chapters are being converted into course blocks.")
+            messages.success(request, "Selected chapters are queued for safe one-at-a-time block creation.")
             return redirect("standalone:course_import_review", course_import.pk)
+
+    course_import.refresh_from_db()
+    chapters = list(course_import.chapters.select_related("created_block").order_by("order", "pk"))
+    remaining_count = sum(
+        1 for chapter in chapters if chapter.created_block_id is None and chapter.status in {CourseImportChapter.Status.PENDING, CourseImportChapter.Status.SKIPPED}
+    )
+    queued_count = sum(1 for chapter in chapters if chapter.status in {CourseImportChapter.Status.QUEUED, CourseImportChapter.Status.PROCESSING})
+    completed_count = sum(1 for chapter in chapters if chapter.status == CourseImportChapter.Status.COMPLETED)
+    failed_count = sum(1 for chapter in chapters if chapter.status == CourseImportChapter.Status.FAILED)
 
     return render(
         request,
@@ -2289,6 +2325,10 @@ def course_import_review(request: HttpRequest, import_id: int) -> HttpResponse:
             "chapters": chapters,
             "form": form,
             "course_import_max_selected_chapters": max(0, int(settings.COURSE_IMPORT_MAX_SELECTED_CHAPTERS or 0)),
+            "course_import_remaining_count": remaining_count,
+            "course_import_queued_count": queued_count,
+            "course_import_completed_count": completed_count,
+            "course_import_failed_count": failed_count,
         },
     )
 
@@ -2433,6 +2473,20 @@ def start_course_question_bank_builder(request: HttpRequest, course_id: int) -> 
     if request.method != "POST" or not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
+    if course_import_work_is_active():
+        if _prefers_json_response(request):
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": "PDF import work is active right now. Resume question generation after the import queue is clear.",
+                },
+                status=409,
+            )
+        messages.error(request, "PDF import work is active right now. Resume question generation after the import queue is clear.")
+        next_url = request.POST.get("next") or request.GET.get("next")
+        if next_url:
+            return redirect(next_url)
+        return redirect("standalone:course_detail", course.pk)
     config, _ = _ensure_course_config(course)
     config.question_bank_builder_enabled = True
     config.question_bank_builder_auto_start = True

@@ -3,6 +3,7 @@ import io
 import json
 import re
 import tempfile
+from types import SimpleNamespace
 
 from bs4 import BeautifulSoup
 from django.contrib.auth import get_user_model
@@ -54,6 +55,7 @@ from standalone.tasks import run_block_creation_processing, run_block_regenerati
 from standalone.services.content import chunk_text, summarize_block_content
 from standalone.services.pdf_import import analyze_pdf_chapters, _select_outline_items, _toc_boundaries_from_ocr
 from standalone.services.preview import PREVIEW_SESSION_KEY
+from standalone.services.course_imports import course_import_work_is_active, run_course_import_worker_once
 from standalone.services.question_builder import (
     course_question_generation_budget,
     practice_validation_readiness,
@@ -504,7 +506,7 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual([chapter.title for chapter in chapters], ["Chapter 1: Foundations", "Chapter 2: Membranes"])
         self.assertEqual(chapters[0].start_page, 1)
         self.assertEqual(chapters[0].end_page, 1)
-        self.assertEqual(chapters[0].extracted_text, "")
+        self.assertTrue(chapters[0].extracted_text)
 
     @override_settings(OPENAI_API_KEY="")
     def test_pdf_import_falls_back_to_single_chapter_without_headings(self):
@@ -516,7 +518,7 @@ class StandaloneFlowTests(TestCase):
             chapters = analyze_pdf_chapters(pdf_file.name)
 
         self.assertEqual(len(chapters), 1)
-        self.assertEqual(chapters[0].title, "Imported PDF")
+        self.assertEqual(chapters[0].title, "Section 1")
         self.assertEqual(chapters[0].start_page, 1)
         self.assertEqual(chapters[0].end_page, 1)
 
@@ -585,7 +587,7 @@ class StandaloneFlowTests(TestCase):
             chapters = analyze_pdf_chapters(pdf_file.name)
 
         self.assertEqual(len(chapters), 1)
-        self.assertEqual(chapters[0].title, "Imported PDF")
+        self.assertEqual(chapters[0].title, "Section 1")
 
     @override_settings(OPENAI_API_KEY="")
     def test_pdf_import_joins_wrapped_top_level_numbered_titles(self):
@@ -827,6 +829,45 @@ class StandaloneFlowTests(TestCase):
             [(boundary.title, boundary.start_page) for boundary in boundaries],
             [("Chapter 2", 20), ("Chapter 3: Motion", 34), ("Chapter 4: Forces in action", 58)],
         )
+
+    @override_settings(COURSE_IMPORT_SYNTHETIC_SECTION_MAX_PAGES=12, OPENAI_API_KEY="")
+    def test_pdf_import_falls_back_to_synthetic_sections_when_no_boundaries_are_detected(self):
+        fake_reader = SimpleNamespace(
+            pages=[SimpleNamespace(extract_text=lambda: "Plain body text without headings.") for _ in range(25)],
+            outline=[],
+        )
+
+        with patch("standalone.services.pdf_import.PdfReader", return_value=fake_reader), patch(
+            "standalone.services.pdf_import._outline_boundaries",
+            return_value=[],
+        ), patch(
+            "standalone.services.pdf_import._extract_page_texts",
+            side_effect=lambda reader, file_path, page_numbers, max_chars_per_page=None: ["Plain body text without headings." for _ in page_numbers],
+        ):
+            chapters = analyze_pdf_chapters("book.pdf")
+
+        self.assertEqual(
+            [(chapter.title, chapter.start_page, chapter.end_page) for chapter in chapters],
+            [("Section 1", 1, 12), ("Section 2", 13, 24), ("Section 3", 25, 25)],
+        )
+
+    @override_settings(COURSE_IMPORT_ANALYSIS_OPENAI_CLEANUP=False, OPENAI_API_KEY="test-key")
+    def test_pdf_import_skips_openai_cleanup_when_analysis_cleanup_is_disabled(self):
+        fake_reader = SimpleNamespace(
+            pages=[SimpleNamespace(extract_text=lambda: "Introductory chapter text.") for _ in range(3)],
+            outline=[],
+        )
+
+        with patch("standalone.services.pdf_import.PdfReader", return_value=fake_reader), patch(
+            "standalone.services.pdf_import._outline_boundaries",
+            return_value=[SimpleNamespace(title="Chapter 1: Foundations", start_page=1, confidence=90)],
+        ), patch("standalone.services.pdf_import.shutil.which", return_value=""), patch(
+            "standalone.services.pdf_import._cleanup_with_openai"
+        ) as mock_cleanup:
+            chapters = analyze_pdf_chapters("book.pdf")
+
+        self.assertEqual(len(chapters), 1)
+        mock_cleanup.assert_not_called()
 
     def test_coding_signal_detects_common_languages(self):
         cases = [
@@ -1343,7 +1384,7 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(response.status_code, 302)
         course_import = CourseImport.objects.get(course=course)
         self.assertEqual(course_import.original_filename, "book.pdf")
-        self.assertEqual(course_import.status, CourseImport.Status.UPLOADED)
+        self.assertEqual(course_import.status, CourseImport.Status.QUEUED_ANALYSIS)
         mock_queue.assert_called_once_with(course_import.pk)
 
     def test_course_import_upload_rejects_non_pdf(self):
@@ -1484,33 +1525,66 @@ class StandaloneFlowTests(TestCase):
             extracted_text="Membranes regulate transport.",
         )
 
-        with patch("standalone.tasks.enqueue_registered_background_task") as mock_enqueue:
-            run_course_import_block_creation(course_import.pk, [chapter_one.pk, chapter_two.pk], queue_block_processing=True)
+        run_course_import_block_creation(course_import.pk, [chapter_one.pk, chapter_two.pk], queue_block_processing=True)
 
         course_import.refresh_from_db()
         chapter_one.refresh_from_db()
         chapter_two.refresh_from_db()
 
-        self.assertEqual(course_import.status, CourseImport.Status.CREATING)
+        self.assertEqual(course_import.status, CourseImport.Status.QUEUED_CREATION)
         self.assertIsNotNone(chapter_one.created_block)
         self.assertIsNone(chapter_two.created_block)
         self.assertEqual(course.blocks.count(), 1)
-        mock_enqueue.assert_any_call("block_creation_processing", chapter_one.created_block.pk)
-        mock_enqueue.assert_any_call("course_import_block_creation", course_import.pk)
+        self.assertEqual(chapter_one.status, CourseImportChapter.Status.COMPLETED)
+        self.assertEqual(chapter_two.status, CourseImportChapter.Status.QUEUED)
 
-        with patch("standalone.tasks.enqueue_registered_background_task") as mock_enqueue_second:
-            run_course_import_block_creation(course_import.pk, None, queue_block_processing=True)
+        run_course_import_block_creation(course_import.pk, None, queue_block_processing=True)
 
         course_import.refresh_from_db()
+        chapter_one.refresh_from_db()
         chapter_two.refresh_from_db()
         self.assertEqual(course_import.status, CourseImport.Status.COMPLETED)
+        self.assertEqual(chapter_one.status, CourseImportChapter.Status.COMPLETED)
         self.assertIsNotNone(chapter_two.created_block)
+        self.assertEqual(chapter_two.status, CourseImportChapter.Status.COMPLETED)
         self.assertEqual(course.blocks.count(), 2)
-        mock_enqueue_second.assert_any_call("block_creation_processing", chapter_two.created_block.pk)
-        self.assertEqual(
-            [call_args.args for call_args in mock_enqueue_second.call_args_list],
-            [("block_creation_processing", chapter_two.created_block.pk)],
+
+    @override_settings(OPENAI_API_KEY="", COURSE_IMPORT_MAX_RETRIES=2)
+    def test_course_import_worker_marks_single_failed_chapter_for_attention_after_retries(self):
+        course = self.create_course()
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            status=CourseImport.Status.READY,
+            progress=100,
         )
+        chapter = CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 1: Foundations",
+            order=1,
+            start_page=1,
+            end_page=2,
+            extracted_text="Cells are the basic unit of life.",
+        )
+
+        with patch("standalone.tasks.run_block_creation_processing", side_effect=RuntimeError("boom")):
+            run_course_import_block_creation(course_import.pk, [chapter.pk])
+            course_import.refresh_from_db()
+            chapter.refresh_from_db()
+            self.assertEqual(course_import.status, CourseImport.Status.QUEUED_CREATION)
+            self.assertEqual(chapter.status, CourseImportChapter.Status.QUEUED)
+            self.assertEqual(chapter.attempt_count, 1)
+
+            run_course_import_block_creation(course_import.pk, None)
+
+        course_import.refresh_from_db()
+        chapter.refresh_from_db()
+        self.assertEqual(course_import.status, CourseImport.Status.ATTENTION)
+        self.assertEqual(chapter.status, CourseImportChapter.Status.FAILED)
+        self.assertEqual(chapter.attempt_count, 2)
+        self.assertEqual(course_import.failed_chapter_count, 1)
 
     @override_settings(OPENAI_API_KEY="")
     def test_course_import_block_creation_creates_blocks_for_selected_chapters_only(self):
@@ -1545,7 +1619,7 @@ class StandaloneFlowTests(TestCase):
         course_import.refresh_from_db()
         chapter_one.refresh_from_db()
         chapter_two.refresh_from_db()
-        self.assertEqual(course_import.status, CourseImport.Status.COMPLETED)
+        self.assertEqual(course_import.status, CourseImport.Status.READY)
         self.assertIsNotNone(chapter_one.created_block)
         self.assertIsNone(chapter_two.created_block)
         self.assertEqual(course.blocks.count(), 1)
@@ -3001,6 +3075,40 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(practice.learning_objective_id, objective.pk)
         self.assertEqual(validation.block_id, future_block.pk)
         self.assertEqual(validation.linked_question_id, practice.pk)
+
+    def test_question_bank_builder_skips_generation_while_course_import_work_is_active(self):
+        course = self.create_course()
+        CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            status=CourseImport.Status.QUEUED_ANALYSIS,
+            progress=5,
+        )
+
+        self.assertTrue(course_import_work_is_active())
+        result = run_course_question_bank_builder_pass(course.pk)
+
+        self.assertFalse(result.generated)
+        self.assertEqual(result.skipped_reason, "course_import_active")
+
+    def test_question_bank_builder_start_view_blocks_while_course_import_work_is_active(self):
+        course = self.create_course()
+        CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            status=CourseImport.Status.QUEUED_ANALYSIS,
+            progress=5,
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:start_course_question_bank_builder", args=[course.pk]), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "PDF import work is active right now.")
 
     def test_question_bank_builder_pause_view_disables_builder(self):
         course = self.create_course()

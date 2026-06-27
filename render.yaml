@@ -36,7 +36,17 @@ services:
       - key: LOCAL_BACKGROUND_JOB_STRATEGY
         value: subprocess
       - key: COURSE_IMPORT_MAX_SELECTED_CHAPTERS
-        value: "0"
+        value: "5"
+      - key: COURSE_IMPORT_MAX_RETRIES
+        value: "2"
+      - key: COURSE_IMPORT_STEP_TIMEOUT_SECONDS
+        value: "900"
+      - key: COURSE_IMPORT_ANALYSIS_OPENAI_CLEANUP
+        value: "false"
+      - key: COURSE_IMPORT_SCAN_WINDOW_PAGES
+        value: "10"
+      - key: COURSE_IMPORT_SYNTHETIC_SECTION_MAX_PAGES
+        value: "12"
       - key: QUESTION_BANK_BUILDER_LOOP_ENABLED
         value: "true"
       - key: DJANGO_ADMIN_USERNAME
