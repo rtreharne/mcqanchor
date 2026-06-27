@@ -1409,6 +1409,101 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(post_response.status_code, 302)
         mock_queue.assert_called_once_with(course_import.pk, [chapter_one.pk])
 
+    @override_settings(COURSE_IMPORT_MAX_SELECTED_CHAPTERS=1)
+    def test_course_import_review_rejects_selecting_too_many_chapters(self):
+        course = self.create_course()
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            status=CourseImport.Status.READY,
+            progress=100,
+        )
+        chapter_one = CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 1: Foundations",
+            order=1,
+            start_page=1,
+            end_page=2,
+            extracted_text="Cells are the basic unit of life.",
+        )
+        chapter_two = CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 2: Membranes",
+            order=2,
+            start_page=3,
+            end_page=4,
+            extracted_text="Membranes regulate transport.",
+        )
+        self.client.force_login(self.teacher)
+
+        with patch("standalone.views._queue_course_import_block_creation") as mock_queue:
+            response = self.client.post(
+                reverse("standalone:course_import_review", args=[course_import.pk]),
+                {"selected_chapters": [str(chapter_one.pk), str(chapter_two.pk)]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Select at most 1 chapters at a time for this deployment.")
+        mock_queue.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_course_import_block_creation_processes_selected_chapters_one_at_a_time_when_queued(self):
+        course = self.create_course()
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            status=CourseImport.Status.READY,
+            progress=100,
+        )
+        chapter_one = CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 1: Foundations",
+            order=1,
+            start_page=1,
+            end_page=2,
+            extracted_text="Cells are the basic unit of life.",
+        )
+        chapter_two = CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 2: Membranes",
+            order=2,
+            start_page=3,
+            end_page=4,
+            extracted_text="Membranes regulate transport.",
+        )
+
+        with patch("standalone.tasks.enqueue_registered_background_task") as mock_enqueue:
+            run_course_import_block_creation(course_import.pk, [chapter_one.pk, chapter_two.pk], queue_block_processing=True)
+
+        course_import.refresh_from_db()
+        chapter_one.refresh_from_db()
+        chapter_two.refresh_from_db()
+
+        self.assertEqual(course_import.status, CourseImport.Status.CREATING)
+        self.assertIsNotNone(chapter_one.created_block)
+        self.assertIsNone(chapter_two.created_block)
+        self.assertEqual(course.blocks.count(), 1)
+        mock_enqueue.assert_any_call("block_creation_processing", chapter_one.created_block.pk)
+        mock_enqueue.assert_any_call("course_import_block_creation", course_import.pk)
+
+        with patch("standalone.tasks.enqueue_registered_background_task") as mock_enqueue_second:
+            run_course_import_block_creation(course_import.pk, None, queue_block_processing=True)
+
+        course_import.refresh_from_db()
+        chapter_two.refresh_from_db()
+        self.assertEqual(course_import.status, CourseImport.Status.COMPLETED)
+        self.assertIsNotNone(chapter_two.created_block)
+        self.assertEqual(course.blocks.count(), 2)
+        mock_enqueue_second.assert_any_call("block_creation_processing", chapter_two.created_block.pk)
+        self.assertEqual(
+            [call_args.args for call_args in mock_enqueue_second.call_args_list],
+            [("block_creation_processing", chapter_two.created_block.pk)],
+        )
+
     @override_settings(OPENAI_API_KEY="")
     def test_course_import_block_creation_creates_blocks_for_selected_chapters_only(self):
         course = self.create_course()

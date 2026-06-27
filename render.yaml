@@ -35,6 +35,8 @@ services:
         value: "300"
       - key: LOCAL_BACKGROUND_JOB_STRATEGY
         value: subprocess
+      - key: COURSE_IMPORT_MAX_SELECTED_CHAPTERS
+        value: "0"
       - key: QUESTION_BANK_BUILDER_LOOP_ENABLED
         value: "true"
       - key: DJANGO_ADMIN_USERNAME

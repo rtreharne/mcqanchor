@@ -219,9 +219,10 @@ class CourseImportUploadForm(forms.ModelForm):
 class CourseImportChapterSelectionForm(forms.Form):
     selected_chapters = forms.MultipleChoiceField(widget=forms.CheckboxSelectMultiple, required=True)
 
-    def __init__(self, *args, chapters=None, **kwargs):
+    def __init__(self, *args, chapters=None, max_selected_chapters: int | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.chapters = list(chapters or [])
+        self.max_selected_chapters = max_selected_chapters
         self.fields["selected_chapters"].choices = [(str(chapter.pk), chapter.title) for chapter in self.chapters]
 
     def clean_selected_chapters(self):
@@ -232,6 +233,10 @@ class CourseImportChapterSelectionForm(forms.Form):
         invalid_ids = set(selected) - valid_ids
         if invalid_ids:
             raise forms.ValidationError("One or more selected chapters are not available for this import.")
+        if self.max_selected_chapters and self.max_selected_chapters > 0 and len(selected) > self.max_selected_chapters:
+            raise forms.ValidationError(
+                f"Select at most {self.max_selected_chapters} chapters at a time for this deployment."
+            )
         return [int(chapter_id) for chapter_id in selected]
 
 

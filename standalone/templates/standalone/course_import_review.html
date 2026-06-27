@@ -53,6 +53,11 @@
       {% if form.selected_chapters.errors %}
         {% for error in form.selected_chapters.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
       {% endif %}
+      {% if course_import_max_selected_chapters > 0 %}
+        <p class="help-text">Select up to {{ course_import_max_selected_chapters }} chapters at a time for this deployment.</p>
+      {% else %}
+        <p class="help-text">Selected chapters will be queued one at a time for block creation.</p>
+      {% endif %}
       <div class="course-import-chapter-list">
         {% for chapter in chapters %}
           <label class="course-import-chapter-row">

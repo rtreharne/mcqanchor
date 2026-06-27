@@ -52,10 +52,11 @@ def _run_registered_task(task_name: str, *args) -> None:
         run_course_import_analysis(int(args[0]))
         return
     if task_name == "course_import_block_creation":
+        selected_chapter_ids = [int(chapter_id) for chapter_id in list(args[1] or [])] if len(args) > 1 else None
         run_course_import_block_creation(
             int(args[0]),
-            [int(chapter_id) for chapter_id in list(args[1] or [])],
-            queue_block_processing=False,
+            selected_chapter_ids,
+            queue_block_processing=True,
         )
         return
     raise ValueError(f"Unknown background task: {task_name}")

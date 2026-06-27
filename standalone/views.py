@@ -2263,7 +2263,12 @@ def course_import_review(request: HttpRequest, import_id: int) -> HttpResponse:
             if chapter.selected and chapter.created_block_id is None
         ]
     }
-    form = CourseImportChapterSelectionForm(request.POST or None, chapters=chapters, initial=initial)
+    form = CourseImportChapterSelectionForm(
+        request.POST or None,
+        chapters=chapters,
+        initial=initial,
+        max_selected_chapters=settings.COURSE_IMPORT_MAX_SELECTED_CHAPTERS,
+    )
 
     if request.method == "POST":
         if course_import.status != CourseImport.Status.READY:
@@ -2283,6 +2288,7 @@ def course_import_review(request: HttpRequest, import_id: int) -> HttpResponse:
             "course_import": course_import,
             "chapters": chapters,
             "form": form,
+            "course_import_max_selected_chapters": max(0, int(settings.COURSE_IMPORT_MAX_SELECTED_CHAPTERS or 0)),
         },
     )
 

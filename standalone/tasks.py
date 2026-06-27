@@ -178,9 +178,19 @@ def _chapter_asset_filename(chapter: CourseImportChapter) -> str:
     return f"{chapter.order:02d}-{base}.txt"
 
 
+def _selected_import_chapters(course_import: CourseImport) -> list[CourseImportChapter]:
+    return list(course_import.chapters.filter(selected=True).order_by("order", "pk"))
+
+
+def _course_import_creation_progress(completed_count: int, total_count: int) -> int:
+    if total_count <= 0:
+        return 100
+    return 5 + round((90 * completed_count) / total_count)
+
+
 def run_course_import_block_creation(
     import_id: int,
-    selected_chapter_ids: list[int],
+    selected_chapter_ids: list[int] | None,
     *,
     queue_block_processing: bool = False,
 ) -> None:
@@ -189,68 +199,86 @@ def run_course_import_block_creation(
     except CourseImport.DoesNotExist:
         return
 
-    selected_ids = {int(chapter_id) for chapter_id in selected_chapter_ids}
-    chapters = list(course_import.chapters.filter(pk__in=selected_ids).order_by("order", "pk"))
-    if not chapters:
+    if selected_chapter_ids is not None:
+        selected_ids = {int(chapter_id) for chapter_id in selected_chapter_ids}
+        chapters = list(course_import.chapters.filter(pk__in=selected_ids).order_by("order", "pk"))
+        if not chapters:
+            _set_course_import_state(import_id, CourseImport.Status.FAILED, 100, "Select at least one chapter before creating blocks.")
+            return
+        _set_course_import_state(import_id, CourseImport.Status.CREATING, 5)
+        course_import.chapters.update(selected=False)
+        CourseImportChapter.objects.filter(pk__in=selected_ids, course_import=course_import).update(selected=True)
+
+    selected_chapters = _selected_import_chapters(course_import)
+    if not selected_chapters:
         _set_course_import_state(import_id, CourseImport.Status.FAILED, 100, "Select at least one chapter before creating blocks.")
         return
-
-    _set_course_import_state(import_id, CourseImport.Status.CREATING, 5)
-    course_import.chapters.update(selected=False)
-    CourseImportChapter.objects.filter(pk__in=selected_ids, course_import=course_import).update(selected=True)
 
     try:
         last_block = course_import.course.blocks.order_by("-order", "-pk").first()
         next_order = (last_block.order + 1) if last_block else 1
-        total = len(chapters)
+        next_order += sum(1 for chapter in selected_chapters if chapter.created_block_id)
+        completed_count = sum(1 for chapter in selected_chapters if chapter.created_block_id)
+        total = len(selected_chapters)
+        next_chapter = next((chapter for chapter in selected_chapters if chapter.created_block_id is None), None)
 
-        for index, chapter in enumerate(chapters, start=1):
-            if not chapter.extracted_text.strip():
-                chapter.extracted_text = extract_pdf_page_range(
-                    course_import.source_file.path,
-                    chapter.start_page,
-                    chapter.end_page,
-                )
-                if not chapter.extracted_text.strip():
-                    raise ValueError(f"No readable text could be extracted from {chapter.title}.")
-                chapter.save(update_fields=["extracted_text", "updated_at"])
+        if next_chapter is None:
+            refresh_course_summary_from_blocks(course_import.course)
+            _set_course_import_state(import_id, CourseImport.Status.COMPLETED, 100)
+            return
 
-            block = CourseBlock.objects.create(
-                course=course_import.course,
-                title=chapter.title,
-                order=next_order,
-                regeneration_status=CourseBlock.RegenerationStatus.QUEUED,
-                regeneration_progress=5,
-                regeneration_error="",
+        if not next_chapter.extracted_text.strip():
+            next_chapter.extracted_text = extract_pdf_page_range(
+                course_import.source_file.path,
+                next_chapter.start_page,
+                next_chapter.end_page,
             )
-            next_order += 1
-            BlockConfig.objects.get_or_create(block=block)
+            if not next_chapter.extracted_text.strip():
+                raise ValueError(f"No readable text could be extracted from {next_chapter.title}.")
+            next_chapter.save(update_fields=["extracted_text", "updated_at"])
 
-            asset = ContentAsset(
-                block=block,
-                uploaded_by=course_import.uploaded_by,
-                original_filename=_chapter_asset_filename(chapter),
-                extension=".txt",
-                include_in_generation=True,
+        block = CourseBlock.objects.create(
+            course=course_import.course,
+            title=next_chapter.title,
+            order=next_order,
+            regeneration_status=CourseBlock.RegenerationStatus.QUEUED,
+            regeneration_progress=5,
+            regeneration_error="",
+        )
+        BlockConfig.objects.get_or_create(block=block)
+
+        asset = ContentAsset(
+            block=block,
+            uploaded_by=course_import.uploaded_by,
+            original_filename=_chapter_asset_filename(next_chapter),
+            extension=".txt",
+            include_in_generation=True,
+        )
+        asset.file.save(_chapter_asset_filename(next_chapter), ContentFile(next_chapter.extracted_text.encode("utf-8")), save=False)
+        asset.save()
+
+        next_chapter.created_block = block
+        next_chapter.save(update_fields=["created_block", "updated_at"])
+
+        if queue_block_processing:
+            enqueue_registered_background_task("block_creation_processing", block.pk)
+        else:
+            run_block_creation_processing(block.pk)
+
+        completed_count += 1
+        if completed_count >= total:
+            refresh_course_summary_from_blocks(course_import.course)
+            _set_course_import_state(import_id, CourseImport.Status.COMPLETED, 100)
+        else:
+            _set_course_import_state(
+                import_id,
+                CourseImport.Status.CREATING,
+                _course_import_creation_progress(completed_count, total),
             )
-            asset.file.save(_chapter_asset_filename(chapter), ContentFile(chapter.extracted_text.encode("utf-8")), save=False)
-            asset.save()
-
-            chapter.created_block = block
-            chapter.save(update_fields=["created_block", "updated_at"])
-
-            if queue_block_processing:
-                enqueue_registered_background_task("block_creation_processing", block.pk)
-            else:
-                run_block_creation_processing(block.pk)
-            _set_course_import_state(import_id, CourseImport.Status.CREATING, 5 + round((90 * index) / total))
-
-        refresh_course_summary_from_blocks(course_import.course)
+            enqueue_registered_background_task("course_import_block_creation", import_id)
     except Exception as exc:  # noqa: BLE001
         _set_course_import_state(import_id, CourseImport.Status.FAILED, 100, str(exc))
         raise
-
-    _set_course_import_state(import_id, CourseImport.Status.COMPLETED, 100)
 
 
 @shared_task(ignore_result=True)
