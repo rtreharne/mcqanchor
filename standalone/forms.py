@@ -184,13 +184,22 @@ class CourseImportUploadForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        max_size_bytes = int(getattr(settings, "PDF_IMPORT_MAX_FILE_SIZE_BYTES", 200 * 1024 * 1024) or 0)
+        max_size_mb = max(1, (max_size_bytes + (1024 * 1024) - 1) // (1024 * 1024)) if max_size_bytes > 0 else 0
         self.fields["source_file"].label = "PDF textbook"
-        self.fields["source_file"].help_text = "Upload one PDF. The system will detect chapters before creating any blocks."
+        self.fields["source_file"].help_text = (
+            f"Upload one PDF. The system will detect chapters before creating any blocks. "
+            f"Maximum file size: {max_size_mb} MB."
+            if max_size_mb > 0
+            else "Upload one PDF. The system will detect chapters before creating any blocks."
+        )
         self.fields["source_file"].widget.attrs.update(
             {
                 "accept": ".pdf,application/pdf",
                 "class": "upload-native-input",
                 "data-upload-input": "true",
+                "data-max-file-size-bytes": str(max_size_bytes) if max_size_bytes > 0 else "",
+                "data-max-file-size-label": f"{max_size_mb} MB" if max_size_mb > 0 else "",
             }
         )
 

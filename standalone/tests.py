@@ -16,7 +16,7 @@ from openai import OpenAIError
 from pypdf import PdfReader
 from unittest.mock import patch
 
-from standalone.forms import BlockConfigForm, CourseForm, ValidationEventForm
+from standalone.forms import BlockConfigForm, CourseForm, CourseImportUploadForm, ValidationEventForm
 from standalone.models import (
     BlockConfig,
     BlockProject,
@@ -1356,6 +1356,14 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(CourseImport.objects.count(), 0)
         self.assertContains(response, "Please upload a PDF file.")
+
+    @override_settings(PDF_IMPORT_MAX_FILE_SIZE_BYTES=50 * 1024 * 1024)
+    def test_course_import_upload_form_exposes_client_side_size_guard(self):
+        form = CourseImportUploadForm()
+
+        self.assertEqual(form.fields["source_file"].widget.attrs["data-max-file-size-bytes"], str(50 * 1024 * 1024))
+        self.assertEqual(form.fields["source_file"].widget.attrs["data-max-file-size-label"], "50 MB")
+        self.assertIn("Maximum file size: 50 MB.", form.fields["source_file"].help_text)
 
     @override_settings(PDF_IMPORT_MAX_FILE_SIZE_BYTES=1024 * 1024)
     def test_course_import_upload_rejects_pdf_over_size_limit(self):

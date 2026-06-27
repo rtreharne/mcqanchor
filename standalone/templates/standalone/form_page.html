@@ -23,6 +23,9 @@
           {{ field }}
         {% endif %}
         {% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}
+        {% if field.name == "file" or field.name == "source_file" %}
+          <p class="field-error" hidden data-upload-client-error></p>
+        {% endif %}
         {% for error in field.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
       </div>
     {% endfor %}
@@ -42,21 +45,57 @@
     document.querySelectorAll("form[data-upload-form]").forEach(function (form) {
       const fileInput = form.querySelector("[data-upload-input]");
       const fileName = form.querySelector("[data-upload-file-name]");
+      const clientError = form.querySelector("[data-upload-client-error]");
       const submitButton = form.querySelector("button[type='submit']");
       const submitText = form.querySelector("[data-upload-submit-text]");
+
+      function clearClientError() {
+        if (!clientError) return;
+        clientError.hidden = true;
+        clientError.textContent = "";
+      }
+
+      function setClientError(message) {
+        if (!clientError) return;
+        clientError.hidden = false;
+        clientError.textContent = message;
+      }
+
+      function validateFileSizes() {
+        if (!fileInput || !fileInput.files || !fileInput.files.length) {
+          clearClientError();
+          return true;
+        }
+        const maxBytes = Number(fileInput.dataset.maxFileSizeBytes || 0);
+        const maxLabel = fileInput.dataset.maxFileSizeLabel || "";
+        if (!maxBytes) {
+          clearClientError();
+          return true;
+        }
+        for (const file of fileInput.files) {
+          if (file.size > maxBytes) {
+            setClientError(`"${file.name}" is too large. Maximum file size is ${maxLabel}.`);
+            return false;
+          }
+        }
+        clearClientError();
+        return true;
+      }
 
       function syncFileName() {
         if (!fileName || !fileInput) return;
         const fileCount = fileInput.files ? fileInput.files.length : 0;
         if (!fileCount) {
           fileName.textContent = "No file selected";
+          clearClientError();
           return;
         }
         if (fileCount === 1) {
           fileName.textContent = fileInput.files[0].name;
-          return;
+        } else {
+          fileName.textContent = `${fileCount} files selected`;
         }
-        fileName.textContent = `${fileCount} files selected`;
+        validateFileSizes();
       }
 
       syncFileName();
@@ -64,7 +103,12 @@
         fileInput.addEventListener("change", syncFileName);
       }
 
-      form.addEventListener("submit", function () {
+      form.addEventListener("submit", function (event) {
+        if (!validateFileSizes()) {
+          event.preventDefault();
+          if (submitButton) submitButton.disabled = false;
+          return;
+        }
         form.classList.add("is-submitting");
         if (submitButton) submitButton.disabled = true;
         if (submitText) submitText.textContent = form.dataset.submitProgressLabel || "Uploading...";
