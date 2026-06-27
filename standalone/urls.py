@@ -54,6 +54,16 @@ urlpatterns = [
     path("teacher/course-imports/<int:import_id>/", views.course_import_review, name="course_import_review"),
     path("teacher/courses/<int:course_id>/blocks/new/", views.block_create, name="block_create"),
     path("teacher/courses/<int:course_id>/generate-bank/", views.generate_course_bank, name="generate_course_bank"),
+    path(
+        "teacher/courses/<int:course_id>/question-bank-builder/start/",
+        views.start_course_question_bank_builder,
+        name="start_course_question_bank_builder",
+    ),
+    path(
+        "teacher/courses/<int:course_id>/question-bank-builder/pause/",
+        views.pause_course_question_bank_builder,
+        name="pause_course_question_bank_builder",
+    ),
     path("teacher/courses/<int:course_id>/approve-questions/", views.approve_course_questions, name="approve_course_questions"),
     path("teacher/courses/<int:course_id>/validation-events/new/", views.validation_event_create, name="validation_event_create"),
     path("teacher/validation-events/<int:event_id>/delete/", views.validation_event_delete, name="validation_event_delete"),

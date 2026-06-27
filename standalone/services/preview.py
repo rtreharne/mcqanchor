@@ -19,8 +19,10 @@ from standalone.services.practice_scoring import (
     weighted_practice_score,
     base_practice_weights,
 )
+from standalone.services.question_builder import course_question_generation_budget, live_generation_unavailable_message
 from standalone.services.questions import (
     QuestionGenerationError,
+    QuestionGenerationUnavailableError,
     _trace_generation,
     block_has_coding_signal,
     coding_question_matches_expected_language,
@@ -613,6 +615,9 @@ def _fallback_question_for_block(
         if question is not None:
             return question, False
 
+    if not course_question_generation_budget(course).can_generate:
+        raise QuestionGenerationUnavailableError(live_generation_unavailable_message(course))
+
     preferred_objective_ids = _generation_objective_ids_for_block(course_state, block)
     if preferred_objective is not None:
         preferred_objective_ids = [preferred_objective.pk] + [
@@ -687,13 +692,18 @@ def request_preview_quiz(
             force_new=force_new,
         )
     except QuestionGenerationError as exc:
-        question, is_new_request = _fallback_question_for_block(
-            course,
-            block,
-            course_state,
-            requested_question_type,
-            preferred_objective_id=preferred_objective_id,
-        )
+        fallback_error = exc if isinstance(exc, QuestionGenerationUnavailableError) else None
+        try:
+            question, is_new_request = _fallback_question_for_block(
+                course,
+                block,
+                course_state,
+                requested_question_type,
+                preferred_objective_id=preferred_objective_id,
+            )
+        except QuestionGenerationUnavailableError as nested_exc:
+            fallback_error = nested_exc
+            question, is_new_request = None, False
         if question is not None:
             _trace_generation(
                 "preview_generation_fallback",
@@ -717,12 +727,17 @@ def request_preview_quiz(
                 original_error=str(exc),
             )
         if question is None:
+            error_text = (
+                str(fallback_error)
+                if isinstance(fallback_error, QuestionGenerationUnavailableError)
+                else "I couldn't get a fresh question for this block just now. Please try Quiz again."
+            )
             _append_message(
                 course_state,
                 block,
                 "assistant",
                 "text",
-                text="I couldn't get a fresh question for this block just now. Please try Quiz again.",
+                text=error_text,
                 source_blocks=[block.title],
             )
             request.session.modified = True

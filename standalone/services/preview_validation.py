@@ -1,8 +1,10 @@
+from django.conf import settings
 from django.utils import timezone
 
 from standalone.models import Course, CourseBlock, QuestionBankItem
 from standalone.services.preview import PREVIEW_SESSION_KEY, PREVIEW_WAQ_MIN_SUBSTANTIVE_WORDS, serialize_preview_state
-from standalone.services.questions import generate_question_pair_for_block, question_quality_sort_key
+from standalone.services.question_builder import practice_validation_unavailable_message
+from standalone.services.questions import question_quality_sort_key
 from standalone.services.validation_flow import (
     VALIDATION_SKIPPED_TEXT,
     ValidationFlowError,
@@ -23,9 +25,6 @@ from standalone.services.validation_flow import (
 
 PREVIEW_VALIDATION_SESSION_KEY = "standalone_preview_validation"
 PREVIEW_STUDENT_VALIDATE_SESSION_KEY = "standalone_preview_student_validate"
-PREVIEW_VALIDATION_DEFAULT_QUESTION_COUNT = 10
-
-
 def _preview_validation_root(request) -> dict:
     return request.session.setdefault(PREVIEW_VALIDATION_SESSION_KEY, {})
 
@@ -134,6 +133,10 @@ def _practice_validation_type_preference(block: CourseBlock, selected_type_count
     return [item[3] for item in candidates]
 
 
+def _preview_validation_default_question_count() -> int:
+    return max(1, int(getattr(settings, "PREVIEW_VALIDATION_DEFAULT_QUESTION_COUNT", 10) or 10))
+
+
 def _pick_preview_validation_practice_questions(request, course: Course, question_count: int) -> list[int]:
     released_blocks = _released_blocks(course)
     if not released_blocks:
@@ -147,34 +150,21 @@ def _pick_preview_validation_practice_questions(request, course: Course, questio
     ]
     seed_key = f"preview-validation:{course.pk}:pool"
 
-    def generator(block, objective_id, question_type, *, preferred_objective_ids=None, strict_preferred_objectives=False):
-        practice_question, _validation_question = generate_question_pair_for_block(
-            block,
-            question_type=question_type,
-            preferred_objective_ids=preferred_objective_ids,
-            strict_preferred_objectives=strict_preferred_objectives,
-        )
-        if practice_question is None:
-            return None
-        if practice_question.pk in seen_ids or int(practice_question.linked_question_id or 0) in seen_ids:
-            return None
-        return practice_question
-
     selected = select_stratified_validation_questions(
         course,
         list(available),
         question_count,
         seed_key=seed_key,
         blocks=released_blocks,
-        generate_question=generator,
     )
     return [question.pk for question in selected[:question_count]]
 
 
 def _initial_preview_state(request, course: Course) -> dict:
-    question_ids = _pick_preview_validation_practice_questions(request, course, PREVIEW_VALIDATION_DEFAULT_QUESTION_COUNT)
-    if not question_ids:
-        raise ValidationFlowError("No fresh practice questions are available yet for this course.")
+    question_count = _preview_validation_default_question_count()
+    question_ids = _pick_preview_validation_practice_questions(request, course, question_count)
+    if len(question_ids) < question_count:
+        raise ValidationFlowError(practice_validation_unavailable_message(course))
     return {
         "started_at": timezone.now().isoformat(),
         "time_limit_minutes": 0,
@@ -191,19 +181,10 @@ def _initial_preview_state(request, course: Course) -> dict:
 
 
 def _initial_preview_student_validate_state(course: Course, event) -> dict:
-    question_count = int(getattr(event, "question_count", 0) or PREVIEW_VALIDATION_DEFAULT_QUESTION_COUNT)
+    question_count = int(getattr(event, "question_count", 0) or _preview_validation_default_question_count())
     released_blocks = _released_blocks(course)
     available = [question for question in _question_queryset(course) if not question_quality_sort_key(question)[0]]
     seed_key = f"preview-validate:{course.pk}:event:{int(event.pk)}"
-
-    def generator(block, objective_id, question_type, *, preferred_objective_ids=None, strict_preferred_objectives=False):
-        _practice_question, validation_question = generate_question_pair_for_block(
-            block,
-            question_type=question_type,
-            preferred_objective_ids=preferred_objective_ids,
-            strict_preferred_objectives=strict_preferred_objectives,
-        )
-        return validation_question
 
     question_ids = [
         question.pk
@@ -213,11 +194,10 @@ def _initial_preview_student_validate_state(course: Course, event) -> dict:
             question_count,
             seed_key=seed_key,
             blocks=released_blocks,
-            generate_question=generator,
         )
     ]
-    if not question_ids:
-        raise ValidationFlowError("No validation questions are available yet for this course.")
+    if len(question_ids) < question_count:
+        raise ValidationFlowError("Not enough stored validation questions are available yet for this course.")
     return {
         "event_id": int(event.pk),
         "question_ids": question_ids,

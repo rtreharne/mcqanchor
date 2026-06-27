@@ -120,6 +120,16 @@ from standalone.services.preview import (
     serialize_preview_state,
     submit_preview_answer,
 )
+from standalone.services.question_builder import (
+    course_question_generation_budget,
+    practice_bank_count,
+    practice_validation_readiness,
+    practice_validation_unavailable_message,
+    question_bank_builder_status,
+    released_practice_bank_count,
+    run_course_question_bank_builder_pass,
+    validation_bank_count,
+)
 from standalone.services.projects import (
     ProjectAuthoringError,
     ProjectImmutableError,
@@ -628,6 +638,9 @@ def _course_detail_context(course: Course, *, request: HttpRequest | None = None
     config, _ = _ensure_course_config(course)
     demo_access = ensure_demo_access(course)
     can_edit_homepage_demo = bool(request and request.user.is_superuser)
+    builder_budget = course_question_generation_budget(course)
+    practice_validation_state = practice_validation_readiness(course)
+    builder_status = question_bank_builder_status(config)
     blocks = list(
         course.blocks.select_related("config")
         .annotate(
@@ -681,6 +694,24 @@ def _course_detail_context(course: Course, *, request: HttpRequest | None = None
         "course_student_count": course.enrollments.count(),
         "draft_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.DRAFT).count(),
         "approved_questions": course.question_bank_items.filter(status=QuestionBankItem.Status.APPROVED).count(),
+        "practice_bank_count": practice_bank_count(course),
+        "validation_bank_count": validation_bank_count(course),
+        "released_practice_ready_count": released_practice_bank_count(course, approved_only=True),
+        "practice_validation_ready": practice_validation_state.ready,
+        "practice_validation_ready_threshold": practice_validation_state.threshold,
+        "practice_validation_ready_detail": practice_validation_state.detail,
+        "question_bank_builder_status_label": builder_status["label"],
+        "question_bank_builder_status_class": builder_status["class_name"],
+        "question_bank_builder_daily_pair_count": builder_budget.daily_pairs,
+        "question_bank_builder_total_pair_count": builder_budget.total_pairs,
+        "question_bank_builder_daily_pair_cap": builder_budget.daily_cap,
+        "question_bank_builder_total_pair_cap": builder_budget.total_cap,
+        "question_bank_builder_daily_remaining": builder_budget.daily_remaining,
+        "question_bank_builder_total_remaining": builder_budget.total_remaining,
+        "question_bank_builder_last_run_at": config.question_bank_builder_last_run_at,
+        "question_bank_builder_last_generated_at": config.question_bank_builder_last_generated_at,
+        "question_bank_builder_last_error": config.question_bank_builder_last_error,
+        "question_bank_builder_enabled": config.question_bank_builder_enabled,
         "events": events,
         "recent_imports": course.imports.order_by("-created_at")[:3],
         "allowed_emails": course.allowed_emails.all(),
@@ -690,6 +721,8 @@ def _course_detail_context(course: Course, *, request: HttpRequest | None = None
         "demo_access": demo_access,
         "demo_access_context": _demo_access_context(request, demo_access) if request is not None else {},
         "can_edit_homepage_demo": can_edit_homepage_demo,
+        "question_bank_builder_start_url": reverse("standalone:start_course_question_bank_builder", args=[course.pk]),
+        "question_bank_builder_pause_url": reverse("standalone:pause_course_question_bank_builder", args=[course.pk]),
     }
 
 
@@ -978,6 +1011,44 @@ def _student_practice_validation_sidebar_cta(enrollment: Enrollment) -> dict | N
         "detail": "No validation sessions available right now",
         "disabled": True,
     }
+
+
+def _practice_validation_cta(course: Course, url: str) -> dict:
+    readiness = practice_validation_readiness(course)
+    if readiness.ready:
+        return {
+            "label": "Practice Validation",
+            "url": url,
+            "detail": f"Ready now • {readiness.ready_count:,} approved released practice questions available",
+            "disabled": False,
+        }
+    return {
+        "label": "Practice Validation",
+        "url": "",
+        "detail": readiness.detail,
+        "disabled": True,
+    }
+
+
+def _practice_validation_message_actions(course: Course, url: str) -> list[dict]:
+    cta = _practice_validation_cta(course, url)
+    if cta["disabled"]:
+        return []
+    return [{"label": "Start practice validation", "url": url, "style": "button"}]
+
+
+def _practice_validation_sidebar_action(course: Course, url: str, *, style: str) -> dict | None:
+    cta = _practice_validation_cta(course, url)
+    if cta["disabled"]:
+        return None
+    return {"label": "Start practice validation", "url": url, "style": style}
+
+
+def _practice_validation_message_text(course: Course, prefix: str) -> str:
+    readiness = practice_validation_readiness(course)
+    if readiness.ready:
+        return prefix
+    return f"{prefix} {readiness.detail}"
 
 
 def _preview_validation_booking_session_key(course_id: int) -> str:
@@ -1407,6 +1478,10 @@ def student_preview(request: HttpRequest, course_id: int) -> HttpResponse:
             "action_url_template": reverse("standalone:student_preview_action", args=[course.pk, 0, "ACTION"]),
             "is_student_practice": False,
             "practice_validation_url": _preview_practice_validation_url(course.pk, restart=True),
+            "practice_validation_cta": _practice_validation_cta(
+                course,
+                _preview_practice_validation_url(course.pk, restart=True),
+            ),
             "validation_entry_url": reverse("standalone:preview_student_validate", args=[course.pk]),
             "validation_sidebar_cta": _preview_practice_validation_sidebar_cta(request, course),
         },
@@ -1934,6 +2009,10 @@ def demo_practice(request: HttpRequest, token) -> HttpResponse:
             "action_url_template": reverse("standalone:demo_practice_action", args=[access.token, 0, "ACTION"]),
             "is_student_practice": True,
             "practice_validation_url": _demo_validation_practice_url(access, embed=embed_mode),
+            "practice_validation_cta": _practice_validation_cta(
+                access.course,
+                _demo_validation_practice_url(access, embed=embed_mode),
+            ),
             "validation_entry_url": "",
             "validation_sidebar_cta": None,
             "is_demo_mode": True,
@@ -1975,15 +2054,28 @@ def demo_validation_practice(request: HttpRequest, token) -> HttpResponse:
             )
         )
     validation_session = get_or_create_demo_validation_session(access, visitor_key)
-    session_state = _demo_validation_state_with_practice_return(
-        serialize_demo_validation_practice_state(
+    try:
+        session_state = _demo_validation_state_with_practice_return(
+            serialize_demo_validation_practice_state(
+                access,
+                validation_session,
+                restart=request.GET.get("restart") == "1",
+            ),
             access,
-            validation_session,
-            restart=request.GET.get("restart") == "1",
-        ),
-        access,
-        embed=embed_mode,
-    )
+            embed=embed_mode,
+        )
+    except ValidationFlowError:
+        session_state = _empty_validate_session_state(
+            access.course,
+            title="Practice validation",
+            eyebrow="Practice validation",
+            transcript=[
+                _validation_status_message(
+                    "demo-practice-validation-locked",
+                    practice_validation_unavailable_message(access.course),
+                )
+            ],
+        )
     sidebar_preview_state = serialize_demo_preview_state(access)
     response = render(
         request,
@@ -1994,6 +2086,10 @@ def demo_validation_practice(request: HttpRequest, token) -> HttpResponse:
             "sidebar_state": {},
             "sidebar_preview_state": sidebar_preview_state,
             "practice_validation_url": _demo_validation_practice_url(access, embed=embed_mode, visitor_key=visitor_key),
+            "practice_validation_cta": _practice_validation_cta(
+                access.course,
+                _demo_validation_practice_url(access, embed=embed_mode, visitor_key=visitor_key),
+            ),
             "validation_sidebar_cta": None,
             "practice_url": _demo_practice_url(access, embed=embed_mode),
             "session_action_url": (
@@ -2268,6 +2364,52 @@ def generate_course_bank(request: HttpRequest, course_id: int) -> HttpResponse:
 
 
 @login_required
+def start_course_question_bank_builder(request: HttpRequest, course_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    config, _ = _ensure_course_config(course)
+    config.question_bank_builder_enabled = True
+    config.question_bank_builder_auto_start = True
+    config.question_bank_builder_last_error = ""
+    config.save(
+        update_fields=[
+            "question_bank_builder_enabled",
+            "question_bank_builder_auto_start",
+            "question_bank_builder_last_error",
+            "updated_at",
+        ]
+    )
+    result = run_course_question_bank_builder_pass(course.pk)
+    if result.generated:
+        messages.success(request, "Question bank builder resumed and generated a new linked practice/validation pair.")
+    else:
+        messages.success(request, "Question bank builder resumed.")
+    return redirect("standalone:course_detail", course.pk)
+
+
+@login_required
+def pause_course_question_bank_builder(request: HttpRequest, course_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    course = _teacher_course_or_404(request.user, course_id)
+    config, _ = _ensure_course_config(course)
+    config.question_bank_builder_enabled = False
+    config.question_bank_builder_auto_start = False
+    config.question_bank_builder_lease_expires_at = None
+    config.save(
+        update_fields=[
+            "question_bank_builder_enabled",
+            "question_bank_builder_auto_start",
+            "question_bank_builder_lease_expires_at",
+            "updated_at",
+        ]
+    )
+    messages.success(request, "Question bank builder paused.")
+    return redirect("standalone:course_detail", course.pk)
+
+
+@login_required
 def approve_course_questions(request: HttpRequest, course_id: int) -> HttpResponse:
     if request.method != "POST" or not _is_teacher(request.user):
         raise Http404
@@ -2422,7 +2564,7 @@ def validation_practice_session(request: HttpRequest, course_id: int) -> HttpRes
             attempt = get_or_create_validation_practice_attempt(enrollment)
     except ValidationFlowError as error:
         messages.error(request, str(error))
-        return redirect("standalone:student_dashboard")
+        return redirect("standalone:student_validate", course_id)
     session_state = serialize_validation_practice_session(attempt, request=request)
     session_state["eyebrow"] = "Practice validation"
     sidebar_state = _student_validate_sidebar_state(
@@ -2567,6 +2709,10 @@ def _render_teacher_preview_validate(
             "sidebar_state": sidebar_state,
             "sidebar_preview_state": _teacher_validation_sidebar_preview_state(request, course),
             "practice_validation_url": _preview_practice_validation_url(course.pk, restart=True),
+            "practice_validation_cta": _practice_validation_cta(
+                course,
+                _preview_practice_validation_url(course.pk, restart=True),
+            ),
             "validation_sidebar_cta": _preview_practice_validation_sidebar_cta(request, course),
             "session_action_url": session_action_url,
             "validation_practice_pdf_url": validation_practice_pdf_url,
@@ -2623,17 +2769,19 @@ def preview_student_validate(request: HttpRequest, course_id: int) -> HttpRespon
         )
 
     if booked_event is not None and booked_event.starts_at > now:
+        practice_validation_url = _preview_practice_validation_url(course.pk, restart=True)
         session_state = _empty_validate_session_state(
             course,
             title="Validate",
             transcript=[
                 _validation_status_message(
                     "validate-booked-future",
-                    (
+                    _practice_validation_message_text(
+                        course,
                         f"Your validation is booked for {booked_event.starts_at:%d %b %Y, %H:%M}. "
-                        "You're currently out of session. Would you like to start a practice validation until it begins?"
+                        "You're currently out of session. Would you like to start a practice validation until it begins?",
                     ),
-                    actions=[{"label": "Start practice validation", "url": _preview_practice_validation_url(course.pk, restart=True), "style": "button"}],
+                    actions=_practice_validation_message_actions(course, practice_validation_url),
                 )
             ],
         )
@@ -2651,14 +2799,18 @@ def preview_student_validate(request: HttpRequest, course_id: int) -> HttpRespon
 
     booking_sessions = _serialize_preview_booking_sessions(course, now=now)
     if booking_sessions:
+        practice_validation_url = _preview_practice_validation_url(course.pk, restart=True)
         session_state = _empty_validate_session_state(
             course,
             title="Validate",
             transcript=[
                 _validation_status_message(
                     "validate-bookable",
-                    "No validation session is active right now. Would you like to start a practice validation while you wait?",
-                    actions=[{"label": "Start practice validation", "url": _preview_practice_validation_url(course.pk, restart=True), "style": "button"}],
+                    _practice_validation_message_text(
+                        course,
+                        "No validation session is active right now. Would you like to start a practice validation while you wait?",
+                    ),
+                    actions=_practice_validation_message_actions(course, practice_validation_url),
                 )
             ],
         )
@@ -2678,14 +2830,18 @@ def preview_student_validate(request: HttpRequest, course_id: int) -> HttpRespon
         )
         return _render_teacher_preview_validate(request, course, session_state, sidebar_state)
 
+    practice_validation_url = _preview_practice_validation_url(course.pk, restart=True)
     session_state = _empty_validate_session_state(
         course,
         title="Validate",
         transcript=[
             _validation_status_message(
                 "validate-out-of-session",
-                "There is no live validation session for this course right now. Would you like to start a practice validation?",
-                actions=[{"label": "Start practice validation", "url": _preview_practice_validation_url(course.pk, restart=True), "style": "button"}],
+                _practice_validation_message_text(
+                    course,
+                    "There is no live validation session for this course right now. Would you like to start a practice validation?",
+                ),
+                actions=_practice_validation_message_actions(course, practice_validation_url),
             )
         ],
     )
@@ -3013,6 +3169,10 @@ def _render_student_validate(request: HttpRequest, enrollment: Enrollment, sessi
             "sidebar_state": sidebar_state,
             "sidebar_preview_state": serialize_student_practice_state(enrollment),
             "practice_validation_url": _practice_validation_url(enrollment.course_id, restart=True),
+            "practice_validation_cta": _practice_validation_cta(
+                enrollment.course,
+                _practice_validation_url(enrollment.course_id, restart=True),
+            ),
             "validation_sidebar_cta": _student_practice_validation_sidebar_cta(enrollment),
             "practice_url": reverse("standalone:practice_quiz", args=[enrollment.course_id]),
             "session_action_url": (
@@ -3058,17 +3218,19 @@ def student_validate(request: HttpRequest, course_id: int) -> HttpResponse:
 
     if state["state"] == "booked_future":
         event = state["event"]
+        practice_validation_url = _practice_validation_url(course_id, restart=True)
         session_state = _empty_validate_session_state(
             enrollment.course,
             title="Validate",
             transcript=[
                 _validation_status_message(
                     "validate-booked-future",
-                    (
+                    _practice_validation_message_text(
+                        enrollment.course,
                         f"Your validation is booked for {event.starts_at:%d %b %Y, %H:%M}. "
-                        "You're currently out of session. Would you like to start a practice validation until it begins?"
+                        "You're currently out of session. Would you like to start a practice validation until it begins?",
                     ),
-                    actions=[{"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "button"}],
+                    actions=_practice_validation_message_actions(enrollment.course, practice_validation_url),
                 )
             ],
         )
@@ -3080,21 +3242,25 @@ def student_validate(request: HttpRequest, course_id: int) -> HttpResponse:
                 f"{event.starts_at:%d %b %Y, %H:%M} to {event.session_end_at:%d %b %Y, %H:%M}",
                 f"Location: {event.location}",
             ],
-            primary_action={"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "button"},
+            primary_action=_practice_validation_sidebar_action(enrollment.course, practice_validation_url, style="button"),
             secondary_action={"label": "Return to practice", "url": practice_url, "style": "secondary"},
         )
         return _render_student_validate(request, enrollment, session_state, sidebar_state)
 
     if state["state"] == "bookable":
         event = state["event"]
+        practice_validation_url = _practice_validation_url(course_id, restart=True)
         session_state = _empty_validate_session_state(
             enrollment.course,
             title="Validate",
             transcript=[
                 _validation_status_message(
                     "validate-bookable",
-                    "No validation session is active right now. Would you like to start a practice validation while you wait?",
-                    actions=[{"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "button"}],
+                    _practice_validation_message_text(
+                        enrollment.course,
+                        "No validation session is active right now. Would you like to start a practice validation while you wait?",
+                    ),
+                    actions=_practice_validation_message_actions(enrollment.course, practice_validation_url),
                 )
             ],
         )
@@ -3108,18 +3274,22 @@ def student_validate(request: HttpRequest, course_id: int) -> HttpResponse:
                 f"Bookings in last 24 hours {event.recent_booking_count(hours=24)}",
             ],
             primary_action={"label": "Book validation", "url": reverse("standalone:validation_book", args=[event.pk]), "style": "button"},
-            secondary_action={"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "secondary"},
+            secondary_action=_practice_validation_sidebar_action(enrollment.course, practice_validation_url, style="secondary"),
         )
         return _render_student_validate(request, enrollment, session_state, sidebar_state)
 
+    practice_validation_url = _practice_validation_url(course_id, restart=True)
     session_state = _empty_validate_session_state(
         enrollment.course,
         title="Validate",
         transcript=[
             _validation_status_message(
                 "validate-out-of-session",
-                "There is no live validation session for this course right now. Would you like to start a practice validation?",
-                actions=[{"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "button"}],
+                _practice_validation_message_text(
+                    enrollment.course,
+                    "There is no live validation session for this course right now. Would you like to start a practice validation?",
+                ),
+                actions=_practice_validation_message_actions(enrollment.course, practice_validation_url),
             )
         ],
     )
@@ -3127,7 +3297,7 @@ def student_validate(request: HttpRequest, course_id: int) -> HttpResponse:
         enrollment=enrollment,
         title="Validation unavailable",
         copy="There is no bookable or live validation session for this course right now.",
-        primary_action={"label": "Start practice validation", "url": _practice_validation_url(course_id, restart=True), "style": "button"},
+        primary_action=_practice_validation_sidebar_action(enrollment.course, practice_validation_url, style="button"),
         secondary_action={"label": "Return to practice", "url": practice_url, "style": "secondary"},
     )
     return _render_student_validate(request, enrollment, session_state, sidebar_state)
@@ -3461,6 +3631,10 @@ def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
             "is_student_practice": True,
             "mode": mode,
             "practice_validation_url": _practice_validation_url(enrollment.course_id, restart=True),
+            "practice_validation_cta": _practice_validation_cta(
+                enrollment.course,
+                _practice_validation_url(enrollment.course_id, restart=True),
+            ),
             "validation_entry_url": reverse("standalone:student_validate", args=[enrollment.course_id]),
             "validation_sidebar_cta": _student_practice_validation_sidebar_cta(enrollment),
         },

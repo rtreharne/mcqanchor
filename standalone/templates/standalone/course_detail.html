@@ -26,7 +26,6 @@
         <p class="lead">{{ course.summary|default:"No summary yet." }}</p>
         <div class="course-hero-meta" aria-label="Course summary">
           <span>{{ blocks|length }} blocks</span>
-          <span>{{ approved_questions }} approved questions</span>
           <span>{{ course_student_count }} students</span>
         </div>
       </div>
@@ -38,6 +37,39 @@
             <span class="practice-average-metric"><span>Mastery</span><strong>{{ course.practice_mastery_average|floatformat:1 }}%</strong></span>
             <span class="practice-average-metric"><span>Coverage</span><strong>{{ course.practice_coverage_average|floatformat:1 }}%</strong></span>
             <span class="practice-average-metric{% if not course.config.engagement_half_life_days %} is-fixed-engagement{% endif %}"><span>Engagement</span><strong>{{ course.practice_engagement_average|floatformat:1 }}%</strong></span>
+          </div>
+        </div>
+        <div class="practice-average-panel course-practice-average-panel" aria-label="Course question bank builder">
+          <p class="practice-average-label">Question bank builder</p>
+          <div class="block-chip-row">
+            <span class="block-chip status-chip {{ question_bank_builder_status_class }}">{{ question_bank_builder_status_label }}</span>
+            <span class="block-chip">{{ practice_bank_count }} practice</span>
+            <span class="block-chip">{{ validation_bank_count }} validation</span>
+          </div>
+          <p class="course-setting-help">Practice validation readiness: {{ released_practice_ready_count }} / {{ practice_validation_ready_threshold }} approved released practice questions.</p>
+          <p class="course-setting-help">Daily pairs: {{ question_bank_builder_daily_pair_count }} / {{ question_bank_builder_daily_pair_cap }}. Total pairs: {{ question_bank_builder_total_pair_count }} / {{ question_bank_builder_total_pair_cap }}.</p>
+          {% if question_bank_builder_last_generated_at %}
+            <p class="course-setting-help">Last generated: {{ question_bank_builder_last_generated_at|date:"d M Y, H:i" }}</p>
+          {% elif question_bank_builder_last_run_at %}
+            <p class="course-setting-help">Last checked: {{ question_bank_builder_last_run_at|date:"d M Y, H:i" }}</p>
+          {% endif %}
+          {% if question_bank_builder_last_error %}
+            <p class="course-setting-help">{{ question_bank_builder_last_error }}</p>
+          {% else %}
+            <p class="course-setting-help">{{ practice_validation_ready_detail }}</p>
+          {% endif %}
+          <div class="workspace-actions">
+            {% if question_bank_builder_enabled %}
+              <form method="post" action="{{ question_bank_builder_pause_url }}" class="inline-form">
+                {% csrf_token %}
+                <button class="button secondary" type="submit">Pause</button>
+              </form>
+            {% else %}
+              <form method="post" action="{{ question_bank_builder_start_url }}" class="inline-form">
+                {% csrf_token %}
+                <button class="button" type="submit">Run / Resume</button>
+              </form>
+            {% endif %}
           </div>
         </div>
         <div class="workspace-actions course-primary-actions">

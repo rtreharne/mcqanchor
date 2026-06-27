@@ -4,6 +4,7 @@ import re
 from collections import defaultdict
 
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Count, Q
 from django.utils import timezone
 from openai import OpenAI, OpenAIError
@@ -19,6 +20,10 @@ from standalone.services.numeric_questions import (
 
 
 class QuestionGenerationError(ValueError):
+    pass
+
+
+class QuestionGenerationUnavailableError(QuestionGenerationError):
     pass
 
 
@@ -1921,11 +1926,16 @@ def _parse_question_payload(raw_output: str) -> dict:
     raise ValueError("OpenAI did not return parseable JSON for question generation.")
 
 
-def _released_objectives_by_block(course: Course, today=None) -> dict[int, list[LearningObjective]]:
+def _released_objectives_by_block(
+    course: Course,
+    today=None,
+    *,
+    include_future_blocks: bool = False,
+) -> dict[int, list[LearningObjective]]:
     today = today or timezone.localdate()
     objectives_by_block: dict[int, list[LearningObjective]] = defaultdict(list)
     objective_queryset = LearningObjective.objects.filter(course=course)
-    if not bool(getattr(course.config, "allow_pre_engagement", False)):
+    if not include_future_blocks and not bool(getattr(course.config, "allow_pre_engagement", False)):
         objective_queryset = objective_queryset.filter(block__available_from__lte=today)
 
     for objective in objective_queryset.select_related("block").order_by("block__order", "position", "pk"):
@@ -1934,10 +1944,10 @@ def _released_objectives_by_block(course: Course, today=None) -> dict[int, list[
     return objectives_by_block
 
 
-def _ordered_released_chunks(course: Course, today=None):
+def _ordered_released_chunks(course: Course, today=None, *, include_future_blocks: bool = False):
     today = today or timezone.localdate()
     chunk_queryset = ContentChunk.objects.filter(course=course, asset__include_in_generation=True)
-    if not bool(getattr(course.config, "allow_pre_engagement", False)):
+    if not include_future_blocks and not bool(getattr(course.config, "allow_pre_engagement", False)):
         chunk_queryset = chunk_queryset.filter(block__available_from__lte=today)
     return list(
         chunk_queryset.select_related("block", "asset").order_by("block__order", "asset__created_at", "ordinal", "pk")
@@ -2121,6 +2131,20 @@ def _recent_question_avoidance_notes(
                 note += f' and formula focus "{formula_focus[:120]}"'
         notes.append(note)
     return notes
+
+
+def _resolve_unique_question_identity(stem: str, question_type: str, existing_hashes: set[str]) -> tuple[str, str]:
+    item_hash = hashlib.sha256(stem.lower().encode("utf-8")).hexdigest()
+    if item_hash not in existing_hashes:
+        return stem, item_hash
+    if question_type == QuestionBankItem.QuestionType.NUM:
+        raise NumericQuestionValidationError("OpenAI generated a repeated numerical MCQ that already exists for this course.")
+    for variant_number in range(2, 6):
+        candidate_stem = f"{stem.rstrip('?')} (variant {variant_number})?"
+        candidate_hash = hashlib.sha256(candidate_stem.lower().encode("utf-8")).hexdigest()
+        if candidate_hash not in existing_hashes:
+            return candidate_stem, candidate_hash
+    return "", ""
 
 
 def _preferred_generated_question_type(block: CourseBlock) -> str:
@@ -2369,7 +2393,10 @@ def _create_question_pair(
     payload: dict,
     existing_hashes: set[str],
     expected_coding_language: str = "",
+    relax_similarity_checks: bool = False,
 ):
+    from standalone.services.question_builder import course_question_generation_budget
+
     normalized_payload = _normalize_generated_payload(
         payload,
         question_type,
@@ -2400,57 +2427,99 @@ def _create_question_pair(
     ):
         return None, None
 
-    item_hash = hashlib.sha256(stem.lower().encode("utf-8")).hexdigest()
-    if item_hash in existing_hashes:
-        if normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM:
-            raise NumericQuestionValidationError("OpenAI generated a repeated numerical MCQ that already exists for this course.")
-        for variant_number in range(2, 6):
-            candidate_stem = f"{stem.rstrip('?')} (variant {variant_number})?"
-            candidate_hash = hashlib.sha256(candidate_stem.lower().encode("utf-8")).hexdigest()
-            if candidate_hash not in existing_hashes:
-                stem = candidate_stem
-                item_hash = candidate_hash
-                break
-        else:
-            return None, None
+    stem, item_hash = _resolve_unique_question_identity(
+        stem,
+        normalized_payload["question_type"],
+        existing_hashes,
+    )
+    if not stem or not item_hash:
+        return None, None
 
-    if normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM and _numeric_question_repeats_recent_angle(
+    if (
+        normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM
+        and not relax_similarity_checks
+        and _numeric_question_repeats_recent_angle(
         block=block,
         objective=objective,
         stem=stem,
         correct_answer=normalized_payload["correct_answers"][0],
         numeric_metadata=normalized_payload["numeric_metadata"],
+        )
     ):
         raise NumericQuestionValidationError("OpenAI generated a repeated numerical MCQ angle too similar to recent questions in this block.")
 
-    practice = QuestionBankItem.objects.create(
-        course=course,
-        block=block,
-        learning_objective=objective,
-        source_chunk=chunk,
-        bank_type=QuestionBankItem.BankType.PRACTICE,
-        status=QuestionBankItem.Status.APPROVED,
-        stem=stem,
-        question_type=normalized_payload["question_type"],
-        correct_answer=normalized_payload["correct_answers"][0],
-        additional_correct_answers=normalized_payload["correct_answers"][1:],
-        written_answer_keywords=normalized_payload["written_answer_keywords"],
-        further_study_questions=normalized_payload["further_study_questions"],
-        distractors=normalized_payload["distractors"],
-        explanation=(
-            normalized_payload["explanation"]
-            if normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM
-            else normalize_explanation_text(normalized_payload["explanation"])
-        ),
-        difficulty=normalized_payload["difficulty"],
-        question_hash=item_hash,
-        is_numerical=normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM,
-        numeric_metadata=normalized_payload["numeric_metadata"],
-        is_coding_question=normalized_payload["is_coding_question"],
-        coding_language=normalized_payload["coding_language"],
-        coding_question_kind=normalized_payload["coding_question_kind"],
-        code_snippet=normalized_payload["code_snippet"],
-    )
+    with transaction.atomic():
+        course_config = course.config.__class__.objects.select_for_update().get(pk=course.config.pk)
+        course.config = course_config
+        budget = course_question_generation_budget(course)
+        if not budget.can_generate:
+            raise QuestionGenerationUnavailableError(budget.message)
+
+        current_hashes = set(course.question_bank_items.values_list("question_hash", flat=True))
+        stem, item_hash = _resolve_unique_question_identity(
+            stem,
+            normalized_payload["question_type"],
+            current_hashes,
+        )
+        if not stem or not item_hash:
+            return None, None
+
+        practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem=stem,
+            question_type=normalized_payload["question_type"],
+            correct_answer=normalized_payload["correct_answers"][0],
+            additional_correct_answers=normalized_payload["correct_answers"][1:],
+            written_answer_keywords=normalized_payload["written_answer_keywords"],
+            further_study_questions=normalized_payload["further_study_questions"],
+            distractors=normalized_payload["distractors"],
+            explanation=(
+                normalized_payload["explanation"]
+                if normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM
+                else normalize_explanation_text(normalized_payload["explanation"])
+            ),
+            difficulty=normalized_payload["difficulty"],
+            question_hash=item_hash,
+            is_numerical=normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM,
+            numeric_metadata=normalized_payload["numeric_metadata"],
+            is_coding_question=normalized_payload["is_coding_question"],
+            coding_language=normalized_payload["coding_language"],
+            coding_question_kind=normalized_payload["coding_question_kind"],
+            code_snippet=normalized_payload["code_snippet"],
+        )
+        validation = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem=stem,
+            question_type=practice.question_type,
+            correct_answer=practice.correct_answer,
+            additional_correct_answers=practice.additional_correct_answers,
+            written_answer_keywords=practice.written_answer_keywords,
+            further_study_questions=practice.further_study_questions,
+            distractors=practice.distractors,
+            explanation=practice.explanation,
+            difficulty=practice.difficulty,
+            question_hash=hashlib.sha256(f"{item_hash}:validation".encode("utf-8")).hexdigest(),
+            is_numerical=practice.is_numerical,
+            numeric_metadata=practice.numeric_metadata,
+            is_coding_question=practice.is_coding_question,
+            coding_language=practice.coding_language,
+            coding_question_kind=practice.coding_question_kind,
+            code_snippet=practice.code_snippet,
+            linked_question=practice,
+        )
+        practice.linked_question = validation
+        practice.save(update_fields=["linked_question", "updated_at"])
+
     _trace_generation(
         "question_persisted",
         requested_type=QuestionBankItem.display_label_for_question_type(question_type),
@@ -2464,33 +2533,6 @@ def _create_question_pair(
         distractors=practice.distractors,
         is_coding_question=practice.is_coding_question,
     )
-    validation = QuestionBankItem.objects.create(
-        course=course,
-        block=block,
-        learning_objective=objective,
-        source_chunk=chunk,
-        bank_type=QuestionBankItem.BankType.VALIDATION,
-        status=QuestionBankItem.Status.APPROVED,
-        stem=stem,
-        question_type=practice.question_type,
-        correct_answer=practice.correct_answer,
-        additional_correct_answers=practice.additional_correct_answers,
-        written_answer_keywords=practice.written_answer_keywords,
-        further_study_questions=practice.further_study_questions,
-        distractors=practice.distractors,
-        explanation=practice.explanation,
-        difficulty=practice.difficulty,
-        question_hash=hashlib.sha256(f"{item_hash}:validation".encode("utf-8")).hexdigest(),
-        is_numerical=practice.is_numerical,
-        numeric_metadata=practice.numeric_metadata,
-        is_coding_question=practice.is_coding_question,
-        coding_language=practice.coding_language,
-        coding_question_kind=practice.coding_question_kind,
-        code_snippet=practice.code_snippet,
-        linked_question=practice,
-    )
-    practice.linked_question = validation
-    practice.save(update_fields=["linked_question", "updated_at"])
     existing_hashes.add(item_hash)
     return practice, validation
 
@@ -2503,10 +2545,12 @@ def generate_question_pair_for_block(
     strict_preferred_objectives: bool = False,
     question_type: str | None = None,
     raise_generation_errors: bool = False,
+    include_future_blocks: bool = False,
+    relax_similarity_checks: bool = False,
 ):
     course = block.course
     existing_hashes = existing_hashes or set(course.question_bank_items.values_list("question_hash", flat=True))
-    objectives_by_block = _released_objectives_by_block(course)
+    objectives_by_block = _released_objectives_by_block(course, include_future_blocks=include_future_blocks)
     objective_keywords = {
         objective.pk: _keyword_set(objective.text)
         for objectives in objectives_by_block.values()
@@ -2581,7 +2625,11 @@ def generate_question_pair_for_block(
     generation_attempts = 0
 
     for objective in ordered_objectives:
-        avoid_question_angles = _recent_question_avoidance_notes(block, question_type, objective=objective)
+        avoid_question_angles = (
+            []
+            if relax_similarity_checks
+            else _recent_question_avoidance_notes(block, question_type, objective=objective)
+        )
         ranked_chunks = _rank_candidate_chunks_for_objective(
             candidate_chunks,
             objective,
@@ -2648,7 +2696,10 @@ def generate_question_pair_for_block(
                     payload=payload,
                     existing_hashes=existing_hashes,
                     expected_coding_language=expected_coding_language,
+                    relax_similarity_checks=relax_similarity_checks,
                 )
+            except QuestionGenerationUnavailableError:
+                raise
             except (ValueError, OpenAIError) as exc:
                 last_generation_error = str(exc)
                 _trace_generation_rejection(block, question_type, last_generation_error, chunk=chunk, objective=objective)
@@ -2726,7 +2777,10 @@ def generate_question_pair_for_block(
                 payload=payload,
                 existing_hashes=existing_hashes,
                 expected_coding_language=expected_coding_language,
+                relax_similarity_checks=relax_similarity_checks,
             )
+        except QuestionGenerationUnavailableError:
+            raise
         except (ValueError, OpenAIError) as exc:
             last_generation_error = str(exc)
             _trace_generation_rejection(block, question_type, last_generation_error, chunk=chunk, objective=objective)
@@ -2793,16 +2847,19 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
             question_type,
             coding_signal=(coding_signal if coding_signal["language"] and coding_signal["snippet"] else None),
         )
-        practice, validation = _create_question_pair(
-            course=course,
-            block=chunk.block,
-            chunk=chunk,
-            objective=objective,
-            question_type=effective_question_type,
-            payload=payload,
-            existing_hashes=existing_hashes,
-            expected_coding_language=expected_coding_language,
-        )
+        try:
+            practice, validation = _create_question_pair(
+                course=course,
+                block=chunk.block,
+                chunk=chunk,
+                objective=objective,
+                question_type=effective_question_type,
+                payload=payload,
+                existing_hashes=existing_hashes,
+                expected_coding_language=expected_coding_language,
+            )
+        except QuestionGenerationUnavailableError:
+            break
         if practice is not None and validation is not None:
             question_count += 2
 

@@ -129,6 +129,14 @@ class CourseConfig(TimeStampedModel):
     advanced_question_start_percent = models.PositiveSmallIntegerField(default=50, validators=[MinValueValidator(0), MaxValueValidator(100)])
     revalidation_attempts = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(10)])
     show_validation_feedback_immediately = models.BooleanField(default=False)
+    question_bank_builder_enabled = models.BooleanField(default=True)
+    question_bank_builder_auto_start = models.BooleanField(default=True)
+    question_bank_builder_last_run_at = models.DateTimeField(null=True, blank=True)
+    question_bank_builder_last_generated_at = models.DateTimeField(null=True, blank=True)
+    question_bank_builder_last_error = models.TextField(blank=True)
+    question_bank_builder_daily_pair_cap = models.PositiveIntegerField(default=1000)
+    question_bank_builder_total_pair_cap = models.PositiveIntegerField(default=10000)
+    question_bank_builder_lease_expires_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self) -> str:
         return f"Config for {self.course}"

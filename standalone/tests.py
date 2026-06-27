@@ -54,6 +54,11 @@ from standalone.tasks import run_block_creation_processing, run_block_regenerati
 from standalone.services.content import chunk_text, summarize_block_content
 from standalone.services.pdf_import import analyze_pdf_chapters, _select_outline_items, _toc_boundaries_from_ocr
 from standalone.services.preview import PREVIEW_SESSION_KEY
+from standalone.services.question_builder import (
+    course_question_generation_budget,
+    practice_validation_readiness,
+    run_course_question_bank_builder_pass,
+)
 from standalone.services.numeric_questions import (
     NumericQuestionValidationError,
     _evaluate_expression,
@@ -84,7 +89,12 @@ from standalone.services.questions import (
 User = get_user_model()
 
 
-@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+@override_settings(
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    PRACTICE_VALIDATION_READY_THRESHOLD=1,
+    VALIDATION_PRACTICE_DEFAULT_QUESTION_COUNT=1,
+    PREVIEW_VALIDATION_DEFAULT_QUESTION_COUNT=1,
+)
 class StandaloneFlowTests(TestCase):
     def setUp(self):
         self.internal = User.objects.create_user(
@@ -2830,6 +2840,64 @@ class StandaloneFlowTests(TestCase):
         self.assertTrue(course.question_bank_items.filter(block=released_block).exists())
         self.assertFalse(course.question_bank_items.filter(block=future_block).exists())
 
+    @override_settings(OPENAI_API_KEY="")
+    def test_question_bank_builder_pass_can_generate_for_future_blocks(self):
+        course = self.create_course()
+        future_block = CourseBlock.objects.create(
+            course=course,
+            title="Future block",
+            order=1,
+            available_from=timezone.localdate() + timedelta(days=7),
+        )
+        asset = ContentAsset.objects.create(
+            block=future_block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile("future.txt", b"Future content.", content_type="text/plain"),
+            original_filename="future.txt",
+            extension=".txt",
+            include_in_generation=True,
+            processing_status=ContentAsset.ProcessingStatus.PROCESSED,
+            extracted_text="Future content that should be banked ahead of release.",
+        )
+        objective = LearningObjective.objects.create(
+            course=course,
+            block=future_block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Explain the future content",
+        )
+        ContentChunk.objects.create(
+            asset=asset,
+            course=course,
+            block=future_block,
+            ordinal=1,
+            text="Future content that should be banked ahead of release.",
+            token_count=9,
+            checksum="future-builder-chunk",
+        )
+
+        result = run_course_question_bank_builder_pass(course.pk)
+
+        self.assertTrue(result.generated)
+        practice = course.question_bank_items.get(bank_type=QuestionBankItem.BankType.PRACTICE)
+        validation = course.question_bank_items.get(bank_type=QuestionBankItem.BankType.VALIDATION)
+        self.assertEqual(practice.block_id, future_block.pk)
+        self.assertEqual(practice.learning_objective_id, objective.pk)
+        self.assertEqual(validation.block_id, future_block.pk)
+        self.assertEqual(validation.linked_question_id, practice.pk)
+
+    def test_question_bank_builder_pause_view_disables_builder(self):
+        course = self.create_course()
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:pause_course_question_bank_builder", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        course.config.refresh_from_db()
+        self.assertFalse(course.config.question_bank_builder_enabled)
+        self.assertFalse(course.config.question_bank_builder_auto_start)
+
     def test_question_bank_generation_uses_multiple_objectives_across_chunks(self):
         course = self.create_course()
         block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
@@ -4935,9 +5003,38 @@ print(result)""",
         self.client.force_login(self.student)
         response = self.client.get(f"{reverse('standalone:practice_quiz', args=[course.pk])}?mode=validation_practice", follow=True)
 
-        self.assertRedirects(response, reverse("standalone:student_dashboard"))
-        self.assertContains(response, "No validation questions are available yet for this course.")
+        self.assertRedirects(response, reverse("standalone:student_validate", args=[course.pk]))
+        self.assertContains(response, "Practice validation unlocks at 1 approved released practice questions.")
         self.assertEqual(PracticeAttempt.objects.count(), 0)
+
+    @override_settings(PRACTICE_VALIDATION_READY_THRESHOLD=1000)
+    def test_validation_practice_requires_minimum_released_question_bank(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Released practice question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="released-practice-threshold",
+        )
+
+        self.client.force_login(self.student)
+        practice_response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
+        start_response = self.client.get(f"{reverse('standalone:practice_quiz', args=[course.pk])}?mode=validation_practice", follow=True)
+
+        readiness = practice_validation_readiness(course)
+        self.assertFalse(readiness.ready)
+        self.assertContains(practice_response, "Practice validation unlocks at 1,000 approved released practice questions.")
+        self.assertContains(practice_response, "Currently ready: 1.")
+        self.assertRedirects(start_response, reverse("standalone:student_validate", args=[course.pk]))
+        self.assertContains(start_response, "Practice validation unlocks at 1,000 approved released practice questions.")
 
     def test_student_preview_page_renders_launches_full_screen_chat_shell(self):
         course = self.create_course()
@@ -5361,6 +5458,23 @@ print(result)""",
         self.assertEqual(practice_items[0].linked_question_id, validation_items[0].pk)
         self.assertEqual(validation_items[0].stem, practice_items[0].stem)
         self.assertNotIn("validation variant", validation_items[0].stem.lower())
+
+    def test_student_preview_quiz_respects_shared_question_bank_caps(self):
+        course = self.create_course()
+        course.config.question_bank_builder_total_pair_cap = 0
+        course.config.save(update_fields=["question_bank_builder_total_pair_cap", "updated_at"])
+        block, _, _, _ = self.create_preview_content_block(course)
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(course.question_bank_items.exists())
+        budget = course_question_generation_budget(course)
+        self.assertFalse(budget.can_generate)
+        block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        transcript_text = " ".join(message.get("text", "") for message in block_payload["transcript"])
+        self.assertIn("total stored-pair cap", transcript_text)
 
     def test_student_preview_forced_question_type_prefers_matching_bank_item(self):
         course = self.create_course()
@@ -7664,8 +7778,7 @@ print(result)""",
         )
 
         self.client.force_login(self.student)
-        with patch("standalone.services.validation_flow.generate_question_pair_for_block", return_value=(None, None)):
-            response = self.client.get(reverse("standalone:validation_practice_session", args=[course.pk]))
+        response = self.client.get(reverse("standalone:validation_practice_session", args=[course.pk]))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Practice validation")
@@ -8723,18 +8836,16 @@ print(result)""",
             content_type="application/json",
         )
 
-        with patch("standalone.services.preview_validation.generate_question_pair_for_block", return_value=(None, None)):
-            page = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
+        page = self.client.get(f"{reverse('standalone:preview_validation_practice', args=[course.pk])}?restart=1")
         session_state = page.context["session_state"]
         served_question_id = session_state["pending_question"]["question_id"]
         self.assertEqual(served_question_id, question.pk)
 
-        with patch("standalone.services.preview_validation.generate_question_pair_for_block", return_value=(None, None)):
-            submit_response = self.client.post(
-                reverse("standalone:preview_validation_practice_action", args=[course.pk, "submit"]),
-                data=json.dumps({"question_id": served_question_id, "answer": "A"}),
-                content_type="application/json",
-            )
+        submit_response = self.client.post(
+            reverse("standalone:preview_validation_practice_action", args=[course.pk, "submit"]),
+            data=json.dumps({"question_id": served_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
 
         self.assertEqual(submit_response.status_code, 200)
         session = submit_response.json()["session"]

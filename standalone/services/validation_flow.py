@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -38,17 +39,16 @@ from standalone.services.preview import (
     normalize_explanation_text,
 )
 from standalone.services.practice_scoring import base_practice_weights, weighted_practice_score
+from standalone.services.question_builder import practice_validation_readiness, practice_validation_unavailable_message
 from standalone.services.questions import (
     block_has_coding_signal,
     coding_question_matches_expected_language,
     coding_question_quality_sort_key,
-    generate_question_pair_for_block,
     preferred_coding_language_for_block,
     question_quality_sort_key,
 )
 
 
-VALIDATION_PRACTICE_DEFAULT_QUESTION_COUNT = 10
 VALIDATION_PRACTICE_DEFAULT_TIME_LIMIT_MINUTES = 20
 VALIDATION_DRAFT_SESSION_KEY = "standalone_validation_drafts"
 VALIDATION_UI_SESSION_KEY = "standalone_validation_ui"
@@ -688,24 +688,14 @@ def _pick_locked_questions(
 ):
     available = _scored_validation_questions(course, enrollment, include_written=include_written, blocks=blocks)
     released_blocks = list(blocks or _released_validation_blocks(course))
-
-    def generator(block, objective_id, question_type, *, preferred_objective_ids=None, strict_preferred_objectives=False):
-        _practice, validation = generate_question_pair_for_block(
-            block,
-            question_type=question_type,
-            preferred_objective_ids=preferred_objective_ids,
-            strict_preferred_objectives=strict_preferred_objectives,
-        )
-        return validation
-
-    return select_stratified_validation_questions(
+    selected = select_stratified_validation_questions(
         course,
         available,
         question_count,
         seed_key=seed_key,
         blocks=released_blocks,
-        generate_question=generator,
     )
+    return selected if len(selected) >= question_count else []
 
 
 def _pick_practice_validation_questions(
@@ -719,24 +709,14 @@ def _pick_practice_validation_questions(
 ):
     available = _scored_practice_validation_questions(course, enrollment, include_written=include_written, blocks=blocks)
     released_blocks = list(blocks or _released_validation_blocks(course))
-
-    def generator(block, objective_id, question_type, *, preferred_objective_ids=None, strict_preferred_objectives=False):
-        practice, _validation = generate_question_pair_for_block(
-            block,
-            question_type=question_type,
-            preferred_objective_ids=preferred_objective_ids,
-            strict_preferred_objectives=strict_preferred_objectives,
-        )
-        return practice
-
-    return select_stratified_validation_questions(
+    selected = select_stratified_validation_questions(
         course,
         available,
         question_count,
         seed_key=seed_key,
         blocks=released_blocks,
-        generate_question=generator,
     )
+    return selected if len(selected) >= question_count else []
 
 
 def _practice_validation_type_targets(block: CourseBlock) -> dict[str, float]:
@@ -1283,7 +1263,7 @@ def get_or_create_official_attempt(enrollment: Enrollment, event: ValidationEven
         blocks=released_blocks,
     )
     if not locked_questions:
-        raise ValidationFlowError("No validation questions are available yet for this course.")
+        raise ValidationFlowError("Not enough stored validation questions are available yet for this course.")
     for order, question in enumerate(locked_questions, start=1):
         ValidationAttemptQuestion.objects.create(
             attempt=attempt,
@@ -1297,6 +1277,10 @@ def get_or_create_official_attempt(enrollment: Enrollment, event: ValidationEven
 
 def _practice_attempt_seed(attempt: PracticeAttempt) -> str:
     return f"practice-validation:{attempt.pk}:course:{attempt.enrollment.course_id}"
+
+
+def _validation_practice_default_question_count() -> int:
+    return max(1, int(getattr(settings, "VALIDATION_PRACTICE_DEFAULT_QUESTION_COUNT", 10) or 10))
 
 
 @transaction.atomic
@@ -1313,7 +1297,11 @@ def get_or_create_validation_practice_attempt(enrollment: Enrollment) -> Practic
     if existing and existing.attempt_questions.exists():
         return existing
 
-    question_count = VALIDATION_PRACTICE_DEFAULT_QUESTION_COUNT
+    readiness = practice_validation_readiness(enrollment.course)
+    if not readiness.ready:
+        raise ValidationFlowError(readiness.detail)
+
+    question_count = _validation_practice_default_question_count()
     upcoming_digital_event = (
         enrollment.course.validation_events.filter(mode=ValidationEvent.Mode.DIGITAL_INVIGILATION)
         .order_by("starts_at")
@@ -1338,7 +1326,7 @@ def get_or_create_validation_practice_attempt(enrollment: Enrollment) -> Practic
     )
     if not locked_questions:
         attempt.delete()
-        raise ValidationFlowError("No validation questions are available yet for this course.")
+        raise ValidationFlowError(practice_validation_unavailable_message(enrollment.course))
     for order, question in enumerate(locked_questions, start=1):
         PracticeAttemptQuestion.objects.create(
             attempt=attempt,

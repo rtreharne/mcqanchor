@@ -69,7 +69,14 @@
         </div>
       {% endif %}
       <div class="preview-sidebar-validate-cta">
-        <a class="button secondary" href="{{ practice_validation_url }}">Practice Validation</a>
+        {% if practice_validation_cta.disabled %}
+          <button class="button secondary" type="button" disabled aria-disabled="true">{{ practice_validation_cta.label }}</button>
+        {% else %}
+          <a class="button secondary" href="{{ practice_validation_cta.url }}">{{ practice_validation_cta.label }}</a>
+        {% endif %}
+        {% if practice_validation_cta.detail %}
+          <p class="preview-sidebar-validate-copy">{{ practice_validation_cta.detail }}</p>
+        {% endif %}
         {% if validation_sidebar_cta %}
           {% if validation_sidebar_cta.disabled %}
             <button class="button" type="button" disabled aria-disabled="true">{{ validation_sidebar_cta.label }}</button>

@@ -14,6 +14,10 @@ python manage.py migrate --noinput
 python manage.py ensure_admin_user
 python manage.py collectstatic --noinput
 
+if [[ "${QUESTION_BANK_BUILDER_LOOP_ENABLED:-false}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]]; then
+  python manage.py run_question_bank_builder &
+fi
+
 exec gunicorn config.wsgi:application \
   --bind "0.0.0.0:${PORT}" \
   --workers "${WEB_CONCURRENCY:-2}" \

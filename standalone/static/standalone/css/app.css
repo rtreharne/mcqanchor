@@ -1712,6 +1712,12 @@ button.button[disabled] {
   color: #0d7154;
 }
 
+.status-chip.is-paused {
+  border-color: rgba(88, 103, 121, 0.18);
+  background: rgba(244, 247, 251, 0.96);
+  color: #4a5d73;
+}
+
 .status-chip.is-uploaded,
 .status-chip.is-analyzing,
 .status-chip.is-creating,
