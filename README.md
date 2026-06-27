@@ -72,6 +72,10 @@ STANDALONE_ENABLE_SELF_ENROL=True
 STANDALONE_INVITE_EXPIRY_HOURS=72
 STANDALONE_MAGIC_LINK_EXPIRY_HOURS=72
 LOCAL_BACKGROUND_JOB_PAUSE_SECONDS=1.0
+LOCAL_BACKGROUND_JOB_STRATEGY=thread
+FILE_UPLOAD_TEMP_DIR=/tmp/mcqanchor-uploads
+FILE_UPLOAD_MAX_MEMORY_SIZE=262144
+PDF_IMPORT_MAX_FILE_SIZE_BYTES=209715200
 ```
 
 6. Run migrations:
@@ -90,7 +94,7 @@ Uploaded files default to the local `media/` directory. Set `MEDIA_ROOT` only if
 python manage.py runserver
 ```
 
-For low-CPU local or single-container deployments, heavy background jobs are paced through a single in-process queue when Celery is not configured. Increase `LOCAL_BACKGROUND_JOB_PAUSE_SECONDS` if PDF import or block creation still makes the app feel too busy.
+For low-CPU local or single-container deployments, heavy background jobs are paced through a single in-process queue when Celery is not configured. Increase `LOCAL_BACKGROUND_JOB_PAUSE_SECONDS` if PDF import or block creation still makes the app feel too busy. If a platform still struggles because the web process and background thread share the same tiny container, switch `LOCAL_BACKGROUND_JOB_STRATEGY=subprocess` so uploads dispatch detached management-command workers instead of running inside Gunicorn.
 
 8. If you want background processing for content ingestion and learning-objective generation, start a Celery worker and set a broker URL such as Redis in `.env`:
 
@@ -158,6 +162,7 @@ OPENAI_API_KEY
 - Uploaded and imported files are stored at `/app/data/media`.
 - Gunicorn binds to Render's `PORT` environment variable.
 - The default Render blueprint pins `WEB_CONCURRENCY=1` to reduce SQLite lock contention in low-traffic demo environments.
+- The default Render blueprint also sets `LOCAL_BACKGROUND_JOB_STRATEGY=subprocess` and stores upload temp files under `/app/data/tmp/uploads` so large PDF imports do not lean on the default temp space or the Gunicorn worker thread.
 
 ### Admin login on Render
 

@@ -107,6 +107,11 @@ from standalone.services.demo_mode import (
     submit_demo_preview_answer,
     submit_demo_validation_practice_answer,
 )
+from standalone.services.background_dispatch import (
+    enqueue_registered_background_task,
+    local_background_job_label,
+    local_background_job_strategy,
+)
 from standalone.services.metrics import enrollment_practice_metrics_snapshot, refresh_enrollment_metrics
 from standalone.services.local_jobs import enqueue_local_job, local_job_status
 from standalone.services.practice_scoring import weighted_practice_score
@@ -229,7 +234,7 @@ def _queue_content_asset_processing(asset_id: int) -> None:
     if _celery_is_enabled():
         process_content_asset_task.delay(asset_id)
         return
-    enqueue_local_job("content_asset_processing", run_content_asset_processing, asset_id)
+    enqueue_registered_background_task("content_asset_processing", asset_id)
 
 
 def _queue_block_regeneration(block_id: int) -> None:
@@ -239,9 +244,7 @@ def _queue_block_regeneration(block_id: int) -> None:
         regenerate_block_content_task.delay(block_id)
         return
 
-    from standalone.tasks import run_block_regeneration
-
-    enqueue_local_job("block_regeneration", run_block_regeneration, block_id)
+    enqueue_registered_background_task("block_regeneration", block_id)
 
 
 def _queue_block_creation_processing(block_id: int) -> None:
@@ -251,7 +254,7 @@ def _queue_block_creation_processing(block_id: int) -> None:
         process_block_creation_task.delay(block_id)
         return
 
-    enqueue_local_job("block_creation_processing", run_block_creation_processing, block_id)
+    enqueue_registered_background_task("block_creation_processing", block_id)
 
 
 def _queue_course_import_analysis(import_id: int) -> None:
@@ -259,7 +262,7 @@ def _queue_course_import_analysis(import_id: int) -> None:
         analyze_course_pdf_import_task.delay(import_id)
         return
 
-    enqueue_local_job("course_import_analysis", run_course_import_analysis, import_id)
+    enqueue_registered_background_task("course_import_analysis", import_id)
 
 
 def _queue_course_import_block_creation(import_id: int, selected_chapter_ids: list[int]) -> None:
@@ -267,23 +270,7 @@ def _queue_course_import_block_creation(import_id: int, selected_chapter_ids: li
         create_blocks_from_course_import_task.delay(import_id, selected_chapter_ids)
         return
 
-    enqueue_local_job(
-        "course_import_block_creation",
-        run_course_import_block_creation,
-        import_id,
-        selected_chapter_ids,
-        queue_block_processing=True,
-    )
-
-
-_LOCAL_JOB_LABELS = {
-    "content_asset_processing": "File processing",
-    "block_regeneration": "Block regeneration",
-    "block_creation_processing": "Block processing",
-    "course_import_analysis": "PDF import analysis",
-    "course_import_block_creation": "Block creation",
-}
-
+    enqueue_registered_background_task("course_import_block_creation", import_id, selected_chapter_ids)
 
 def _background_job_status_context() -> dict[str, object]:
     if _celery_is_enabled():
@@ -295,11 +282,20 @@ def _background_job_status_context() -> dict[str, object]:
             "detail": "Background jobs are being handled by Celery rather than the local in-process queue.",
             "error": "",
         }
+    if local_background_job_strategy() == "subprocess":
+        return {
+            "label": "Detached worker",
+            "class_name": "is-ready",
+            "queued_count": 0,
+            "running_job_label": "",
+            "detail": "Background jobs are being launched in separate subprocesses. Watch each import or block card for progress.",
+            "error": "",
+        }
 
     status = local_job_status()
     queued_count = int(status["queued_count"])
-    running_job_label = _LOCAL_JOB_LABELS.get(str(status["current_job_name"] or ""), "Background job")
-    last_job_label = _LOCAL_JOB_LABELS.get(str(status["last_job_name"] or ""), "Background job")
+    running_job_label = local_background_job_label(str(status["current_job_name"] or ""))
+    last_job_label = local_background_job_label(str(status["last_job_name"] or ""))
     last_error = str(status["last_error"] or "").strip()
 
     if bool(status["running"]):

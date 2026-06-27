@@ -504,7 +504,7 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual([chapter.title for chapter in chapters], ["Chapter 1: Foundations", "Chapter 2: Membranes"])
         self.assertEqual(chapters[0].start_page, 1)
         self.assertEqual(chapters[0].end_page, 1)
-        self.assertIn("Cells are the basic unit of life", chapters[0].extracted_text)
+        self.assertEqual(chapters[0].extracted_text, "")
 
     @override_settings(OPENAI_API_KEY="")
     def test_pdf_import_falls_back_to_single_chapter_without_headings(self):
@@ -1356,6 +1356,18 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(CourseImport.objects.count(), 0)
         self.assertContains(response, "Please upload a PDF file.")
+
+    @override_settings(PDF_IMPORT_MAX_FILE_SIZE_BYTES=1024 * 1024)
+    def test_course_import_upload_rejects_pdf_over_size_limit(self):
+        course = self.create_course()
+        self.client.force_login(self.teacher)
+        upload = SimpleUploadedFile("book.pdf", b"x" * ((1024 * 1024) + 1), content_type="application/pdf")
+
+        response = self.client.post(reverse("standalone:course_import_upload", args=[course.pk]), {"source_file": upload})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CourseImport.objects.count(), 0)
+        self.assertContains(response, "PDF must be 1 MB or smaller.")
 
     def test_teacher_can_review_and_submit_selected_import_chapters(self):
         course = self.create_course()

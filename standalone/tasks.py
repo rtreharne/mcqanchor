@@ -6,6 +6,7 @@ from django.utils.text import slugify
 from celery import shared_task
 
 from standalone.models import BlockConfig, ContentAsset, Course, CourseBlock, CourseImport, CourseImportChapter
+from standalone.services.background_dispatch import enqueue_registered_background_task
 from standalone.services.content import (
     ingest_content_asset,
     regenerate_block_descriptions_and_objectives,
@@ -239,9 +240,7 @@ def run_course_import_block_creation(
             chapter.save(update_fields=["created_block", "updated_at"])
 
             if queue_block_processing:
-                from standalone.services.local_jobs import enqueue_local_job
-
-                enqueue_local_job("block_creation_processing", run_block_creation_processing, block.pk)
+                enqueue_registered_background_task("block_creation_processing", block.pk)
             else:
                 run_block_creation_processing(block.pk)
             _set_course_import_state(import_id, CourseImport.Status.CREATING, 5 + round((90 * index) / total))

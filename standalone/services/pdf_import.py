@@ -59,15 +59,26 @@ _PAGE_COUNTER_PATTERN = re.compile(r"^\d+\s+of\s+\d+$", re.IGNORECASE)
 _TIMESTAMP_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}$")
 _OCR_PROBE_PAGE_COUNT = 40
 _END_BOUNDARY_TITLE = "__END_OF_CHAPTERS__"
+_ANALYSIS_PAGE_TEXT_CHAR_LIMIT = 2500
 
 
 class PdfOcrUnavailableError(RuntimeError):
     pass
 
 
-def extract_pdf_pages(file_path: str | Path) -> list[str]:
+def _extract_reader_pages(reader: PdfReader, *, max_chars_per_page: int | None = None) -> list[str]:
+    pages: list[str] = []
+    for page in reader.pages:
+        text = normalize_text(page.extract_text() or "")
+        if max_chars_per_page is not None and max_chars_per_page > 0:
+            text = text[:max_chars_per_page]
+        pages.append(text)
+    return pages
+
+
+def extract_pdf_pages(file_path: str | Path, *, max_chars_per_page: int | None = None) -> list[str]:
     reader = PdfReader(str(file_path))
-    return [normalize_text(page.extract_text() or "") for page in reader.pages]
+    return _extract_reader_pages(reader, max_chars_per_page=max_chars_per_page)
 
 
 def extract_pdf_page_range(file_path: str | Path, start_page: int, end_page: int) -> str:
@@ -88,25 +99,31 @@ def extract_pdf_page_range(file_path: str | Path, start_page: int, end_page: int
 
 
 def analyze_pdf_chapters(file_path: str | Path) -> list[PdfChapterCandidate]:
-    pages = extract_pdf_pages(file_path)
-    if not pages:
+    reader = PdfReader(str(file_path))
+    page_count = len(reader.pages)
+    if page_count <= 0:
         return []
 
+    boundaries = _outline_boundaries(reader)
+    if boundaries:
+        chapters = _empty_chapters_from_boundaries(boundaries, page_count)
+        return _cleanup_with_openai(chapters) if settings.OPENAI_API_KEY else chapters
+
+    pages = _extract_reader_pages(reader, max_chars_per_page=_ANALYSIS_PAGE_TEXT_CHAR_LIMIT)
     if not _has_readable_text(pages):
         probe_end = min(len(pages), _OCR_PROBE_PAGE_COUNT)
         probe_pages = _ocr_pdf_pages(file_path, range(1, probe_end + 1), dpi=135)
-        boundaries = _toc_boundaries_from_ocr(probe_pages, len(pages)) or _heading_boundaries_from_page_map(probe_pages)
+        boundaries = _toc_boundaries_from_ocr(probe_pages, page_count) or _heading_boundaries_from_page_map(probe_pages)
         if not boundaries:
             return []
-        chapters = _empty_chapters_from_boundaries(boundaries, len(pages))
+        chapters = _empty_chapters_from_boundaries(boundaries, page_count)
         return _cleanup_with_openai(chapters) if settings.OPENAI_API_KEY else chapters
 
-    reader = PdfReader(str(file_path))
-    boundaries = _outline_boundaries(reader) or _top_level_numbered_section_boundaries(pages) or _heading_boundaries(pages)
+    boundaries = _top_level_numbered_section_boundaries(pages) or _heading_boundaries(pages)
     if not boundaries:
         boundaries = [_ChapterBoundary("Imported PDF", 1, 35)]
 
-    chapters = _boundaries_to_chapters(boundaries, pages)
+    chapters = _empty_chapters_from_boundaries(boundaries, page_count)
     return _cleanup_with_openai(chapters) if settings.OPENAI_API_KEY else chapters
 
 

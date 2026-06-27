@@ -25,8 +25,16 @@ services:
         value: /app/data/db.sqlite3
       - key: MEDIA_ROOT
         value: /app/data/media
+      - key: FILE_UPLOAD_TEMP_DIR
+        value: /app/data/tmp/uploads
+      - key: FILE_UPLOAD_MAX_MEMORY_SIZE
+        value: "262144"
       - key: WEB_CONCURRENCY
         value: "1"
+      - key: GUNICORN_TIMEOUT
+        value: "300"
+      - key: LOCAL_BACKGROUND_JOB_STRATEGY
+        value: subprocess
       - key: QUESTION_BANK_BUILDER_LOOP_ENABLED
         value: "true"
       - key: DJANGO_ADMIN_USERNAME

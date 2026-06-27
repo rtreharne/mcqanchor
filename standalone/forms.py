@@ -200,6 +200,10 @@ class CourseImportUploadForm(forms.ModelForm):
         content_type = getattr(uploaded_file, "content_type", "")
         if not filename.endswith(".pdf") and content_type != "application/pdf":
             raise forms.ValidationError("Please upload a PDF file.")
+        max_size_bytes = int(getattr(settings, "PDF_IMPORT_MAX_FILE_SIZE_BYTES", 200 * 1024 * 1024) or 0)
+        if max_size_bytes > 0 and getattr(uploaded_file, "size", 0) > max_size_bytes:
+            max_size_mb = max(1, (max_size_bytes + (1024 * 1024) - 1) // (1024 * 1024))
+            raise forms.ValidationError(f"PDF must be {max_size_mb} MB or smaller.")
         return uploaded_file
 
     def save(self, course, uploaded_by, commit=True):
