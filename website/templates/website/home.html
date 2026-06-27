@@ -58,7 +58,13 @@
               <div class="demo-card-copy">
                 <p class="demo-card-kicker">Public demo</p>
                 <h3>{{ demo.title }}</h3>
-                <p>{{ demo.summary }}</p>
+                <p class="demo-card-summary" data-demo-summary>
+                  <span class="demo-card-summary-copy" data-demo-summary-copy>{{ demo.summary_excerpt }}</span>
+                  {% if demo.summary_is_truncated %}
+                    <span hidden data-demo-summary-full>{{ demo.summary }}</span>
+                    <button type="button" class="demo-card-summary-toggle" data-demo-summary-toggle aria-expanded="false">... more</button>
+                  {% endif %}
+                </p>
                 <p class="demo-card-meta">
                   {% if demo.access_count == 1 %}
                     Accessed 1 time

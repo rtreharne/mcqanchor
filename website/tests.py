@@ -87,6 +87,38 @@ class HomePageTests(TestCase):
         self.assertNotContains(response, "Open practice validation")
         self.assertNotContains(response, "Hidden Demo Course")
 
+    def test_home_page_renders_expandable_markup_for_long_demo_summaries(self):
+        teacher = get_user_model().objects.create_user(
+            username="summary-demo-teacher",
+            email="summary-demo-teacher@example.com",
+            password="password123",
+            role="teacher",
+        )
+        long_summary = (
+            "This public demo walks through a rich course space with weekly practice, "
+            "feedback loops, controlled validation rehearsal, and topic coverage tracking "
+            "so educators can see how sustained engagement and anchored assessment fit "
+            "together across a full semester experience."
+        )
+        featured_course = Course.objects.create(
+            teacher=teacher,
+            title="Expanded Summary Demo",
+            slug="expanded-summary-demo",
+            summary=long_summary,
+            is_active=True,
+        )
+        CourseConfig.objects.create(course=featured_course, demo_enabled=True, homepage_demo_enabled=True)
+        ensure_demo_access(featured_course)
+
+        response = self.client.get(reverse("website:home"))
+
+        self.assertContains(response, "Expanded Summary Demo")
+        self.assertContains(response, 'class="demo-card-summary"', html=False)
+        self.assertContains(response, "data-demo-summary-copy", html=False)
+        self.assertContains(response, "data-demo-summary-full", html=False)
+        self.assertContains(response, "data-demo-summary-toggle", html=False)
+        self.assertContains(response, "... more")
+
 
 class ContactFormTests(TestCase):
     def test_contact_form_success(self):

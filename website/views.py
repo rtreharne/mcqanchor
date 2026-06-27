@@ -18,6 +18,20 @@ from .forms import PilotEnquiryForm
 from .models import ChatConversation, ChatMessage
 
 logger = logging.getLogger(__name__)
+DEMO_SUMMARY_LIMIT = 200
+
+
+def _truncate_demo_summary(text: str, limit: int = DEMO_SUMMARY_LIMIT) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+
+    excerpt = normalized[:limit]
+    last_space = excerpt.rfind(" ")
+    minimum_word_boundary = int(limit * 0.72)
+    if last_space > minimum_word_boundary:
+        excerpt = excerpt[:last_space]
+    return excerpt.rstrip()
 
 
 def home(request: HttpRequest) -> HttpResponse:
@@ -44,10 +58,14 @@ def home(request: HttpRequest) -> HttpResponse:
     )
     for course in featured_courses:
         access = ensure_demo_access(course)
+        summary = (course.summary or "").strip() or "Open a live MCQ Anchor demo for this course."
+        summary_excerpt = _truncate_demo_summary(summary)
         homepage_demos.append(
             {
                 "title": course.title,
-                "summary": course.summary or "Open a live MCQ Anchor demo for this course.",
+                "summary": summary,
+                "summary_excerpt": summary_excerpt,
+                "summary_is_truncated": len(summary_excerpt) < len(summary),
                 "practice_url": reverse("standalone:demo_practice", args=[access.token]),
                 "access_count": int(access.access_count or 0),
             }

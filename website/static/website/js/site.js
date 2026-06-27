@@ -29,6 +29,7 @@ const walkthroughBody = document.querySelector(".walkthrough-body");
 const walkthroughNextButton = document.querySelector(".walkthrough-next");
 const walkthroughExitButton = document.querySelector(".walkthrough-exit");
 const chatOpenLinks = document.querySelectorAll(".chat-open-link");
+const demoSummaryBlocks = document.querySelectorAll("[data-demo-summary]");
 const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 const desktopAutoOpenQuery = window.matchMedia("(min-width: 1024px)");
 
@@ -174,6 +175,39 @@ function buildHistoryPayload() {
     role: item.role,
     content: normalizeHistoryText(item.content),
   }));
+}
+
+function initializeDemoSummaries() {
+  demoSummaryBlocks.forEach((summaryBlock) => {
+    const summaryCopy = summaryBlock.querySelector("[data-demo-summary-copy]");
+    const summaryToggle = summaryBlock.querySelector("[data-demo-summary-toggle]");
+    const fullSummary = summaryBlock.querySelector("[data-demo-summary-full]")?.textContent?.trim() || "";
+    const summaryExcerpt = summaryCopy?.textContent?.trim() || "";
+
+    if (!summaryCopy || !summaryToggle || !fullSummary || !summaryExcerpt || fullSummary.length <= summaryExcerpt.length) {
+      summaryToggle?.setAttribute("aria-expanded", "false");
+      if (summaryToggle && (!fullSummary || fullSummary.length <= summaryExcerpt.length)) {
+        summaryToggle.hidden = true;
+      }
+      return;
+    }
+
+    let isExpanded = false;
+
+    function renderSummary() {
+      summaryCopy.textContent = isExpanded ? fullSummary : summaryExcerpt;
+      summaryToggle.textContent = isExpanded ? "... less" : "... more";
+      summaryToggle.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+      summaryBlock.classList.toggle("is-expanded", isExpanded);
+    }
+
+    summaryToggle.addEventListener("click", () => {
+      isExpanded = !isExpanded;
+      renderSummary();
+    });
+
+    renderSummary();
+  });
 }
 
 function updateChatLayout() {
@@ -912,6 +946,7 @@ window.addEventListener("resize", () => {
 
 window.addEventListener("scroll", maybeAutoOpenLauncherOnScroll, { passive: true });
 
+initializeDemoSummaries();
 updateChatMode();
 updateChatLayout();
 startBubbleStream();
