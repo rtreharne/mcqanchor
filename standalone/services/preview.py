@@ -484,7 +484,7 @@ def _pick_retry_question(course: Course, block: CourseBlock, course_state: dict,
             continue
         if question_quality_sort_key(question)[0]:
             continue
-        if completion_sequence - state["last_presented_sequence"] < PREVIEW_RETRY_COMPLETION_GAP:
+        if completion_sequence - state["last_presented_sequence"] <= PREVIEW_RETRY_COMPLETION_GAP:
             continue
         candidates.append(
             (
@@ -580,9 +580,9 @@ def _ensure_question_for_block(
 
     question = None
     if not force_new:
-        question = _pick_unseen_question(course, block, course_state, effective_type)
+        question = _pick_retry_question(course, block, course_state, effective_type)
         if question is None:
-            question = _pick_retry_question(course, block, course_state, effective_type)
+            question = _pick_unseen_question(course, block, course_state, effective_type)
     if question is None:
         question, _ = generate_question_pair_for_block(
             block,
@@ -606,12 +606,12 @@ def _fallback_question_for_block(
     fallback_types = _fallback_preview_question_types(course, block, course_state, requested_question_type)
 
     for question_type in fallback_types:
-        question = _pick_unseen_question(course, block, course_state, question_type)
+        question = _pick_retry_question(course, block, course_state, question_type)
         if question is not None:
             return question, False
 
     for question_type in fallback_types:
-        question = _pick_retry_question(course, block, course_state, question_type)
+        question = _pick_unseen_question(course, block, course_state, question_type)
         if question is not None:
             return question, False
 

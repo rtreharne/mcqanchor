@@ -4,7 +4,6 @@ from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
 import re
-from threading import Thread
 from urllib.parse import quote, urlencode, urlsplit
 
 from django.conf import settings
@@ -13,7 +12,7 @@ from django.contrib.auth import authenticate, login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LogoutView
 from django import forms
-from django.db import IntegrityError, close_old_connections, connection, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Avg, Count, Q
 from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -109,6 +108,7 @@ from standalone.services.demo_mode import (
     submit_demo_validation_practice_answer,
 )
 from standalone.services.metrics import enrollment_practice_metrics_snapshot, refresh_enrollment_metrics
+from standalone.services.local_jobs import enqueue_local_job, local_job_status
 from standalone.services.practice_scoring import weighted_practice_score
 from standalone.services.notifications import send_logged_email
 from standalone.services.preview import (
@@ -229,15 +229,7 @@ def _queue_content_asset_processing(asset_id: int) -> None:
     if _celery_is_enabled():
         process_content_asset_task.delay(asset_id)
         return
-
-    def runner() -> None:
-        close_old_connections()
-        try:
-            run_content_asset_processing(asset_id)
-        finally:
-            close_old_connections()
-
-    Thread(target=runner, daemon=True).start()
+    enqueue_local_job("content_asset_processing", run_content_asset_processing, asset_id)
 
 
 def _queue_block_regeneration(block_id: int) -> None:
@@ -249,14 +241,7 @@ def _queue_block_regeneration(block_id: int) -> None:
 
     from standalone.tasks import run_block_regeneration
 
-    def runner() -> None:
-        close_old_connections()
-        try:
-            run_block_regeneration(block_id)
-        finally:
-            close_old_connections()
-
-    Thread(target=runner, daemon=True).start()
+    enqueue_local_job("block_regeneration", run_block_regeneration, block_id)
 
 
 def _queue_block_creation_processing(block_id: int) -> None:
@@ -266,14 +251,7 @@ def _queue_block_creation_processing(block_id: int) -> None:
         process_block_creation_task.delay(block_id)
         return
 
-    def runner() -> None:
-        close_old_connections()
-        try:
-            run_block_creation_processing(block_id)
-        finally:
-            close_old_connections()
-
-    Thread(target=runner, daemon=True).start()
+    enqueue_local_job("block_creation_processing", run_block_creation_processing, block_id)
 
 
 def _queue_course_import_analysis(import_id: int) -> None:
@@ -281,14 +259,7 @@ def _queue_course_import_analysis(import_id: int) -> None:
         analyze_course_pdf_import_task.delay(import_id)
         return
 
-    def runner() -> None:
-        close_old_connections()
-        try:
-            run_course_import_analysis(import_id)
-        finally:
-            close_old_connections()
-
-    Thread(target=runner, daemon=True).start()
+    enqueue_local_job("course_import_analysis", run_course_import_analysis, import_id)
 
 
 def _queue_course_import_block_creation(import_id: int, selected_chapter_ids: list[int]) -> None:
@@ -296,14 +267,94 @@ def _queue_course_import_block_creation(import_id: int, selected_chapter_ids: li
         create_blocks_from_course_import_task.delay(import_id, selected_chapter_ids)
         return
 
-    def runner() -> None:
-        close_old_connections()
-        try:
-            run_course_import_block_creation(import_id, selected_chapter_ids)
-        finally:
-            close_old_connections()
+    enqueue_local_job(
+        "course_import_block_creation",
+        run_course_import_block_creation,
+        import_id,
+        selected_chapter_ids,
+        queue_block_processing=True,
+    )
 
-    Thread(target=runner, daemon=True).start()
+
+_LOCAL_JOB_LABELS = {
+    "content_asset_processing": "File processing",
+    "block_regeneration": "Block regeneration",
+    "block_creation_processing": "Block processing",
+    "course_import_analysis": "PDF import analysis",
+    "course_import_block_creation": "Block creation",
+}
+
+
+def _background_job_status_context() -> dict[str, object]:
+    if _celery_is_enabled():
+        return {
+            "label": "External worker",
+            "class_name": "is-ready",
+            "queued_count": 0,
+            "running_job_label": "",
+            "detail": "Background jobs are being handled by Celery rather than the local in-process queue.",
+            "error": "",
+        }
+
+    status = local_job_status()
+    queued_count = int(status["queued_count"])
+    running_job_label = _LOCAL_JOB_LABELS.get(str(status["current_job_name"] or ""), "Background job")
+    last_job_label = _LOCAL_JOB_LABELS.get(str(status["last_job_name"] or ""), "Background job")
+    last_error = str(status["last_error"] or "").strip()
+
+    if bool(status["running"]):
+        detail = f"Running {running_job_label.lower()} now."
+        if queued_count:
+            detail = f"{detail} {queued_count} queued behind it."
+        return {
+            "label": "Running",
+            "class_name": "is-running",
+            "queued_count": queued_count,
+            "running_job_label": running_job_label,
+            "detail": detail,
+            "error": "",
+        }
+
+    if queued_count:
+        detail = f"{queued_count} background job"
+        if queued_count != 1:
+            detail += "s"
+        detail += " queued and waiting for the local worker."
+        return {
+            "label": "Queued",
+            "class_name": "is-queued",
+            "queued_count": queued_count,
+            "running_job_label": "",
+            "detail": detail,
+            "error": "",
+        }
+
+    if str(status["last_event"]) == "failed":
+        detail = f"Last local job failed during {last_job_label.lower()}."
+        return {
+            "label": "Attention",
+            "class_name": "is-failed",
+            "queued_count": 0,
+            "running_job_label": "",
+            "detail": detail,
+            "error": last_error,
+        }
+
+    return {
+        "label": "Idle",
+        "class_name": "is-ready",
+        "queued_count": 0,
+        "running_job_label": "",
+        "detail": "No local background jobs are queued right now.",
+        "error": "",
+    }
+
+
+@login_required
+def background_job_status(request: HttpRequest) -> JsonResponse:
+    if not _is_teacher(request.user):
+        raise Http404
+    return JsonResponse({"ok": True, "status": _background_job_status_context()})
 
 
 def _teacher_course_or_404(user: User, course_id: int) -> Course:
@@ -434,6 +485,7 @@ def teacher_dashboard(request: HttpRequest) -> HttpResponse:
     context = {
         "courses": course_list,
         "validation_events": validation_events,
+        "background_job_status": _background_job_status_context(),
         "dashboard_stats": {
             "course_count": len(course_list),
             "student_count": sum(course.student_count for course in course_list),
@@ -716,6 +768,7 @@ def _course_detail_context(course: Course, *, request: HttpRequest | None = None
         "question_bank_builder_last_generated_at": config.question_bank_builder_last_generated_at,
         "question_bank_builder_last_error": config.question_bank_builder_last_error,
         "question_bank_builder_enabled": config.question_bank_builder_enabled,
+        "background_job_status": _background_job_status_context(),
         "events": events,
         "recent_imports": course.imports.order_by("-created_at")[:3],
         "allowed_emails": course.allowed_emails.all(),

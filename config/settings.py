@@ -37,6 +37,16 @@ def env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if not value:
+        return default
+    return float(value)
+
+
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "replace-me")
 DEBUG = env_bool("DJANGO_DEBUG", True)
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost")
@@ -166,3 +176,4 @@ QUESTION_BANK_BUILDER_LEASE_SECONDS = env_int("QUESTION_BANK_BUILDER_LEASE_SECON
 PRACTICE_VALIDATION_READY_THRESHOLD = env_int("PRACTICE_VALIDATION_READY_THRESHOLD", 1000)
 VALIDATION_PRACTICE_DEFAULT_QUESTION_COUNT = env_int("VALIDATION_PRACTICE_DEFAULT_QUESTION_COUNT", 10)
 PREVIEW_VALIDATION_DEFAULT_QUESTION_COUNT = env_int("PREVIEW_VALIDATION_DEFAULT_QUESTION_COUNT", 10)
+LOCAL_BACKGROUND_JOB_PAUSE_SECONDS = env_float("LOCAL_BACKGROUND_JOB_PAUSE_SECONDS", 1.0)

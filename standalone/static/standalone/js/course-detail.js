@@ -96,6 +96,10 @@ let courseDetailStatusSyncInFlight = false;
 let courseDetailRefreshRequestSequence = 0;
 let courseDetailLatestRefreshRequest = 0;
 let settingsToastHideHandle = null;
+let backgroundJobStatusPollHandle = null;
+let backgroundJobStatusSyncInFlight = false;
+
+const BACKGROUND_JOB_STATUS_CLASSES = ["is-ready", "is-completed", "is-paused", "is-uploaded", "is-analyzing", "is-creating", "is-queued", "is-running", "is-failed"];
 
 function beginCourseDetailRefreshRequest() {
   courseDetailRefreshRequestSequence += 1;
@@ -130,6 +134,86 @@ function showSettingsToast(message) {
       toast.hidden = true;
     }, 180);
   }, 1800);
+}
+
+function renderBackgroundJobStatus(panel, status) {
+  if (!panel || !status) {
+    return;
+  }
+  const label = panel.querySelector("[data-background-jobs-label]");
+  const running = panel.querySelector("[data-background-jobs-running]");
+  const queued = panel.querySelector("[data-background-jobs-queued]");
+  const detail = panel.querySelector("[data-background-jobs-detail]");
+  const error = panel.querySelector("[data-background-jobs-error]");
+
+  if (label) {
+    label.textContent = String(status.label || "");
+    label.classList.remove(...BACKGROUND_JOB_STATUS_CLASSES);
+    if (status.class_name) {
+      label.classList.add(String(status.class_name));
+    }
+  }
+  if (running) {
+    const text = String(status.running_job_label || "");
+    running.textContent = text;
+    running.hidden = !text;
+  }
+  if (queued) {
+    const count = Number(status.queued_count || 0);
+    queued.textContent = count > 0 ? `${count} queued` : "";
+    queued.hidden = count <= 0;
+  }
+  if (detail) {
+    detail.textContent = String(status.detail || "");
+  }
+  if (error) {
+    const text = String(status.error || "");
+    error.textContent = text;
+    error.hidden = !text;
+  }
+}
+
+async function refreshBackgroundJobStatusNow() {
+  if (backgroundJobStatusSyncInFlight || document.hidden) {
+    return;
+  }
+  const panel = document.querySelector("[data-background-jobs-status]");
+  const url = panel?.dataset.backgroundJobsStatusUrl;
+  if (!panel || !url) {
+    return;
+  }
+
+  backgroundJobStatusSyncInFlight = true;
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      credentials: "same-origin",
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok || !payload.status) {
+      throw new Error("Unable to refresh background job status.");
+    }
+    renderBackgroundJobStatus(panel, payload.status);
+  } catch (_error) {
+    // Allow the next poll to retry quietly.
+  } finally {
+    backgroundJobStatusSyncInFlight = false;
+  }
+}
+
+function ensureBackgroundJobStatusPolling() {
+  if (backgroundJobStatusPollHandle !== null) {
+    return;
+  }
+  if (!document.querySelector("[data-background-jobs-status]")) {
+    return;
+  }
+  backgroundJobStatusPollHandle = window.setInterval(() => {
+    void refreshBackgroundJobStatusNow();
+  }, 5000);
 }
 
 function setCourseConfigRowState(row, state, message = "") {
@@ -832,18 +916,24 @@ function initializeCourseDetail(root = document) {
 document.addEventListener("DOMContentLoaded", () => {
   initializeCourseDetail(document);
   expandBlockPathFromHash(document);
+  ensureBackgroundJobStatusPolling();
+  void refreshBackgroundJobStatusNow();
   if (hasPendingCourseDetailIndicators(document)) {
     void syncPendingCourseDetailStateNow();
   }
 });
 
 window.addEventListener("focus", () => {
+  void refreshBackgroundJobStatusNow();
   if (hasPendingCourseDetailIndicators(document)) {
     void syncPendingCourseDetailStateNow();
   }
 });
 
 document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    void refreshBackgroundJobStatusNow();
+  }
   if (!document.hidden && hasPendingCourseDetailIndicators(document)) {
     void syncPendingCourseDetailStateNow();
   }

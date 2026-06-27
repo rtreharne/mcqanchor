@@ -71,6 +71,7 @@ STANDALONE_ENABLE_MAGIC_LINKS=True
 STANDALONE_ENABLE_SELF_ENROL=True
 STANDALONE_INVITE_EXPIRY_HOURS=72
 STANDALONE_MAGIC_LINK_EXPIRY_HOURS=72
+LOCAL_BACKGROUND_JOB_PAUSE_SECONDS=1.0
 ```
 
 6. Run migrations:
@@ -88,6 +89,8 @@ Uploaded files default to the local `media/` directory. Set `MEDIA_ROOT` only if
 ```bash
 python manage.py runserver
 ```
+
+For low-CPU local or single-container deployments, heavy background jobs are paced through a single in-process queue when Celery is not configured. Increase `LOCAL_BACKGROUND_JOB_PAUSE_SECONDS` if PDF import or block creation still makes the app feel too busy.
 
 8. If you want background processing for content ingestion and learning-objective generation, start a Celery worker and set a broker URL such as Redis in `.env`:
 

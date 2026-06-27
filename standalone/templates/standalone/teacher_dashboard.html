@@ -7,11 +7,28 @@
       <h1>Teacher dashboard</h1>
       <p class="lead">Build courses, upload source notes, manage enrolment, and prepare validation sessions.</p>
     </div>
-    <div class="workspace-actions">
-      <a class="button" href="{% url 'standalone:course_create' %}">Create course</a>
-      {% if user.is_superuser or user.role == "internal" %}
-        <a class="button secondary" href="{% url 'standalone:teacher_invite' %}">Invite teacher</a>
-      {% endif %}
+    <div class="teacher-dashboard-hero-side">
+      <div class="workspace-actions">
+        <a class="button" href="{% url 'standalone:course_create' %}">Create course</a>
+        {% if user.is_superuser or user.role == "internal" %}
+          <a class="button secondary" href="{% url 'standalone:teacher_invite' %}">Invite teacher</a>
+        {% endif %}
+      </div>
+      <div
+        class="practice-average-panel"
+        aria-label="Background jobs status"
+        data-background-jobs-status
+        data-background-jobs-status-url="{% url 'standalone:background_job_status' %}"
+      >
+        <p class="practice-average-label">Background jobs</p>
+        <div class="block-chip-row">
+          <span class="block-chip status-chip {{ background_job_status.class_name }}" data-background-jobs-label>{{ background_job_status.label }}</span>
+          <span class="block-chip"{% if not background_job_status.running_job_label %} hidden{% endif %} data-background-jobs-running>{{ background_job_status.running_job_label }}</span>
+          <span class="block-chip"{% if not background_job_status.queued_count %} hidden{% endif %} data-background-jobs-queued>{% if background_job_status.queued_count %}{{ background_job_status.queued_count }} queued{% endif %}</span>
+        </div>
+        <p class="course-setting-help" data-background-jobs-detail>{{ background_job_status.detail }}</p>
+        <p class="course-setting-help"{% if not background_job_status.error %} hidden{% endif %} data-background-jobs-error>{{ background_job_status.error }}</p>
+      </div>
     </div>
   </div>
 

@@ -177,7 +177,12 @@ def _chapter_asset_filename(chapter: CourseImportChapter) -> str:
     return f"{chapter.order:02d}-{base}.txt"
 
 
-def run_course_import_block_creation(import_id: int, selected_chapter_ids: list[int]) -> None:
+def run_course_import_block_creation(
+    import_id: int,
+    selected_chapter_ids: list[int],
+    *,
+    queue_block_processing: bool = False,
+) -> None:
     try:
         course_import = CourseImport.objects.select_related("course", "uploaded_by").get(pk=import_id)
     except CourseImport.DoesNotExist:
@@ -233,7 +238,12 @@ def run_course_import_block_creation(import_id: int, selected_chapter_ids: list[
             chapter.created_block = block
             chapter.save(update_fields=["created_block", "updated_at"])
 
-            run_block_creation_processing(block.pk)
+            if queue_block_processing:
+                from standalone.services.local_jobs import enqueue_local_job
+
+                enqueue_local_job("block_creation_processing", run_block_creation_processing, block.pk)
+            else:
+                run_block_creation_processing(block.pk)
             _set_course_import_state(import_id, CourseImport.Status.CREATING, 5 + round((90 * index) / total))
 
         refresh_course_summary_from_blocks(course_import.course)

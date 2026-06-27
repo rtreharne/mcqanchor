@@ -4711,6 +4711,56 @@ print(result)""",
         self.assertTrue(any("becomes available" in message["text"] for message in future_block_payload["transcript"] if message["kind"] == "text"))
         self.assertFalse(any(message.get("text") == "Future question?" for message in future_block_payload["transcript"]))
 
+    def test_student_practice_incorrect_question_reappears_after_three_other_completed_questions_even_with_unseen_bank_remaining(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        questions = []
+        for index in range(1, 7):
+            questions.append(
+                QuestionBankItem.objects.create(
+                    course=course,
+                    block=block,
+                    learning_objective=objective,
+                    source_chunk=chunk,
+                    bank_type=QuestionBankItem.BankType.PRACTICE,
+                    status=QuestionBankItem.Status.APPROVED,
+                    stem=f"Student practice repeat question {index}?",
+                    correct_answer="A",
+                    distractors=["B", "C", "D"],
+                    explanation="Practice explanation.",
+                    question_hash=f"student-practice-repeat-{index}",
+                )
+            )
+
+        self.client.force_login(self.student)
+
+        first_quiz = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+        first_payload = next(item for item in first_quiz.json()["preview"]["blocks"] if item["id"] == block.pk)
+        first_question = [message for message in first_payload["transcript"] if message["kind"] == "question"][-1]["question_id"]
+        self.assertEqual(first_question, questions[0].pk)
+        self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": questions[0].pk, "answer": "B"}),
+            content_type="application/json",
+        )
+
+        for question in questions[1:4]:
+            next_quiz = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+            next_payload = next(item for item in next_quiz.json()["preview"]["blocks"] if item["id"] == block.pk)
+            next_question = [message for message in next_payload["transcript"] if message["kind"] == "question"][-1]["question_id"]
+            self.assertEqual(next_question, question.pk)
+            self.client.post(
+                reverse("standalone:student_practice_action", args=[course.pk, block.pk, "answer"]),
+                data=json.dumps({"question_id": question.pk, "answer": "A"}),
+                content_type="application/json",
+            )
+
+        revisit_quiz = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+        revisit_payload = next(item for item in revisit_quiz.json()["preview"]["blocks"] if item["id"] == block.pk)
+        revisit_question = [message for message in revisit_payload["transcript"] if message["kind"] == "question"][-1]["question_id"]
+        self.assertEqual(revisit_question, questions[0].pk)
+
     def test_student_practice_allows_future_block_questions_when_pre_engagement_enabled(self):
         course = self.create_course()
         course.config.allow_pre_engagement = True

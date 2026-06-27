@@ -10,6 +10,7 @@ urlpatterns = [
     path("logout/", views.StandaloneLogoutView.as_view(), name="logout"),
     path("dashboard/", views.dashboard, name="dashboard"),
     path("teacher/", views.teacher_dashboard, name="teacher_dashboard"),
+    path("teacher/background-jobs/status/", views.background_job_status, name="background_job_status"),
     path("teacher/invite/", views.teacher_invite_create, name="teacher_invite"),
     path("teacher/activate/<uuid:token>/", views.teacher_activate, name="teacher_activate"),
     path("teacher/courses/new/", views.course_create, name="course_create"),

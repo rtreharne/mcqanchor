@@ -72,6 +72,21 @@
             {% endif %}
           </div>
         </div>
+        <div
+          class="practice-average-panel course-practice-average-panel"
+          aria-label="Background jobs status"
+          data-background-jobs-status
+          data-background-jobs-status-url="{% url 'standalone:background_job_status' %}"
+        >
+          <p class="practice-average-label">Background jobs</p>
+          <div class="block-chip-row">
+            <span class="block-chip status-chip {{ background_job_status.class_name }}" data-background-jobs-label>{{ background_job_status.label }}</span>
+            <span class="block-chip"{% if not background_job_status.running_job_label %} hidden{% endif %} data-background-jobs-running>{{ background_job_status.running_job_label }}</span>
+            <span class="block-chip"{% if not background_job_status.queued_count %} hidden{% endif %} data-background-jobs-queued>{% if background_job_status.queued_count %}{{ background_job_status.queued_count }} queued{% endif %}</span>
+          </div>
+          <p class="course-setting-help" data-background-jobs-detail>{{ background_job_status.detail }}</p>
+          <p class="course-setting-help"{% if not background_job_status.error %} hidden{% endif %} data-background-jobs-error>{{ background_job_status.error }}</p>
+        </div>
         <div class="workspace-actions course-primary-actions">
           <a class="button" href="{% url 'standalone:student_preview' course.pk %}">Student preview</a>
           <a class="button secondary" href="#course-settings-content" data-open-block-target="course-settings-content">Settings</a>

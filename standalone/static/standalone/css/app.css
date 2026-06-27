@@ -1817,6 +1817,11 @@ button.button[disabled] {
   max-width: none;
 }
 
+.teacher-dashboard-hero-side {
+  display: grid;
+  gap: 0.85rem;
+}
+
 .course-hero-overview {
   display: grid;
   gap: 1rem;
