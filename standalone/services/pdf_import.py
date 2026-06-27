@@ -66,6 +66,56 @@ class PdfOcrUnavailableError(RuntimeError):
     pass
 
 
+def _truncate_page_text(text: str, max_chars_per_page: int | None = None) -> str:
+    if max_chars_per_page is None or max_chars_per_page <= 0:
+        return text
+    return text[:max_chars_per_page]
+
+
+def _extract_page_text_with_poppler(
+    file_path: str | Path,
+    page_number: int,
+    *,
+    max_chars_per_page: int | None = None,
+) -> str:
+    extraction = subprocess.run(
+        [
+            "pdftotext",
+            "-f",
+            str(page_number),
+            "-l",
+            str(page_number),
+            "-layout",
+            str(file_path),
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if extraction.returncode != 0:
+        raise RuntimeError(f"Could not extract PDF page {page_number}: {extraction.stderr.strip()}")
+    return _truncate_page_text(normalize_text(extraction.stdout or ""), max_chars_per_page=max_chars_per_page)
+
+
+def _extract_page_texts(
+    reader: PdfReader,
+    file_path: str | Path,
+    page_numbers: range | list[int],
+    *,
+    max_chars_per_page: int | None = None,
+) -> list[str]:
+    if shutil.which("pdftotext"):
+        return [
+            _extract_page_text_with_poppler(file_path, page_number, max_chars_per_page=max_chars_per_page)
+            for page_number in page_numbers
+        ]
+    return [
+        _truncate_page_text(normalize_text(reader.pages[page_number - 1].extract_text() or ""), max_chars_per_page=max_chars_per_page)
+        for page_number in page_numbers
+    ]
+
+
 def _extract_reader_pages(reader: PdfReader, *, max_chars_per_page: int | None = None) -> list[str]:
     pages: list[str] = []
     for page in reader.pages:
@@ -78,7 +128,12 @@ def _extract_reader_pages(reader: PdfReader, *, max_chars_per_page: int | None =
 
 def extract_pdf_pages(file_path: str | Path, *, max_chars_per_page: int | None = None) -> list[str]:
     reader = PdfReader(str(file_path))
-    return _extract_reader_pages(reader, max_chars_per_page=max_chars_per_page)
+    return _extract_page_texts(
+        reader,
+        file_path,
+        range(1, len(reader.pages) + 1),
+        max_chars_per_page=max_chars_per_page,
+    )
 
 
 def extract_pdf_page_range(file_path: str | Path, start_page: int, end_page: int) -> str:
@@ -90,7 +145,7 @@ def extract_pdf_page_range(file_path: str | Path, start_page: int, end_page: int
     if start_page > end_page:
         return ""
 
-    pages = [normalize_text(reader.pages[index - 1].extract_text() or "") for index in range(start_page, end_page + 1)]
+    pages = _extract_page_texts(reader, file_path, range(start_page, end_page + 1))
     if _has_readable_text(pages):
         return normalize_text("\n\n".join(pages))
 
@@ -109,7 +164,12 @@ def analyze_pdf_chapters(file_path: str | Path) -> list[PdfChapterCandidate]:
         chapters = _empty_chapters_from_boundaries(boundaries, page_count)
         return _cleanup_with_openai(chapters) if settings.OPENAI_API_KEY else chapters
 
-    pages = _extract_reader_pages(reader, max_chars_per_page=_ANALYSIS_PAGE_TEXT_CHAR_LIMIT)
+    pages = _extract_page_texts(
+        reader,
+        file_path,
+        range(1, page_count + 1),
+        max_chars_per_page=_ANALYSIS_PAGE_TEXT_CHAR_LIMIT,
+    )
     if not _has_readable_text(pages):
         probe_end = min(len(pages), _OCR_PROBE_PAGE_COUNT)
         probe_pages = _ocr_pdf_pages(file_path, range(1, probe_end + 1), dpi=135)
