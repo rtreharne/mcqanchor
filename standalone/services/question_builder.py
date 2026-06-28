@@ -293,6 +293,8 @@ def run_course_question_bank_builder_pass(course_id: int, *, now=None) -> Questi
                     strict_preferred_objectives=True,
                     include_future_blocks=True,
                     relax_similarity_checks=True,
+                    allow_type_fallback=True,
+                    allow_relaxed_objective_scope_fallback=True,
                     raise_generation_errors=True,
                 )
             except QuestionGenerationUnavailableError as exc:

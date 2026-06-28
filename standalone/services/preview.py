@@ -20,6 +20,7 @@ from standalone.services.practice_scoring import (
     base_practice_weights,
 )
 from standalone.services.question_builder import course_question_generation_budget, live_generation_unavailable_message
+from standalone.services.numeric_questions import format_numeric_answer_feedback
 from standalone.services.questions import (
     QuestionGenerationError,
     QuestionGenerationUnavailableError,
@@ -31,7 +32,6 @@ from standalone.services.questions import (
     further_study_questions_for_question,
     generate_question_pair_for_block,
     normalize_explanation_text,
-    normalize_numeric_explanation_text,
     preferred_coding_language_for_block,
     question_quality_sort_key,
 )
@@ -1099,11 +1099,16 @@ def _grade_question_response(question: QuestionBankItem, selected_answers) -> tu
 
 
 def _feedback_text(question: QuestionBankItem, selected_answers, is_correct: bool, missing_answers: list[str], extra_answers: list[str]) -> str:
-    explanation = (
-        normalize_numeric_explanation_text(question.explanation)
-        if question.is_numeric()
-        else normalize_explanation_text(question.explanation)
-    )
+    if question.is_numeric():
+        selected_answer_text = selected_answers[0] if selected_answers else ""
+        return format_numeric_answer_feedback(
+            stem=question.stem,
+            explanation_text=question.explanation,
+            numeric_metadata=question.numeric_metadata,
+            selected_answer_text=selected_answer_text,
+            is_correct=is_correct,
+        )
+    explanation = normalize_explanation_text(question.explanation)
     if question.is_multiple_answer():
         if is_correct:
             return "Correct."

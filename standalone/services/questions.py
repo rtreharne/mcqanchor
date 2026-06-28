@@ -15,6 +15,7 @@ from standalone.services.numeric_questions import (
     NumericQuestionRequestError,
     NumericQuestionValidationError,
     build_numeric_question_payload,
+    objective_has_numeric_intent,
     supports_local_numeric_mcq,
 )
 
@@ -1555,13 +1556,16 @@ def _block_has_suitable_numeric_path(
     objectives_by_block: dict[int, list[LearningObjective]],
 ) -> bool:
     objectives = list(objectives_by_block.get(block.pk, []))
-    if not objectives:
-        return any(supports_local_numeric_mcq("", chunk.text) for chunk in candidate_chunks)
     return any(
-        supports_local_numeric_mcq(objective.text, chunk.text)
+        _objective_supports_local_numeric_mcq(objective, chunk.text)
         for objective in objectives
         for chunk in candidate_chunks
     )
+
+
+def _format_attempted_type_errors(type_errors: dict[str, str]) -> str:
+    parts = [f"{question_type}: {message}" for question_type, message in type_errors.items() if message]
+    return "; ".join(parts)
 
 
 def _attempt_numeric_generation_for_chunk(
@@ -1633,6 +1637,203 @@ def _attempt_numeric_generation_for_chunk(
         if not _is_retryable_numeric_validation_error(last_generation_error):
             break
 
+    return None, None, last_generation_error
+
+
+def _generate_question_pair_for_question_type(
+    *,
+    course: Course,
+    block: CourseBlock,
+    question_type: str,
+    candidate_chunks: list[ContentChunk],
+    objectives_by_block: dict[int, list[LearningObjective]],
+    objective_keywords: dict[int, set[str]],
+    ordered_objectives: list[LearningObjective],
+    coding_signals: dict[int, dict[str, str]],
+    distractor_count: int,
+    existing_hashes: set[str],
+    strict_preferred_objectives: bool = False,
+    relax_similarity_checks: bool = False,
+) -> tuple[QuestionBankItem | None, QuestionBankItem | None, str]:
+    question_type_objective_counts, question_type_chunk_counts, question_type_objective_chunk_counts = _question_type_distribution_for_block(
+        block,
+        question_type,
+    )
+    total_chunks_by_block: dict[int, int] = defaultdict(int)
+    chunk_index_by_block: dict[int, int] = defaultdict(int)
+    for chunk in candidate_chunks:
+        total_chunks_by_block[chunk.block_id] += 1
+
+    if question_type in {QuestionBankItem.QuestionType.NUM, QuestionBankItem.QuestionType.WAQ}:
+        ordered_objectives = sorted(
+            ordered_objectives,
+            key=lambda objective: question_type_objective_counts.get(objective.pk, 0),
+        )
+
+    attempted_chunk_ids: set[int] = set()
+    found_numeric_candidate_path = False
+    generation_attempts = 0
+    last_generation_error = ""
+    coding_generation_due = _coding_question_generation_due(block) and bool(coding_signals)
+
+    for objective in ordered_objectives:
+        avoid_question_angles = (
+            []
+            if relax_similarity_checks
+            else _recent_question_avoidance_notes(block, question_type, objective=objective)
+        )
+        ranked_chunks = _rank_candidate_chunks_for_objective(
+            candidate_chunks,
+            objective,
+            objective_keywords,
+            question_type=question_type,
+            question_type_chunk_counts=question_type_chunk_counts,
+            question_type_objective_chunk_counts=question_type_objective_chunk_counts,
+        )
+        target_keywords = objective_keywords.get(objective.pk, set())
+        if strict_preferred_objectives and target_keywords:
+            ranked_chunks = [chunk for chunk in ranked_chunks if (_keyword_set(chunk.text) & target_keywords)]
+        if question_type == QuestionBankItem.QuestionType.NUM:
+            ranked_chunks = [chunk for chunk in ranked_chunks if _objective_supports_local_numeric_mcq(objective, chunk.text)]
+            if ranked_chunks:
+                found_numeric_candidate_path = True
+        if coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM:
+            ranked_chunks = [chunk for chunk in ranked_chunks if chunk.pk in coding_signals] or ranked_chunks
+        for chunk in ranked_chunks:
+            if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS:
+                break
+            attempted_chunk_ids.add(chunk.pk)
+            question_variant_index = question_type_objective_counts.get(objective.pk, 0) + question_type_objective_chunk_counts.get(
+                (objective.pk, chunk.pk),
+                0,
+            )
+            if question_type == QuestionBankItem.QuestionType.NUM:
+                practice, validation, numeric_error = _attempt_numeric_generation_for_chunk(
+                    course=course,
+                    block=block,
+                    chunk=chunk,
+                    objective=objective,
+                    distractor_count=distractor_count,
+                    existing_hashes=existing_hashes,
+                    avoid_question_angles=avoid_question_angles,
+                )
+                if practice is not None and validation is not None:
+                    return practice, validation, ""
+                if numeric_error:
+                    last_generation_error = numeric_error
+                continue
+            try:
+                generation_attempts += 1
+                coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
+                payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
+                    chunk,
+                    objective,
+                    distractor_count,
+                    question_type,
+                    coding_signal=coding_signal,
+                    avoid_question_angles=avoid_question_angles,
+                    question_variant_index=question_variant_index,
+                )
+                practice, validation = _create_question_pair(
+                    course=course,
+                    block=block,
+                    chunk=chunk,
+                    objective=objective,
+                    question_type=effective_question_type,
+                    payload=payload,
+                    existing_hashes=existing_hashes,
+                    expected_coding_language=expected_coding_language,
+                    relax_similarity_checks=relax_similarity_checks,
+                )
+            except QuestionGenerationUnavailableError:
+                raise
+            except (ValueError, OpenAIError) as exc:
+                last_generation_error = str(exc)
+                _trace_generation_rejection(block, question_type, last_generation_error, chunk=chunk, objective=objective)
+                continue
+            if practice is not None and validation is not None:
+                return practice, validation, ""
+        if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS:
+            break
+
+    for chunk in candidate_chunks:
+        if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS:
+            break
+        if chunk.pk in attempted_chunk_ids:
+            continue
+        chunk_index_by_block[chunk.block_id] += 1
+        objective = _select_objective_for_chunk(
+            chunk,
+            objectives_by_block.get(chunk.block_id, []),
+            objective_keywords,
+            chunk_index_by_block[chunk.block_id] - 1,
+            total_chunks_by_block[chunk.block_id],
+        )
+        if strict_preferred_objectives and objective is not None:
+            target_keywords = objective_keywords.get(objective.pk, set())
+            if target_keywords and not (_keyword_set(chunk.text) & target_keywords):
+                continue
+        if question_type == QuestionBankItem.QuestionType.NUM and (
+            objective is None or not _objective_supports_local_numeric_mcq(objective, chunk.text)
+        ):
+            continue
+        if question_type == QuestionBankItem.QuestionType.NUM:
+            found_numeric_candidate_path = True
+        question_variant_index = question_type_objective_counts.get(int(objective.pk) if objective else 0, 0) + question_type_objective_chunk_counts.get(
+            ((objective.pk if objective else None), chunk.pk),
+            0,
+        )
+        if question_type == QuestionBankItem.QuestionType.NUM:
+            practice, validation, numeric_error = _attempt_numeric_generation_for_chunk(
+                course=course,
+                block=block,
+                chunk=chunk,
+                objective=objective,
+                distractor_count=distractor_count,
+                existing_hashes=existing_hashes,
+                avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
+            )
+            if practice is not None and validation is not None:
+                return practice, validation, ""
+            if numeric_error:
+                last_generation_error = numeric_error
+            continue
+        try:
+            generation_attempts += 1
+            coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
+            payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
+                chunk,
+                objective,
+                distractor_count,
+                question_type,
+                coding_signal=coding_signal,
+                avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
+                question_variant_index=question_variant_index,
+            )
+            practice, validation = _create_question_pair(
+                course=course,
+                block=block,
+                chunk=chunk,
+                objective=objective,
+                question_type=effective_question_type,
+                payload=payload,
+                existing_hashes=existing_hashes,
+                expected_coding_language=expected_coding_language,
+                relax_similarity_checks=relax_similarity_checks,
+            )
+        except QuestionGenerationUnavailableError:
+            raise
+        except (ValueError, OpenAIError) as exc:
+            last_generation_error = str(exc)
+            _trace_generation_rejection(block, question_type, last_generation_error, chunk=chunk, objective=objective)
+            continue
+        if practice is not None and validation is not None:
+            return practice, validation, ""
+
+    if question_type == QuestionBankItem.QuestionType.NUM and not found_numeric_candidate_path and not last_generation_error:
+        last_generation_error = "objective not numeric-eligible"
+    if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS and not last_generation_error:
+        last_generation_error = "Generation stopped after too many rejected attempts."
     return None, None, last_generation_error
 
 
@@ -2147,18 +2348,35 @@ def _resolve_unique_question_identity(stem: str, question_type: str, existing_ha
     return "", ""
 
 
-def _preferred_generated_question_type(block: CourseBlock) -> str:
+def _objective_supports_local_numeric_mcq(objective: LearningObjective | None, chunk_text: str) -> bool:
+    if objective is None:
+        return False
+    if not objective_has_numeric_intent(objective.text):
+        return False
+    return supports_local_numeric_mcq(objective.text, chunk_text)
+
+
+def _ratio_gap_ranked_question_types(
+    block: CourseBlock,
+    *,
+    include_numeric: bool = True,
+) -> list[str]:
     practice_questions = block.question_bank_items.filter(
         bank_type=QuestionBankItem.BankType.PRACTICE,
         status=QuestionBankItem.Status.APPROVED,
     )
     practice_total = practice_questions.count()
     candidates = []
-    for candidate_type, target_ratio in (
-        (QuestionBankItem.QuestionType.NUM, block.question_numeric_ratio_percent),
-        (QuestionBankItem.QuestionType.MAQ, block.question_maq_ratio_percent),
-        (QuestionBankItem.QuestionType.WAQ, block.question_waq_ratio_percent),
-    ):
+    candidate_types = []
+    if include_numeric:
+        candidate_types.append((QuestionBankItem.QuestionType.NUM, block.question_numeric_ratio_percent))
+    candidate_types.extend(
+        [
+            (QuestionBankItem.QuestionType.MAQ, block.question_maq_ratio_percent),
+            (QuestionBankItem.QuestionType.WAQ, block.question_waq_ratio_percent),
+        ]
+    )
+    for candidate_type, target_ratio in candidate_types:
         if target_ratio <= 0:
             continue
         current_total = practice_questions.filter(question_type=candidate_type).count()
@@ -2166,38 +2384,40 @@ def _preferred_generated_question_type(block: CourseBlock) -> str:
         gap = target_ratio - current_ratio
         if gap > 0:
             candidates.append((gap, target_ratio, QUESTION_TYPE_GENERATION_PRIORITY[candidate_type], candidate_type))
+    candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    return [item[3] for item in candidates]
 
-    if candidates:
-        candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
-        return candidates[0][3]
 
-    return QuestionBankItem.QuestionType.MCQ
+def _ordered_generation_question_types(
+    block: CourseBlock,
+    *,
+    explicit_question_type: str | None = None,
+    allow_type_fallback: bool = False,
+) -> list[str]:
+    if explicit_question_type and not allow_type_fallback:
+        return [explicit_question_type]
+    if explicit_question_type is None and not allow_type_fallback:
+        ranked = _ratio_gap_ranked_question_types(block)
+        return [ranked[0] if ranked else QuestionBankItem.QuestionType.MCQ]
+
+    ordered: list[str] = []
+    if explicit_question_type:
+        ordered.append(explicit_question_type)
+    for question_type in _ratio_gap_ranked_question_types(block):
+        if question_type not in ordered:
+            ordered.append(question_type)
+    if QuestionBankItem.QuestionType.MCQ not in ordered:
+        ordered.append(QuestionBankItem.QuestionType.MCQ)
+    return ordered
+
+
+def _preferred_generated_question_type(block: CourseBlock) -> str:
+    return _ordered_generation_question_types(block)[0]
 
 
 def _preferred_standard_generated_question_type(block: CourseBlock) -> str:
-    practice_questions = block.question_bank_items.filter(
-        bank_type=QuestionBankItem.BankType.PRACTICE,
-        status=QuestionBankItem.Status.APPROVED,
-    )
-    practice_total = practice_questions.count()
-    candidates = []
-    for candidate_type, target_ratio in (
-        (QuestionBankItem.QuestionType.MAQ, block.question_maq_ratio_percent),
-        (QuestionBankItem.QuestionType.WAQ, block.question_waq_ratio_percent),
-    ):
-        if target_ratio <= 0:
-            continue
-        current_total = practice_questions.filter(question_type=candidate_type).count()
-        current_ratio = (current_total * 100 / practice_total) if practice_total else 0.0
-        gap = target_ratio - current_ratio
-        if gap > 0:
-            candidates.append((gap, target_ratio, QUESTION_TYPE_GENERATION_PRIORITY[candidate_type], candidate_type))
-
-    if candidates:
-        candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
-        return candidates[0][3]
-
-    return QuestionBankItem.QuestionType.MCQ
+    ranked = _ratio_gap_ranked_question_types(block, include_numeric=False)
+    return ranked[0] if ranked else QuestionBankItem.QuestionType.MCQ
 
 
 def _coding_question_generation_due(block: CourseBlock) -> bool:
@@ -2547,6 +2767,8 @@ def generate_question_pair_for_block(
     raise_generation_errors: bool = False,
     include_future_blocks: bool = False,
     relax_similarity_checks: bool = False,
+    allow_type_fallback: bool = False,
+    allow_relaxed_objective_scope_fallback: bool = False,
 ):
     course = block.course
     existing_hashes = existing_hashes or set(course.question_bank_items.values_list("question_hash", flat=True))
@@ -2578,228 +2800,114 @@ def generate_question_pair_for_block(
             for chunk_id, signal in coding_signals.items()
             if signal.get("language") == preferred_coding_language
         }
-    distractor_count = block.question_distractor_count
-    coding_generation_due = _coding_question_generation_due(block) and bool(coding_signals)
-    total_chunks_by_block: dict[int, int] = defaultdict(int)
-    chunk_index_by_block: dict[int, int] = defaultdict(int)
     explicit_question_type = question_type if question_type in {
         QuestionBankItem.QuestionType.MCQ,
         QuestionBankItem.QuestionType.NUM,
         QuestionBankItem.QuestionType.MAQ,
         QuestionBankItem.QuestionType.WAQ,
     } else None
-    question_type = explicit_question_type or _preferred_generated_question_type(block)
+    should_allow_type_fallback = allow_type_fallback and explicit_question_type is None
+    ordered_question_types = _ordered_generation_question_types(
+        block,
+        explicit_question_type=explicit_question_type,
+        allow_type_fallback=should_allow_type_fallback,
+    )
     if (
-        question_type == QuestionBankItem.QuestionType.NUM
+        QuestionBankItem.QuestionType.NUM in ordered_question_types
         and explicit_question_type is None
+        and not should_allow_type_fallback
         and not _block_has_suitable_numeric_path(block, candidate_chunks, objectives_by_block)
     ):
-        question_type = _preferred_standard_generated_question_type(block)
-    last_generation_error = ""
+        ordered_question_types = [
+            candidate_type
+            for candidate_type in ordered_question_types
+            if candidate_type != QuestionBankItem.QuestionType.NUM
+        ]
+        if not ordered_question_types:
+            ordered_question_types = [QuestionBankItem.QuestionType.MCQ]
     _trace_generation(
         "question_generation_requested",
-        requested_type=QuestionBankItem.display_label_for_question_type(question_type),
+        requested_types=[QuestionBankItem.display_label_for_question_type(candidate_type) for candidate_type in ordered_question_types],
         block=block.title,
         block_id=block.pk,
+        strict_preferred_objectives=strict_preferred_objectives,
+        allow_relaxed_objective_scope_fallback=allow_relaxed_objective_scope_fallback,
     )
-    question_type_objective_counts, question_type_chunk_counts, question_type_objective_chunk_counts = _question_type_distribution_for_block(
-        block,
-        question_type,
-    )
-    for chunk in candidate_chunks:
-        total_chunks_by_block[chunk.block_id] += 1
 
-    ordered_objectives = _ordered_generation_objectives(
+    strict_objectives = _ordered_generation_objectives(
         block,
         objectives_by_block,
         preferred_objective_ids,
         strict_preferred_objectives=strict_preferred_objectives,
     )
-    if question_type in {QuestionBankItem.QuestionType.NUM, QuestionBankItem.QuestionType.WAQ}:
-        ordered_objectives = sorted(
-            ordered_objectives,
-            key=lambda objective: question_type_objective_counts.get(objective.pk, 0),
+    fallback_objectives = (
+        _ordered_generation_objectives(
+            block,
+            objectives_by_block,
+            preferred_objective_ids,
+            strict_preferred_objectives=False,
         )
-    attempted_chunk_ids: set[int] = set()
-    found_numeric_candidate_path = False
-    generation_attempts = 0
+        if allow_relaxed_objective_scope_fallback and strict_preferred_objectives
+        else []
+    )
+    objective_scopes: list[tuple[str, list[LearningObjective], bool]] = [("preferred", strict_objectives, strict_preferred_objectives)]
+    if fallback_objectives:
+        objective_scopes.append(("block", fallback_objectives, False))
 
-    for objective in ordered_objectives:
-        avoid_question_angles = (
-            []
-            if relax_similarity_checks
-            else _recent_question_avoidance_notes(block, question_type, objective=objective)
-        )
-        ranked_chunks = _rank_candidate_chunks_for_objective(
-            candidate_chunks,
-            objective,
-            objective_keywords,
-            question_type=question_type,
-            question_type_chunk_counts=question_type_chunk_counts,
-            question_type_objective_chunk_counts=question_type_objective_chunk_counts,
-        )
-        target_keywords = objective_keywords.get(objective.pk, set())
-        if strict_preferred_objectives and target_keywords:
-            ranked_chunks = [chunk for chunk in ranked_chunks if (_keyword_set(chunk.text) & target_keywords)]
-        if question_type == QuestionBankItem.QuestionType.NUM:
-            ranked_chunks = [
-                chunk
-                for chunk in ranked_chunks
-                if ((not target_keywords) or (_keyword_set(chunk.text) & target_keywords))
-                and supports_local_numeric_mcq(objective.text, chunk.text)
-            ]
-            if ranked_chunks:
-                found_numeric_candidate_path = True
-        if coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM:
-            ranked_chunks = [chunk for chunk in ranked_chunks if chunk.pk in coding_signals] or ranked_chunks
-        for chunk in ranked_chunks:
-            if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS:
-                break
-            attempted_chunk_ids.add(chunk.pk)
-            question_variant_index = question_type_objective_counts.get(objective.pk, 0) + question_type_objective_chunk_counts.get(
-                (objective.pk, chunk.pk),
-                0,
-            )
-            if question_type == QuestionBankItem.QuestionType.NUM:
-                practice, validation, numeric_error = _attempt_numeric_generation_for_chunk(
-                    course=course,
-                    block=block,
-                    chunk=chunk,
-                    objective=objective,
-                    distractor_count=distractor_count,
-                    existing_hashes=existing_hashes,
-                    avoid_question_angles=avoid_question_angles,
-                )
-                if practice is not None and validation is not None:
-                    return practice, validation
-                if numeric_error:
-                    last_generation_error = numeric_error
-                continue
-            try:
-                generation_attempts += 1
-                coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
-                payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
-                    chunk,
-                    objective,
-                    distractor_count,
-                    question_type,
-                    coding_signal=coding_signal,
-                    avoid_question_angles=avoid_question_angles,
-                    question_variant_index=question_variant_index,
-                )
-                practice, validation = _create_question_pair(
-                    course=course,
-                    block=block,
-                    chunk=chunk,
-                    objective=objective,
-                    question_type=effective_question_type,
-                    payload=payload,
-                    existing_hashes=existing_hashes,
-                    expected_coding_language=expected_coding_language,
-                    relax_similarity_checks=relax_similarity_checks,
-                )
-            except QuestionGenerationUnavailableError:
-                raise
-            except (ValueError, OpenAIError) as exc:
-                last_generation_error = str(exc)
-                _trace_generation_rejection(block, question_type, last_generation_error, chunk=chunk, objective=objective)
-                continue
-            if practice is not None and validation is not None:
-                return practice, validation
-        if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS:
-            break
-
-    for chunk in candidate_chunks:
-        if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS:
-            break
-        if chunk.pk in attempted_chunk_ids:
+    attempted_type_errors: dict[str, str] = {}
+    distractor_count = block.question_distractor_count
+    for scope_name, ordered_objectives, scope_is_strict in objective_scopes:
+        if not ordered_objectives:
             continue
-        chunk_index_by_block[chunk.block_id] += 1
-        objective = _select_objective_for_chunk(
-            chunk,
-            objectives_by_block.get(chunk.block_id, []),
-            objective_keywords,
-            chunk_index_by_block[chunk.block_id] - 1,
-            total_chunks_by_block[chunk.block_id],
-        )
-        if strict_preferred_objectives and objective is not None:
-            target_keywords = objective_keywords.get(objective.pk, set())
-            if target_keywords and not (_keyword_set(chunk.text) & target_keywords):
-                continue
-        if question_type == QuestionBankItem.QuestionType.NUM and (
-            objective is None
-            or (
-                objective_keywords.get(objective.pk, set())
-                and not (_keyword_set(chunk.text) & objective_keywords.get(objective.pk, set()))
+        for candidate_type in ordered_question_types:
+            _trace_generation(
+                "question_generation_type_attempt",
+                question_type=candidate_type,
+                block=block.title,
+                block_id=block.pk,
+                scope=scope_name,
+                strict_preferred_objectives=scope_is_strict,
             )
-            or not supports_local_numeric_mcq(objective.text, chunk.text)
-        ):
-            continue
-        if question_type == QuestionBankItem.QuestionType.NUM:
-            found_numeric_candidate_path = True
-        question_variant_index = question_type_objective_counts.get(int(objective.pk) if objective else 0, 0) + question_type_objective_chunk_counts.get(
-            ((objective.pk if objective else None), chunk.pk),
-            0,
-        )
-        if question_type == QuestionBankItem.QuestionType.NUM:
-            practice, validation, numeric_error = _attempt_numeric_generation_for_chunk(
+            practice, validation, attempt_error = _generate_question_pair_for_question_type(
                 course=course,
                 block=block,
-                chunk=chunk,
-                objective=objective,
+                question_type=candidate_type,
+                candidate_chunks=candidate_chunks,
+                objectives_by_block=objectives_by_block,
+                objective_keywords=objective_keywords,
+                ordered_objectives=ordered_objectives,
+                coding_signals=coding_signals,
                 distractor_count=distractor_count,
                 existing_hashes=existing_hashes,
-                avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
-            )
-            if practice is not None and validation is not None:
-                return practice, validation
-            if numeric_error:
-                last_generation_error = numeric_error
-            continue
-        try:
-            generation_attempts += 1
-            coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
-            payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
-                chunk,
-                objective,
-                distractor_count,
-                question_type,
-                coding_signal=coding_signal,
-                avoid_question_angles=_recent_question_avoidance_notes(block, question_type, objective=objective),
-                question_variant_index=question_variant_index,
-            )
-            practice, validation = _create_question_pair(
-                course=course,
-                block=block,
-                chunk=chunk,
-                objective=objective,
-                question_type=effective_question_type,
-                payload=payload,
-                existing_hashes=existing_hashes,
-                expected_coding_language=expected_coding_language,
+                strict_preferred_objectives=scope_is_strict,
                 relax_similarity_checks=relax_similarity_checks,
             )
-        except QuestionGenerationUnavailableError:
-            raise
-        except (ValueError, OpenAIError) as exc:
-            last_generation_error = str(exc)
-            _trace_generation_rejection(block, question_type, last_generation_error, chunk=chunk, objective=objective)
-            continue
-        if practice is not None and validation is not None:
-            return practice, validation
-
-    if question_type == QuestionBankItem.QuestionType.NUM and not found_numeric_candidate_path and not last_generation_error:
-        last_generation_error = "This block does not contain a suitable calculation-style path for a numerical MCQ."
-    if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS and not last_generation_error:
-        last_generation_error = "Generation stopped after too many rejected attempts."
+            if practice is not None and validation is not None:
+                _trace_generation(
+                    "question_generation_succeeded",
+                    question_type=practice.question_type,
+                    block=block.title,
+                    block_id=block.pk,
+                    scope=scope_name,
+                )
+                return practice, validation
+            if attempt_error:
+                attempted_type_errors.setdefault(candidate_type, attempt_error)
+                _trace_generation(
+                    "question_generation_type_rejected",
+                    question_type=candidate_type,
+                    block=block.title,
+                    block_id=block.pk,
+                    scope=scope_name,
+                    error=attempt_error,
+                )
+    last_generation_error = _format_attempted_type_errors(attempted_type_errors)
     if raise_generation_errors and last_generation_error:
-        detail = f" {last_generation_error}" if last_generation_error else ""
-        message = (
-            "Could not generate a numerical MCQ for this block."
-            if question_type == QuestionBankItem.QuestionType.NUM
-            else "Could not generate a high-quality question for this block."
-        )
-        raise QuestionGenerationError(f"{message}{detail}")
+        if explicit_question_type == QuestionBankItem.QuestionType.NUM:
+            message = "Could not generate a numerical MCQ for this block."
+        else:
+            message = "Could not generate a high-quality question for this block."
+        raise QuestionGenerationError(f"{message} {last_generation_error}".strip())
     return None, None
 
 
@@ -2833,7 +2941,7 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
         if (
             question_type == QuestionBankItem.QuestionType.NUM
             and objective is not None
-            and not supports_local_numeric_mcq(objective.text, chunk.text)
+            and not _objective_supports_local_numeric_mcq(objective, chunk.text)
         ):
             question_type = _preferred_standard_generated_question_type(chunk.block)
         coding_signal = _coding_signal_for_chunk(chunk) if (_coding_question_generation_due(chunk.block) and question_type != QuestionBankItem.QuestionType.NUM) else {"language": "", "snippet": ""}

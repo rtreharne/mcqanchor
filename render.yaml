@@ -59,6 +59,8 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-4.1-mini
+      - key: OPENAI_NUMERIC_MODEL
+        value: gpt-4.1
       - key: OPENAI_EMBEDDING_MODEL
         value: text-embedding-3-small
       - key: EMAIL_BACKEND

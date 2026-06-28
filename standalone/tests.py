@@ -1,6 +1,7 @@
 from datetime import timedelta
 import io
 import json
+import math
 import re
 import tempfile
 from types import SimpleNamespace
@@ -63,10 +64,15 @@ from standalone.services.question_builder import (
 )
 from standalone.services.numeric_questions import (
     NumericQuestionValidationError,
+    _build_local_distractors,
     _evaluate_expression,
     _expression_to_tex,
     _normalize_text as normalize_numeric_text,
+    _validate_symbol_definitions,
     _validate_numeric_candidate,
+    format_numeric_answer_feedback,
+    format_numeric_feedback_explanation,
+    objective_has_numeric_intent,
     normalize_numeric_answer_text,
 )
 from standalone.services.projects import ensure_project_assignment
@@ -390,6 +396,189 @@ class StandaloneFlowTests(TestCase):
 
         self.assertEqual(normalized, "A_resultant = A * sqrt(2 + 2 cos δ)")
 
+    def test_format_numeric_feedback_explanation_uses_coulomb_law_layout(self):
+        formatted = format_numeric_feedback_explanation(
+            stem="A proton with charge 1e and an alpha particle with charge 2e are separated by a distance of 3 × 10⁻¹⁰ meters. Calculate the magnitude of the electrostatic force between them in newtons.",
+            explanation_text="Electrostatic force follows Coulomb's law.",
+            numeric_metadata={
+                "inputs": {
+                    "proton_charge": {"value": 1.0, "unit": "e"},
+                    "alpha_charge": {"value": 2.0, "unit": "e"},
+                    "distance": {"value": 3e-10, "unit": "m"},
+                },
+                "output_snapshot": {
+                    "answer_value": 5.11e-9,
+                    "answer_unit": "N",
+                    "correct_answer": "5.11 × 10⁻⁹ N",
+                },
+            },
+        )
+
+        self.assertIn("Using Coulomb's law:", formatted)
+        self.assertIn("Here, F is the electrostatic force", formatted)
+        self.assertIn("q₁ is the proton charge", formatted)
+        self.assertIn("q₂ is the alpha-particle charge", formatted)
+        self.assertIn("r is the separation distance", formatted)
+        self.assertIn("k is Coulomb's constant", formatted)
+        self.assertIn(r"\[F = k \frac{q_1 q_2}{r^2}\]", formatted)
+        self.assertIn(r"F \approx 5.11 \times 10^{-9}\,\mathrm{N}", formatted)
+
+    def test_format_numeric_feedback_explanation_has_generic_symbolic_fallback(self):
+        formatted = format_numeric_feedback_explanation(
+            stem="A car travels a distance of 150 meters in 12 seconds. Calculate its average speed.",
+            explanation_text="Average speed is the distance travelled divided by the time taken.",
+            numeric_metadata={
+                "inputs": {
+                    "distance": {"value": 150.0, "unit": "m"},
+                    "time": {"value": 12.0, "unit": "s"},
+                },
+                "validation": {
+                    "answer_expression": "distance / time",
+                },
+                "output_snapshot": {
+                    "answer_value": 12.5,
+                    "answer_unit": "m/s",
+                    "correct_answer": "12.5 m/s",
+                },
+            },
+        )
+
+        self.assertIn("Here, v is the average speed", formatted)
+        self.assertIn("d is the distance", formatted)
+        self.assertIn("t is the elapsed time", formatted)
+        self.assertIn(r"\[v = \frac{d}{t}\]", formatted)
+        self.assertIn(r"\[v = \frac{150}{12}\]", formatted)
+        self.assertIn(r"v = 12.5\,\mathrm{m/s}", formatted)
+
+    def test_format_numeric_feedback_explanation_uses_decay_conventions(self):
+        formatted = format_numeric_feedback_explanation(
+            stem="A sample of ancient bone is found to have an activity of 3.5 Bq per gram of carbon. The activity of freshly living material is 15.3 Bq per gram of carbon. Given that the half-life of carbon-14 is 5700 years, estimate the age of the bone sample in years.",
+            explanation_text="The age is estimated by comparing the current activity of carbon-14 in the sample to that of living material, using the exponential decay law and the known half-life of carbon-14.",
+            numeric_metadata={
+                "inputs": {
+                    "measured_activity": {"value": 3.5, "unit": "Bq"},
+                    "fresh_activity": {"value": 15.3, "unit": "Bq"},
+                    "half_life": {"value": 5700, "unit": "years"},
+                },
+                "validation": {
+                    "answer_expression": "half_life * ln(fresh_activity / measured_activity) / ln(2)",
+                },
+                "output_snapshot": {
+                    "answer_value": 12130.197506761808,
+                    "answer_unit": "years",
+                    "correct_answer": "1.2 × 10⁴ years",
+                },
+            },
+        )
+
+        self.assertIn("Here, t is the age of the sample", formatted)
+        self.assertIn("A is the activity of the sample", formatted)
+        self.assertIn("A₀ is the activity of living material", formatted)
+        self.assertIn("t₁/₂ is the half-life", formatted)
+        self.assertIn(r"\[t = \frac{t_{1/2} \times \ln\left(\frac{A_0}{A}\right)}{\ln\left(2\right)}\]", formatted)
+        self.assertIn(r"\[t = \frac{5700 \times \ln\left(\frac{15.3}{3.5}\right)}{\ln\left(2\right)}\]", formatted)
+        self.assertIn(r"t = 1.2 \times 10^{4}\,\mathrm{years}", formatted)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_uses_safe_decay_symbols(self):
+        feedback = format_numeric_answer_feedback(
+            stem="A radioactive sample starts with 5 × 10^4 undecayed nuclei. If the decay constant is 0.002 s^-1, how many undecayed nuclei remain after 600 s?",
+            explanation_text="Use the exponential decay model for the remaining undecayed nuclei.",
+            numeric_metadata={
+                "inputs": {
+                    "initial_nuclei": {"value": 5e4, "unit": "nuclei"},
+                    "decay_constant": {"value": 0.002, "unit": "s^-1"},
+                    "time": {"value": 600, "unit": "s"},
+                },
+                "validation": {
+                    "answer_expression": "initial_nuclei * exp(-decay_constant * time)",
+                },
+                "output_snapshot": {
+                    "answer_value": 5e4 * math.exp(-0.002 * 600),
+                    "answer_unit": "",
+                    "correct_answer": "1.51 × 10⁴",
+                },
+            },
+            selected_answer_text="1.51 × 10⁴",
+            is_correct=True,
+        )
+
+        self.assertIn("Correct", feedback)
+        self.assertIn("Correct formula:", feedback)
+        self.assertIn(r"\[N = N_0", feedback)
+        self.assertIn(r"\exp", feedback)
+        self.assertIn("Symbols: Here, N is the number of undecayed nuclei remaining", feedback)
+        self.assertIn("N₀ is the initial number of undecayed nuclei", feedback)
+        self.assertIn("λ is the decay constant", feedback)
+        self.assertIn("t is the elapsed time", feedback)
+        self.assertIn(r"N \approx 1.51 \times 10^{4}", feedback)
+        self.assertNotIn("Verdict:", feedback)
+        self.assertNotIn("Targeted feedback:", feedback)
+        self.assertNotIn("P is", feedback)
+        self.assertNotIn("power", feedback.lower())
+
+    def test_validate_symbol_definitions_rejects_reserved_symbol_conflicts(self):
+        self.assertTrue(
+            _validate_symbol_definitions(
+                "Here, P is the number of undecayed nuclei remaining.",
+                {"P": "the power"},
+            )
+        )
+        self.assertTrue(
+            _validate_symbol_definitions(
+                "Here, V is the current in the circuit.",
+                {"V": "the potential difference"},
+            )
+        )
+        self.assertTrue(
+            _validate_symbol_definitions(
+                "Here, I is the intensity in the circuit.",
+                {"I": "the current"},
+            )
+        )
+        self.assertTrue(
+            _validate_symbol_definitions(
+                "Here, m is the distance in metres.",
+                {"m": "the mass"},
+            )
+        )
+        self.assertTrue(
+            _validate_symbol_definitions(
+                "Here, λ is the decay constant.",
+                {"lambda": "the wavelength"},
+            )
+        )
+
+    @override_settings(OPENAI_API_KEY="test-key", OPENAI_MODEL="gpt-4.1")
+    def test_numeric_answer_feedback_remains_deterministic_with_openai_key_present(self):
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            feedback = format_numeric_answer_feedback(
+                stem="A radioactive sample starts with 5 × 10^4 undecayed nuclei. If the decay constant is 0.002 s^-1, how many undecayed nuclei remain after 600 s?",
+                explanation_text="Use the exponential decay model for the remaining undecayed nuclei.",
+                numeric_metadata={
+                    "inputs": {
+                        "initial_nuclei": {"value": 5e4, "unit": "nuclei"},
+                        "decay_constant": {"value": 0.002, "unit": "s^-1"},
+                        "time": {"value": 600, "unit": "s"},
+                    },
+                    "validation": {
+                        "answer_expression": "initial_nuclei * exp(-decay_constant * time)",
+                    },
+                    "output_snapshot": {
+                        "answer_value": 5e4 * math.exp(-0.002 * 600),
+                        "answer_unit": "",
+                        "correct_answer": "1.51 × 10⁴",
+                    },
+                },
+                selected_answer_text="1.51 × 10⁴",
+                is_correct=True,
+            )
+
+        mock_client.assert_not_called()
+        self.assertIn(r"\[N = N_0", feedback)
+        self.assertIn("N₀ is the initial number of undecayed nuclei", feedback)
+        self.assertNotIn("P is power", feedback)
+
     def test_normalize_numeric_answer_text_uses_standard_form_for_scientific_notation(self):
         formatted = normalize_numeric_answer_text(5e-8, "m", 2)
 
@@ -399,6 +588,29 @@ class StandaloneFlowTests(TestCase):
         formatted = normalize_numeric_answer_text(3000, "s", 3)
 
         self.assertEqual(formatted, "3000 s")
+
+    def test_local_numeric_distractors_mix_linear_and_magnitude_spread(self):
+        distractors, distractor_values = _build_local_distractors(
+            5e-7,
+            "m",
+            2,
+            3,
+            {"slit_separation": 0.00025, "screen_distance": 2.0, "fringe_spacing": 0.004},
+            display_style="scientific",
+        )
+
+        self.assertEqual(len(distractors), 3)
+        self.assertEqual(len(set(distractors)), 3)
+        self.assertEqual(len(set(distractor_values)), 3)
+        ratios = [abs(value / 5e-7) for value in distractor_values]
+        self.assertTrue(any(0.5 < ratio < 2.0 for ratio in ratios))
+        self.assertTrue(any(ratio >= 2.5 or ratio <= 0.2 for ratio in ratios))
+        mantissas = [
+            re.match(r"([-+]?\d+(?:\.\d+)?)\s*×\s*10", option).group(1)
+            for option in distractors
+            if "× 10" in option
+        ]
+        self.assertGreaterEqual(len(set(mantissas)), 2)
 
     def test_normalize_numeric_explanation_text_cleans_inline_formula_prose(self):
         explanation = normalize_numeric_explanation_text(
@@ -3076,6 +3288,35 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(validation.block_id, future_block.pk)
         self.assertEqual(validation.linked_question_id, practice.pk)
 
+    def test_question_bank_builder_records_per_type_generation_errors(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, asset, objective, chunk = self.create_preview_content_block(course, title="Signals", order=1)
+        objective.text = "Explain what stellar parallax shows about relative motion"
+        objective.save(update_fields=["text", "updated_at"])
+        chunk.text = "A star has a parallax angle of 0.1 arcseconds and lies 10 parsecs away from Earth."
+        chunk.save(update_fields=["text", "updated_at"])
+        asset.extracted_text = chunk.text
+        asset.save(update_fields=["extracted_text", "updated_at"])
+
+        def fake_payload_for_generation_attempt(*args, **kwargs):
+            question_type = args[3]
+            if question_type == QuestionBankItem.QuestionType.MCQ:
+                raise ValueError("bad mcq")
+            raise AssertionError(f"Unexpected question type {question_type}")
+
+        with patch("standalone.services.questions._payload_for_generation_attempt", side_effect=fake_payload_for_generation_attempt):
+            result = run_course_question_bank_builder_pass(course.pk)
+
+        self.assertFalse(result.generated)
+        self.assertEqual(result.skipped_reason, "generation_failed")
+        course.config.refresh_from_db()
+        self.assertIn("num: objective not numeric-eligible", course.config.question_bank_builder_last_error)
+        self.assertIn("mcq: bad mcq", course.config.question_bank_builder_last_error)
+
     def test_question_bank_builder_skips_generation_while_course_import_work_is_active(self):
         course = self.create_course()
         CourseImport.objects.create(
@@ -4119,6 +4360,45 @@ print(result)""",
         self.assertEqual(validation.question_type, QuestionBankItem.QuestionType.WAQ)
         self.assertEqual(validation.written_answer_keywords, practice.written_answer_keywords)
 
+    def test_objective_numeric_intent_requires_calculation_style_objective(self):
+        self.assertFalse(
+            objective_has_numeric_intent(
+                "Explain the historical discovery of radioactivity and describe characteristics of alpha, beta, and gamma radiation"
+            )
+        )
+        self.assertTrue(
+            objective_has_numeric_intent(
+                "Determine distances to stars using stellar parallax"
+            )
+        )
+
+    def test_generate_question_pair_falls_back_from_numeric_for_conceptual_strict_objective(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 20
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, asset, objective, chunk = self.create_preview_content_block(course, title="Parallax", order=1)
+        objective.text = "Explain what stellar parallax shows about relative motion"
+        objective.save(update_fields=["text", "updated_at"])
+        chunk.text = "A star has a parallax angle of 0.1 arcseconds and lies 10 parsecs away from Earth."
+        chunk.save(update_fields=["text", "updated_at"])
+        asset.extracted_text = chunk.text
+        asset.save(update_fields=["extracted_text", "updated_at"])
+
+        practice, validation = generate_question_pair_for_block(
+            block,
+            preferred_objective_ids=[objective.pk],
+            strict_preferred_objectives=True,
+            allow_type_fallback=True,
+            raise_generation_errors=True,
+        )
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(practice.question_type, QuestionBankItem.QuestionType.MAQ)
+        self.assertEqual(validation.question_type, QuestionBankItem.QuestionType.MAQ)
+
     def test_numeric_expression_rejects_executable_python(self):
         with self.assertRaises(NumericQuestionValidationError):
             _evaluate_expression("__import__('os').system('id')", {"charge": 1.0})
@@ -4131,6 +4411,65 @@ print(result)""",
 
         self.assertAlmostEqual(value, 0.00172)
         self.assertEqual(used_variables, {"force", "charge"})
+
+    def test_numeric_validation_omits_dimensionless_answer_unit_text(self):
+        output, _validation = _validate_numeric_candidate(
+            {
+                "question_type": "num",
+                "stem_template": "A force has relative strength {force_ratio} and gravity has relative strength {gravity_ratio}. Calculate the ratio.",
+                "variables": [
+                    {"name": "force_ratio", "value": 1e36, "unit": ""},
+                    {"name": "gravity_ratio", "value": 1e-40, "unit": ""},
+                ],
+                "calculation_expression": "force_ratio / gravity_ratio",
+                "answer_unit": "dimensionless",
+                "significant_figures": 2,
+                "explanation": "A ratio of two relative strengths has no unit.",
+                "difficulty": "core",
+                "further_study_questions": [
+                    "How do ratios compare two quantities?",
+                    "Why can some derived quantities be unitless?",
+                    "What changes if the comparison is inverted?",
+                ],
+            },
+            3,
+            "Calculate a ratio from relative strengths",
+            "Relative strengths can be compared by dividing one value by the other.",
+        )
+
+        self.assertEqual(output["answer_unit"], "")
+        self.assertNotIn("dimensionless", output["correct_answer"].lower())
+        self.assertNotIn("dimensionless", " ".join(output["distractors"]).lower())
+        self.assertNotIn("dimensionless", output["worked_solution_tex"].lower())
+
+    def test_numeric_validation_rejects_bad_alpha_closest_approach_scale(self):
+        with self.assertRaisesMessage(
+            NumericQuestionValidationError,
+            "Closest-approach distance is not physically consistent with Coulomb energy conversion.",
+        ):
+            _validate_numeric_candidate(
+                {
+                    "question_type": "num",
+                    "stem_template": "Alpha particles with kinetic energy {kinetic_energy} MeV are directed at a gold nucleus with charge {nucleus_charge}e. Calculate the minimum distance of closest approach between the alpha particles and the nucleus in meters.",
+                    "variables": [
+                        {"name": "kinetic_energy", "value": 5.0, "unit": "MeV"},
+                        {"name": "nucleus_charge", "value": 79, "unit": "e"},
+                    ],
+                    "calculation_expression": "(2 * 1.602e-13 * kinetic_energy) / (8.988e9 * 2 * nucleus_charge * 1.602e-19)",
+                    "answer_unit": "m",
+                    "significant_figures": 3,
+                    "explanation": "Equate kinetic energy to electrostatic potential energy at closest approach.",
+                    "difficulty": "core",
+                    "further_study_questions": [
+                        "How does increasing kinetic energy change the closest approach distance?",
+                        "How does nuclear charge affect Coulomb repulsion?",
+                        "Why does this calculation provide an upper estimate for nuclear radius?",
+                    ],
+                },
+                3,
+                "Apply Coulomb's law and energy conservation principles to calculate nuclear radii and distances of closest approach of alpha particles",
+                "Alpha particles of kinetic energy 8.8 MeV are fired at lead atoms. The charge on the nucleus of lead is 82e. Calculate the minimum distance the alpha particles approach to the nucleus of lead.",
+            )
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_generate_question_pair_creates_numeric_when_numeric_gap_is_largest(self):
@@ -4180,7 +4519,7 @@ print(result)""",
         self.assertTrue(validation.numeric_metadata["validation"]["expression_evaluated_locally"])
         self.assertTrue(validation.is_numerical)
 
-    @override_settings(OPENAI_API_KEY="test-key")
+    @override_settings(OPENAI_API_KEY="test-key", OPENAI_NUMERIC_MODEL="gpt-4.1")
     def test_numeric_openai_request_uses_structured_json_schema(self):
         course = self.create_course()
         course.config.numeric_ratio_percent = 100
@@ -4225,6 +4564,7 @@ print(result)""",
 
         self.assertIsNotNone(practice)
         self.assertIsNotNone(validation)
+        self.assertEqual(captured_kwargs["model"], "gpt-4.1")
         self.assertEqual(captured_kwargs["text"]["format"]["type"], "json_schema")
         self.assertTrue(captured_kwargs["text"]["format"]["strict"])
         self.assertNotIn("verbosity", captured_kwargs["text"])
@@ -5436,7 +5776,11 @@ print(result)""",
         )
 
         self.client.force_login(self.teacher)
-        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.NUM}),
+            content_type="application/json",
+        )
         answer_response = self.client.post(
             reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
             data=json.dumps({"question_id": question.pk, "answer": "A"}),
@@ -6531,6 +6875,64 @@ print(result)""",
         self.assertEqual(PracticeAttempt.objects.count(), 0)
         self.assertEqual(EnrollmentQuestionState.objects.count(), 0)
         self.assertEqual(PracticeMessage.objects.count(), 0)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_student_preview_numeric_answer_uses_structured_feedback_sections(self):
+        course = self.create_course()
+        block, _, objective, _ = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="A radioactive sample starts with 5 × 10^4 undecayed nuclei. If the decay constant is 0.002 s^-1, how many undecayed nuclei remain after 600 s?",
+            question_type=QuestionBankItem.QuestionType.NUM,
+            correct_answer="1.51 × 10⁴",
+            distractors=["1.20 × 10⁴", "2.50 × 10⁴", "5.00 × 10⁴"],
+            explanation="Use the exponential decay model for the remaining undecayed nuclei.",
+            question_hash="preview-numeric-feedback-structured",
+            is_numerical=True,
+            numeric_metadata={
+                "inputs": {
+                    "initial_nuclei": {"value": 5e4, "unit": "nuclei"},
+                    "decay_constant": {"value": 0.002, "unit": "s^-1"},
+                    "time": {"value": 600, "unit": "s"},
+                },
+                "validation": {
+                    "answer_expression": "initial_nuclei * exp(-decay_constant * time)",
+                },
+                "output_snapshot": {
+                    "answer_value": 5e4 * math.exp(-0.002 * 600),
+                    "answer_unit": "",
+                    "correct_answer": "1.51 × 10⁴",
+                },
+            },
+        )
+        self.client.force_login(self.teacher)
+
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.NUM}),
+            content_type="application/json",
+        )
+        answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data='{"question_id": %s, "answer": "1.51 × 10⁴"}' % question.pk,
+            content_type="application/json",
+        )
+
+        self.assertEqual(answer_response.status_code, 200)
+        block_payload = next(item for item in answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        feedback_messages = [message for message in block_payload["transcript"] if message["kind"] == "feedback"]
+        self.assertTrue(feedback_messages)
+        self.assertIn("Correct", feedback_messages[-1]["text"])
+        self.assertIn("Correct formula:", feedback_messages[-1]["text"])
+        self.assertIn("Final answer:", feedback_messages[-1]["text"])
+        self.assertNotIn("Correct. Verdict:", feedback_messages[-1]["text"])
+        self.assertNotIn("Verdict:", feedback_messages[-1]["text"])
+        self.assertNotIn("Targeted feedback:", feedback_messages[-1]["text"])
 
     def test_student_preview_answer_adds_progress_message_when_coverage_and_engagement_target_complete(self):
         course = self.create_course()
