@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from django.conf import settings
 from openai import OpenAI, OpenAIError
 
+from standalone.services.symbol_heuristics import (
+    deterministic_symbol_heuristics_for_objective,
+    normalize_objective_symbol_heuristics,
+    symbol_plain_to_tex,
+)
+
 
 NUMERIC_SIGNAL_TERMS = (
     "calculate",
@@ -604,7 +610,10 @@ def _unit_tex(unit: str) -> str:
     normalized_unit = _normalize_text(unit)
     if not normalized_unit:
         return ""
-    return r"\,\mathrm{" + normalized_unit.replace(" ", r"\ ") + "}"
+    unit_text = normalized_unit.replace(" ", r"\ ")
+    unit_text = re.sub(r"\s*[·*]\s*", r"}\\cdot\\mathrm{", unit_text)
+    unit_text = re.sub(r"(?<=[A-Za-zΩµμ])\.(?=[A-Za-zΩµμ])", r"}\\cdot\\mathrm{", unit_text)
+    return r"\,\mathrm{" + unit_text + "}"
 
 
 def normalize_numeric_answer_text(
@@ -630,6 +639,28 @@ def _infer_significant_figures_from_answer_text(answer_text: str, default: int =
     mantissa = decimal_match.group(1)
     digits = [char for char in mantissa if char.isdigit()]
     return max(2, min(6, len(digits))) if digits else default
+
+
+def _infer_stem_value_significant_figures(value: float) -> int:
+    rendered = format(_ensure_finite_number(value, "Stem numeric value"), ".10g").lower()
+    if "e" in rendered:
+        mantissa = rendered.split("e", 1)[0]
+        digits = [char for char in mantissa if char.isdigit()]
+        return max(1, min(6, len(digits))) if digits else 3
+    if "." in rendered:
+        whole, fractional = rendered.split(".", 1)
+        digits = [char for char in f"{whole}{fractional}" if char.isdigit()]
+        leading_zero_count = 0
+        for digit in digits:
+            if digit != "0":
+                break
+            leading_zero_count += 1
+        significant = len(digits[leading_zero_count:])
+        return max(1, min(6, significant)) if significant else 3
+    stripped = rendered.lstrip("-").lstrip("+")
+    stripped = stripped.lstrip("0") or "0"
+    significant = len(stripped.rstrip("0")) if stripped != "0" else 1
+    return max(1, min(6, significant))
 
 
 def _format_value_tex(value: float, significant_figures: int) -> str:
@@ -668,6 +699,24 @@ def _detect_energy_variable(inputs: dict[str, dict]) -> tuple[str, dict] | tuple
     for name, payload in inputs.items():
         lowered = name.lower()
         if "energy" in lowered or "kinetic" in lowered:
+            return name, payload
+    return None, None
+
+
+def _detect_frequency_variable(inputs: dict[str, dict]) -> tuple[str, dict] | tuple[None, None]:
+    for name, payload in inputs.items():
+        lowered = name.lower()
+        unit = _normalize_unit_key(payload.get("unit", ""))
+        if "frequency" in lowered or lowered == "f" or unit in {"hz", "khz", "mhz", "ghz"}:
+            return name, payload
+    return None, None
+
+
+def _detect_speed_variable(inputs: dict[str, dict]) -> tuple[str, dict] | tuple[None, None]:
+    for name, payload in inputs.items():
+        lowered = name.lower()
+        unit = _normalize_unit_key(payload.get("unit", ""))
+        if "speed" in lowered or "velocity" in lowered or unit in {"m/s", "ms^-1", "m/s^1"}:
             return name, payload
     return None, None
 
@@ -797,7 +846,15 @@ def _closest_approach_feedback_tex(stem: str, inputs: dict[str, dict], answer_va
     )
 
 
-def _speed_feedback_tex(stem: str, inputs: dict[str, dict], answer_value: float, answer_unit: str, significant_figures: int) -> str:
+def _speed_feedback_tex(
+    stem: str,
+    inputs: dict[str, dict],
+    answer_value: float,
+    answer_unit: str,
+    significant_figures: int,
+    objective_text: str = "",
+    chunk_text: str = "",
+) -> str:
     combined = _normalize_text(stem).lower()
     if "speed" not in combined and "velocity" not in combined:
         return ""
@@ -815,17 +872,28 @@ def _speed_feedback_tex(stem: str, inputs: dict[str, dict], answer_value: float,
             time_payload = payload
     if distance_payload is None or time_payload is None:
         return ""
+    variable_symbols = _infer_variable_symbols(
+        {distance_name: distance_payload, time_name: time_payload},
+        stem,
+        objective_text,
+        chunk_text,
+    )
+    distance_symbol = variable_symbols.get(distance_name, "d")
+    time_symbol = variable_symbols.get(time_name, "t")
     distance_value = float(distance_payload.get("value"))
     time_value = float(time_payload.get("value"))
-    symbolic = r"v = \frac{d}{t}"
-    substituted = rf"v = \frac{{{_format_value_tex(distance_value, 3)}}}{{{_format_value_tex(time_value, 3)}}}"
-    final = r"v = " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
+    answer_symbol = _answer_symbol_from_stem(stem, answer_unit, objective_text, chunk_text)
+    symbolic = rf"{answer_symbol} = \frac{{{distance_symbol}}}{{{time_symbol}}}"
+    substituted = rf"{answer_symbol} = \frac{{{_format_value_tex(distance_value, 3)}}}{{{_format_value_tex(time_value, 3)}}}"
+    final = answer_symbol + r" = " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
     definitions = _symbol_definitions_text(
-        answer_symbol="v",
+        answer_symbol=answer_symbol,
         stem=stem,
         answer_unit=answer_unit,
-        variable_symbols={distance_name: "d", time_name: "t"},
+        variable_symbols={distance_name: distance_symbol, time_name: time_symbol},
         inputs=inputs,
+        objective_text=objective_text,
+        chunk_text=chunk_text,
         used_variable_names=[distance_name, time_name],
     )
     return (
@@ -839,23 +907,161 @@ def _speed_feedback_tex(stem: str, inputs: dict[str, dict], answer_value: float,
     )
 
 
-def _answer_symbol_from_stem(stem: str, answer_unit: str) -> str:
-    lowered = _normalize_text(stem).lower()
+def _centripetal_acceleration_feedback_tex(
+    stem: str,
+    inputs: dict[str, dict],
+    answer_value: float,
+    answer_unit: str,
+    significant_figures: int,
+) -> str:
+    combined = _normalize_text(stem).lower()
+    normalized_unit = _normalize_unit_key(answer_unit)
+    if (
+        "centripetal" not in combined
+        and "circular" not in combined
+        and normalized_unit not in {"m/s^2", "ms^-2", "m s-2", "m/s2"}
+    ):
+        return ""
+    if "acceleration" not in combined and normalized_unit not in {"m/s^2", "ms^-2", "m s-2", "m/s2"}:
+        return ""
+    speed_name, speed_payload = _detect_speed_variable(inputs)
+    radius_name, radius_payload = _detect_distance_variable(inputs)
+    if speed_payload is None or radius_payload is None:
+        return ""
+    radius_lowered = radius_name.lower() if radius_name else ""
+    radius_unit = _normalize_unit_key(radius_payload.get("unit", ""))
+    if "radius" not in radius_lowered and radius_lowered not in {"r"} and radius_unit not in {"m", "cm", "mm", "km"}:
+        return ""
+    speed_value = float(speed_payload.get("value"))
+    radius_value = float(radius_payload.get("value"))
+    squared_speed_value = speed_value ** 2
+    exact_answer_tex = _format_number_tex(answer_value, 10, display_style=_numeric_display_style(answer_value))
+    symbolic = r"a = \frac{v^2}{r}"
+    substituted = (
+        r"a = \frac{"
+        + _format_value_tex(speed_value, 3)
+        + r"^2}{"
+        + _format_value_tex(radius_value, 3)
+        + r"} = \frac{"
+        + _format_number_tex(squared_speed_value, 10, display_style=_numeric_display_style(squared_speed_value))
+        + r"}{"
+        + _format_value_tex(radius_value, 3)
+        + r"} = "
+        + exact_answer_tex
+    )
+    final = r"a \approx " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
+    return rf"\[{symbolic}\]" + "\n\n" + rf"\[{substituted}\]" + "\n\n" + rf"\[{final}\]"
+
+
+def _photon_energy_feedback_tex(stem: str, inputs: dict[str, dict], answer_value: float, answer_unit: str, significant_figures: int) -> str:
+    combined = _normalize_text(stem).lower()
+    if "photon" not in combined or "energy" not in combined:
+        return ""
+    frequency_name, frequency_payload = _detect_frequency_variable(inputs)
+    if frequency_payload is None:
+        return ""
+    frequency_value = float(frequency_payload.get("value"))
+    symbolic = r"E = h f"
+    substituted = (
+        r"E = "
+        + _format_value_tex(6.626e-34, 4)
+        + r" \times "
+        + _format_value_tex(frequency_value, 3)
+    )
+    final = r"E \approx " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
+    definitions = _symbol_definitions_text(
+        answer_symbol="E",
+        stem=stem,
+        answer_unit=answer_unit,
+        variable_symbols={frequency_name: "f"},
+        inputs=inputs,
+        used_variable_names=[frequency_name],
+        extra_definitions=[("h", "Planck's constant")],
+    )
+    return (
+        "Using the photon-energy relationship:\n\n"
+        + (definitions + "\n\n" if definitions else "")
+        + rf"\[{symbolic}\]"
+        + "\n\n"
+        + rf"\[{substituted}\]"
+        + "\n\n"
+        + rf"\[{final}\]"
+    )
+
+
+def _feedback_symbol_context(stem: str, objective_text: str = "", chunk_text: str = "") -> str:
+    return _normalize_text(" ".join(part for part in (stem, objective_text, chunk_text) if part)).lower()
+
+
+def _is_motion_context(context_text: str) -> bool:
+    return any(
+        term in context_text
+        for term in (
+            "motion",
+            "kinematics",
+            "velocity",
+            "speed",
+            "acceleration",
+            "displacement",
+            "suvat",
+            "distance travelled",
+        )
+    )
+
+
+def _prefers_displacement_symbol(context_text: str) -> bool:
+    return any(
+        term in context_text
+        for term in (
+            "displacement",
+            "suvat",
+            "initial velocity",
+            "final velocity",
+            "uniform acceleration",
+            "constant acceleration",
+        )
+    )
+
+
+def _answer_symbol_from_stem(stem: str, answer_unit: str, objective_text: str = "", chunk_text: str = "") -> str:
+    lowered = _feedback_symbol_context(stem, objective_text, chunk_text)
+    targeted_patterns = (
+        (r"\b(?:what is|calculate|determine|estimate|find)\b[^.?!]{0,120}\bplanck'?s constant\b", "h"),
+        (r"\b(?:what is|calculate|determine|estimate|find)\b[^.?!]{0,80}\benergy\b", "E"),
+        (r"\b(?:what is|calculate|determine|estimate|find)\b[^.?!]{0,80}\bfrequency\b", "f"),
+        (r"\b(?:what is|calculate|determine|estimate|find)\b[^.?!]{0,80}\bwavelength\b", r"\lambda"),
+        (r"\b(?:what is|calculate|determine|estimate|find)\b[^.?!]{0,80}\bacceleration\b", "a"),
+        (r"\b(?:what is|calculate|determine|estimate|find)\b[^.?!]{0,80}\bdisplacement\b", "s"),
+        (r"\b(?:what is|calculate|determine|estimate|find)\b[^.?!]{0,80}\bvelocity\b", "v"),
+        (r"\b(?:what is|calculate|determine|estimate|find)\b[^.?!]{0,80}\bspeed\b", "v"),
+    )
+    for pattern, symbol in targeted_patterns:
+        if re.search(pattern, lowered):
+            return symbol
     patterns = (
+        (r"\bplanck'?s constant\b", "h"),
         (r"\b(?:undecayed|remaining|remnant)\s+nuclei\b|\bnumber of undecayed nuclei\b", "N"),
         (r"\bage\b", "t"),
         (r"\bforce\b", "F"),
+        (r"\bphase difference\b|\bphase angle\b", r"\delta"),
+        (r"\bangle\b|\btheta\b", r"\theta"),
+        (r"\bcentripetal acceleration\b|\bacceleration\b", "a"),
+        (r"\bdisplacement\b|\bdistance travelled\b", "s"),
+        (r"\bwavelength\b", r"\lambda"),
+        (r"\bamplitude\b", "A"),
         (r"\bspeed\b|\bvelocity\b", "v"),
-        (r"\bacceleration\b", "a"),
+        (r"\bgravitational field strength\b", "g"),
+        (r"\bmomentum\b", "p"),
+        (r"\bperiod\b", "T"),
+        (r"\btemperature\b", "T"),
         (r"\bdistance\b|\bseparation\b|\blength\b", "d"),
         (r"\bradius\b|\bclosest approach\b", "r"),
-        (r"\btime\b|\bperiod\b", "t"),
+        (r"\btime\b", "t"),
         (r"\benergy\b", "E"),
+        (r"\bfrequency\b", "f"),
         (r"\bpower\b", "P"),
         (r"\bpressure\b", "p"),
         (r"\bdensity\b", r"\rho"),
-        (r"\bfrequency\b", "f"),
-        (r"\bwavelength\b", r"\lambda"),
         (r"\bcharge\b", "q"),
         (r"\bcurrent\b", "I"),
         (r"\bvoltage\b|\bpotential difference\b", "V"),
@@ -874,6 +1080,10 @@ def _answer_symbol_from_stem(stem: str, answer_unit: str) -> str:
     normalized_unit = _normalize_unit_key(answer_unit)
     if normalized_unit == "n":
         return "F"
+    if normalized_unit in {"j·s", "j.s", "js"} and "planck" in lowered:
+        return "h"
+    if normalized_unit in {"m/s^2", "ms^-2", "m s-2", "m/s2"}:
+        return "a"
     if normalized_unit in {"m/s", "ms^-1", "m/s^1"}:
         return "v"
     if normalized_unit in {"years", "year", "yr", "yrs", "s", "seconds", "second"} and "age" in lowered:
@@ -901,42 +1111,83 @@ def _count_rate_symbol(name: str) -> str:
     return "R"
 
 
-def _conventional_symbol_for_variable(name: str, payload: dict, stem: str) -> str:
+def _conventional_symbol_for_variable(name: str, payload: dict, stem: str, objective_text: str = "", chunk_text: str = "") -> str:
     lowered = name.lower()
     normalized_unit = _normalize_unit_key(payload.get("unit", ""))
-    lowered_stem = _normalize_text(stem).lower()
+    context_text = _feedback_symbol_context(stem, objective_text, chunk_text)
+    prefers_displacement_symbol = _prefers_displacement_symbol(context_text)
     if "half_life" in lowered or "half-life" in lowered:
         return r"t_{1/2}"
     if "decay_constant" in lowered or "decay constant" in lowered:
         return r"\lambda"
     if "activity" in lowered:
         return _activity_symbol(name)
+    if "phase" in lowered and "difference" in lowered:
+        return r"\delta"
+    if "angle" in lowered or lowered == "theta":
+        return r"\theta"
     if "nuclei" in lowered or "nucleus_count" in lowered or "atom_count" in lowered:
         if any(term in lowered for term in ("initial", "fresh", "original", "starting")):
             return r"N_0"
         return "N"
     if "count" in lowered and "rate" in lowered:
         return _count_rate_symbol(name)
+    if "initial" in lowered and any(term in lowered for term in ("velocity", "speed")):
+        return "u"
+    if any(term in lowered for term in ("final", "terminal", "resultant")) and any(term in lowered for term in ("velocity", "speed")):
+        return "v"
     if "age" in lowered:
         return "t"
     if "time" in lowered:
         if "half" in lowered and "life" in lowered:
             return r"t_{1/2}"
         return "t"
+    if "period" in lowered:
+        return "T"
+    if "temperature" in lowered:
+        return "T"
+    if "amplitude" in lowered:
+        return "A"
+    if "slit" in lowered and any(term in lowered for term in ("separation", "spacing", "distance")):
+        return "a"
+    if "screen" in lowered and "distance" in lowered:
+        return "D"
+    if "fringe" in lowered and any(term in lowered for term in ("spacing", "distance")):
+        return "w"
+    if "displacement" in lowered:
+        return "s"
+    if "distance" in lowered and prefers_displacement_symbol:
+        return "s"
     if "distance" in lowered or "separation" in lowered or "length" in lowered:
-        return "r" if "closest approach" in lowered_stem else "d"
+        return "r" if "closest approach" in context_text else "d"
     if "radius" in lowered or "closest_approach" in lowered:
         return "r"
     if "speed" in lowered or "velocity" in lowered:
         return "v"
     if "acceleration" in lowered:
         return "a"
+    if "gravitational" in lowered and "field" in lowered:
+        return "g"
+    if lowered in {"g", "gravity"} and "gravity" in context_text:
+        return "g"
     if "kinetic_energy" in lowered:
         return r"E_k"
     if "energy" in lowered:
         return "E"
     if "mass" in lowered:
         return "m"
+    if "momentum" in lowered:
+        return "p"
+    if "spring_constant" in lowered:
+        return "k"
+    if "extension" in lowered:
+        return "x"
+    if "height" in lowered:
+        return "h"
+    if "magnetic" in lowered and "field" in lowered:
+        return "B"
+    if "flux_density" in lowered:
+        return "B"
     if "pressure" in lowered:
         return "p"
     if "density" in lowered:
@@ -945,12 +1196,20 @@ def _conventional_symbol_for_variable(name: str, payload: dict, stem: str) -> st
         return "f"
     if "wavelength" in lowered:
         return r"\lambda"
+    if ("speed" in lowered and "light" in lowered) or lowered in {"c", "light_speed", "speed_of_light"}:
+        return "c"
     if "current" in lowered:
         return "I"
     if "voltage" in lowered or "potential" in lowered:
         return "V"
     if "resistance" in lowered:
         return "R"
+    if "planck" in lowered and "constant" in lowered:
+        return "h"
+    if ("elementary" in lowered and "charge" in lowered) or lowered in {"electron_charge", "elementary_charge"}:
+        return "e"
+    if "work" in lowered and "function" in lowered:
+        return r"\phi"
     if "area" in lowered:
         return "A"
     if "volume" in lowered:
@@ -969,6 +1228,8 @@ def _plain_symbol_text(symbol: str) -> str:
     replacements = {
         r"\lambda": "λ",
         r"\rho": "ρ",
+        r"\delta": "δ",
+        r"\theta": "θ",
         r"t_{1/2}": "t₁/₂",
         r"A_0": "A₀",
         r"N_0": "N₀",
@@ -986,16 +1247,26 @@ def _plain_symbol_text(symbol: str) -> str:
     return plain
 
 
-def _answer_symbol_description(answer_symbol: str, stem: str, answer_unit: str) -> str:
-    lowered = _normalize_text(stem).lower()
+def _answer_symbol_description(answer_symbol: str, stem: str, answer_unit: str, objective_text: str = "", chunk_text: str = "") -> str:
+    lowered = _feedback_symbol_context(stem, objective_text, chunk_text)
+    if answer_symbol == "h":
+        return "Planck's constant"
     if answer_symbol == "t" and "age" in lowered:
         return "the age of the sample"
     if answer_symbol == "F":
         return "the electrostatic force"
+    if answer_symbol == r"\delta":
+        return "the phase difference"
+    if answer_symbol == r"\theta":
+        return "the angle"
+    if answer_symbol == "s":
+        return "the displacement"
     if answer_symbol == "v":
         return "the average speed"
     if answer_symbol == "a":
         return "the acceleration"
+    if answer_symbol == "g":
+        return "the gravitational field strength"
     if answer_symbol == "d":
         return "the distance"
     if answer_symbol == "r":
@@ -1006,6 +1277,8 @@ def _answer_symbol_description(answer_symbol: str, stem: str, answer_unit: str) 
         return "the power"
     if answer_symbol == "p":
         return "the pressure"
+    if answer_symbol == r"\lambda":
+        return "the wavelength"
     if answer_symbol == "A":
         return "the activity"
     if answer_symbol == "N":
@@ -1015,13 +1288,18 @@ def _answer_symbol_description(answer_symbol: str, stem: str, answer_unit: str) 
     return "the required quantity"
 
 
-def _variable_symbol_description(name: str, payload: dict, symbol: str, stem: str) -> str:
+def _variable_symbol_description(name: str, payload: dict, symbol: str, stem: str, objective_text: str = "", chunk_text: str = "") -> str:
     lowered = name.lower()
+    context_text = _feedback_symbol_context(stem, objective_text, chunk_text)
+    if symbol == "h" and "planck" in lowered:
+        return "Planck's constant"
     if symbol == r"t_{1/2}" or "half_life" in lowered or "half-life" in lowered:
         return "the half-life"
-    if symbol == r"\lambda" or "decay_constant" in lowered or "decay constant" in lowered:
+    if "decay_constant" in lowered or "decay constant" in lowered:
         return "the decay constant"
     if symbol == "A":
+        if "amplitude" in lowered:
+            return "the amplitude"
         return "the activity of the sample"
     if symbol == r"A_0":
         return "the activity of living material"
@@ -1029,30 +1307,66 @@ def _variable_symbol_description(name: str, payload: dict, symbol: str, stem: st
         return "the initial number of undecayed nuclei"
     if symbol == "N":
         return "the number of undecayed nuclei remaining"
+    if symbol == r"\delta":
+        return "the phase difference"
+    if symbol == r"\theta":
+        return "the angle"
     if symbol == "t":
         return "the elapsed time" if "age" not in lowered else "the age of the sample"
+    if symbol == "u":
+        return "the initial velocity"
+    if symbol == "s":
+        return "the displacement" if _is_motion_context(context_text) else "the distance travelled"
     if symbol == "d":
         return "the distance"
+    if symbol == "D":
+        return "the screen distance"
+    if symbol == "w":
+        return "the fringe spacing"
     if symbol == "r":
-        return "the separation distance" if "closest approach" not in _normalize_text(stem).lower() else "the distance of closest approach"
-    if symbol == "v":
-        return "the speed"
+        if "closest approach" in context_text:
+            return "the distance of closest approach"
+        if "radius" in lowered or "circular" in context_text or "centripetal" in context_text:
+            return "the radius"
+        return "the separation distance"
     if symbol == "a":
+        if "slit" in lowered:
+            return "the slit separation"
         return "the acceleration"
+    if symbol == "v":
+        if "velocity" in lowered:
+            return "the final velocity"
+        return "the speed"
+    if symbol == "g":
+        return "the gravitational field strength"
     if symbol == "m":
         return "the mass"
+    if symbol == "h":
+        return "the height"
+    if symbol == "k":
+        return "the spring constant"
     if symbol == "p":
+        if "momentum" in lowered:
+            return "the momentum"
         return "the pressure"
+    if symbol == "B":
+        return "the magnetic flux density"
+    if symbol == "T":
+        return "the period" if "period" in lowered else "the temperature"
     if symbol == r"\rho":
         return "the density"
     if symbol == "f":
         return "the frequency"
     if symbol == r"\lambda":
         return "the wavelength"
+    if symbol == "c":
+        if "light" in lowered:
+            return "the speed of light"
+        return "the concentration"
     if symbol == "I":
         return "the current"
     if symbol == "V":
-        return "the voltage"
+        return "the potential difference" if "voltage" in lowered or "potential" in lowered else "the voltage"
     if symbol == "R":
         return "the count rate"
     if symbol == r"R_b":
@@ -1061,10 +1375,12 @@ def _variable_symbol_description(name: str, payload: dict, symbol: str, stem: st
         return "the total count rate"
     if symbol == r"R_{\mathrm{net}}":
         return "the net count rate"
-    if symbol == "c":
-        return "the concentration"
     if symbol == "n":
         return "the amount in moles"
+    if symbol == "e":
+        return "the elementary charge"
+    if symbol == r"\phi":
+        return "the work function"
     if symbol == r"E_k":
         return "the kinetic energy"
     if symbol.startswith("q_"):
@@ -1097,6 +1413,9 @@ def _symbol_definitions_text(
     answer_unit: str,
     variable_symbols: dict[str, str],
     inputs: dict[str, dict],
+    objective_text: str = "",
+    chunk_text: str = "",
+    answer_description_override: str = "",
     used_variable_names: list[str] | None = None,
     extra_definitions: list[tuple[str, str]] | None = None,
 ) -> str:
@@ -1110,26 +1429,28 @@ def _symbol_definitions_text(
         seen.add(plain)
         definitions.append((plain, description))
 
-    add(answer_symbol, _answer_symbol_description(answer_symbol, stem, answer_unit))
+    add(
+        answer_symbol,
+        answer_description_override or _answer_symbol_description(answer_symbol, stem, answer_unit, objective_text, chunk_text),
+    )
     relevant_names = used_variable_names or list(inputs.keys())
     for name in relevant_names:
         if name not in variable_symbols or name not in inputs:
             continue
         symbol = variable_symbols[name]
-        add(symbol, _variable_symbol_description(name, inputs[name], symbol, stem))
+        add(symbol, _variable_symbol_description(name, inputs[name], symbol, stem, objective_text, chunk_text))
     for symbol, description in extra_definitions or []:
         add(symbol, description)
     return _join_definitions(definitions)
 
 
-def _infer_variable_symbols(inputs: dict[str, dict], stem: str) -> dict[str, str]:
-    lowered_stem = _normalize_text(stem).lower()
+def _infer_variable_symbols(inputs: dict[str, dict], stem: str, objective_text: str = "", chunk_text: str = "") -> dict[str, str]:
     charge_index = 1
     symbol_map: dict[str, str] = {}
     for name, payload in inputs.items():
         lowered = name.lower()
         symbol = ""
-        conventional = _conventional_symbol_for_variable(name, payload, stem)
+        conventional = _conventional_symbol_for_variable(name, payload, stem, objective_text, chunk_text)
         if conventional in {"q", ""} and ("charge" in lowered or _normalize_unit_key(payload.get("unit", "")) == "e"):
             symbol = rf"q_{charge_index}"
             charge_index += 1
@@ -1155,6 +1476,66 @@ def _value_replacement_tex(name: str, payload: dict, significant_figures: int) -
     return _format_number_tex(value, 10, display_style=_numeric_display_style(value))
 
 
+def _objective_heuristic_symbol_overrides(
+    inputs: dict[str, dict],
+    objective_symbol_heuristics: dict | None,
+    stem: str = "",
+    objective_text: str = "",
+    chunk_text: str = "",
+) -> tuple[str, str, dict[str, str], list[tuple[str, str]], list[dict]]:
+    heuristics = normalize_objective_symbol_heuristics(objective_symbol_heuristics)
+    if not heuristics:
+        fallback_context = " ".join(part for part in (stem, objective_text, chunk_text) if part).strip()
+        heuristics = deterministic_symbol_heuristics_for_objective(
+            objective_text or stem,
+            fallback_context,
+        )
+    if not heuristics:
+        return "", "", {}, [], []
+
+    variable_symbols: dict[str, str] = {}
+    extra_definitions: list[tuple[str, str]] = []
+    for hint in heuristics.get("variable_hints", []):
+        terms = [str(term).strip().lower() for term in hint.get("match_terms", []) if str(term).strip()]
+        symbol = symbol_plain_to_tex(str(hint.get("symbol", "") or ""))
+        description = str(hint.get("description", "") or "").strip()
+        if not terms or not symbol:
+            continue
+        for name in inputs.keys():
+            lowered_name = name.lower()
+            if all(term in lowered_name for term in terms):
+                variable_symbols[name] = symbol
+                if description:
+                    extra_definitions.append((symbol, description))
+
+    constant_aliases = []
+    for hint in heuristics.get("constant_hints", []):
+        symbol = symbol_plain_to_tex(str(hint.get("symbol", "") or ""))
+        description = str(hint.get("description", "") or "").strip()
+        approx_value = hint.get("approx_value")
+        if isinstance(approx_value, bool) or not isinstance(approx_value, (int, float)):
+            continue
+        if not symbol:
+            continue
+        constant_aliases.append(
+            {
+                "symbol": symbol,
+                "description": description,
+                "approx_value": float(approx_value),
+            }
+        )
+        if description:
+            extra_definitions.append((symbol, description))
+
+    return (
+        symbol_plain_to_tex(str(heuristics.get("answer_symbol", "") or "")),
+        str(heuristics.get("answer_description", "") or "").strip(),
+        variable_symbols,
+        extra_definitions,
+        constant_aliases,
+    )
+
+
 def _generic_feedback_tex(
     stem: str,
     explanation_text: str,
@@ -1163,6 +1544,9 @@ def _generic_feedback_tex(
     answer_value: float,
     answer_unit: str,
     significant_figures: int,
+    objective_text: str = "",
+    chunk_text: str = "",
+    objective_symbol_heuristics: dict | None = None,
 ) -> str:
     validation = numeric_metadata.get("validation") if isinstance(numeric_metadata.get("validation"), dict) else {}
     answer_expression = str(validation.get("answer_expression", "")).strip()
@@ -1172,13 +1556,27 @@ def _generic_feedback_tex(
         tree = ast.parse(answer_expression, mode="eval")
     except SyntaxError:
         return ""
-    variable_symbols = _infer_variable_symbols(inputs, stem)
-    symbolic_expression = _expression_to_tex(tree, variable_symbols)
+    variable_symbols = _infer_variable_symbols(inputs, stem, objective_text, chunk_text)
+    (
+        heuristic_answer_symbol,
+        heuristic_answer_description,
+        heuristic_variable_symbols,
+        extra_definitions,
+        constant_aliases,
+    ) = _objective_heuristic_symbol_overrides(
+        inputs,
+        objective_symbol_heuristics,
+        stem,
+        objective_text,
+        chunk_text,
+    )
+    variable_symbols.update(heuristic_variable_symbols)
+    symbolic_expression = _expression_to_tex(tree, variable_symbols, constant_aliases=constant_aliases)
     value_expression = _expression_to_tex(
         tree,
         {name: _value_replacement_tex(name, payload, significant_figures) for name, payload in inputs.items()},
     )
-    answer_symbol = _answer_symbol_from_stem(stem, answer_unit)
+    answer_symbol = heuristic_answer_symbol or _answer_symbol_from_stem(stem, answer_unit, objective_text, chunk_text)
     intro = "Using the relevant relationship:"
     if explanation_text:
         first_sentence = re.split(r"(?<=[.?!])\s+", _normalize_text(explanation_text), maxsplit=1)[0].strip()
@@ -1193,7 +1591,11 @@ def _generic_feedback_tex(
         answer_unit=answer_unit,
         variable_symbols=variable_symbols,
         inputs=inputs,
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+        answer_description_override=heuristic_answer_description,
         used_variable_names=list(validation.get("used_variables") or inputs.keys()),
+        extra_definitions=extra_definitions,
     )
     return (
         intro
@@ -1212,6 +1614,9 @@ def format_numeric_feedback_explanation(
     stem: str,
     explanation_text: str,
     numeric_metadata: dict | None,
+    objective_text: str = "",
+    chunk_text: str = "",
+    objective_symbol_heuristics: dict | None = None,
 ) -> str:
     if not isinstance(numeric_metadata, dict):
         return ""
@@ -1222,8 +1627,25 @@ def format_numeric_feedback_explanation(
         return ""
     answer_unit = str(snapshot.get("answer_unit", ""))
     significant_figures = _infer_significant_figures_from_answer_text(str(snapshot.get("correct_answer", "")))
-    for formatter in (_coulomb_force_feedback_tex, _closest_approach_feedback_tex, _speed_feedback_tex):
-        formatted = formatter(stem, inputs, float(answer_value), answer_unit, significant_figures)
+    for formatter in (
+        _coulomb_force_feedback_tex,
+        _closest_approach_feedback_tex,
+        _photon_energy_feedback_tex,
+        _centripetal_acceleration_feedback_tex,
+        _speed_feedback_tex,
+    ):
+        if formatter is _speed_feedback_tex:
+            formatted = formatter(
+                stem,
+                inputs,
+                float(answer_value),
+                answer_unit,
+                significant_figures,
+                objective_text,
+                chunk_text,
+            )
+        else:
+            formatted = formatter(stem, inputs, float(answer_value), answer_unit, significant_figures)
         if formatted:
             return formatted
     return _generic_feedback_tex(
@@ -1234,41 +1656,51 @@ def format_numeric_feedback_explanation(
         float(answer_value),
         answer_unit,
         significant_figures,
+        objective_text,
+        chunk_text,
+        objective_symbol_heuristics,
     )
 
 
+NUMERIC_FEEDBACK_VERSION = "option-v2"
+MAX_NUMERIC_FEEDBACK_KEY_IDEA_LENGTH = 240
+MAX_NUMERIC_FEEDBACK_NOTE_LENGTH = 240
+NUMERIC_FEEDBACK_OPTION_LABEL_PATTERN = re.compile(
+    r"\b(?:option|answer|choice|letter)\s+[A-Z]\b",
+    re.IGNORECASE,
+)
 NUMERIC_FEEDBACK_JSON_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "verdict": {"type": "string", "enum": ["correct", "partly_correct", "incorrect"]},
-        "correct_answer": {"type": "string"},
         "key_idea": {"type": "string", "minLength": 1},
         "formula": {"type": "string", "minLength": 1},
         "substitution": {"type": "string", "minLength": 1},
-        "working": {
+        "final_answer": {"type": "string", "minLength": 1},
+        "options": {
             "type": "array",
-            "maxItems": 4,
-            "items": {"type": "string", "minLength": 1},
+            "minItems": 2,
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "answer_text": {"type": "string", "minLength": 1},
+                    "is_correct": {"type": "boolean"},
+                    "note": {"type": "string", "minLength": 1},
+                },
+                "required": ["answer_text", "is_correct", "note"],
+            },
         },
-        "targeted_feedback": {"type": "string", "minLength": 1},
-        "common_mistake_warning": {"type": "string"},
     },
-    "required": [
-        "verdict",
-        "correct_answer",
-        "key_idea",
-        "formula",
-        "substitution",
-        "working",
-        "targeted_feedback",
-        "common_mistake_warning",
-    ],
+    "required": ["key_idea", "formula", "substitution", "final_answer", "options"],
 }
 PLAIN_SYMBOL_CANONICAL_MAP = {
     "λ": "lambda",
     "rho": "rho",
     "ρ": "rho",
+    "δ": "delta",
+    "θ": "theta",
     "A₀": "A0",
     "N₀": "N0",
     "t₁/₂": "t_half",
@@ -1347,12 +1779,21 @@ def _symbol_definition_expectations(
     answer_unit: str,
     variable_symbols: dict[str, str],
     inputs: dict[str, dict],
+    objective_text: str = "",
+    chunk_text: str = "",
+    answer_description_override: str = "",
     used_variable_names: list[str],
 ) -> dict[str, str]:
     expectations: dict[str, str] = {}
     plain_answer_symbol = _plain_symbol_text(answer_symbol)
     if plain_answer_symbol:
-        expectations[_canonical_plain_symbol(plain_answer_symbol)] = _answer_symbol_description(answer_symbol, stem, answer_unit)
+        expectations[_canonical_plain_symbol(plain_answer_symbol)] = _answer_symbol_description(
+            answer_symbol,
+            stem,
+            answer_unit,
+            objective_text,
+            chunk_text,
+        ) if not answer_description_override else answer_description_override
     for name in used_variable_names:
         symbol = variable_symbols.get(name)
         payload = inputs.get(name)
@@ -1361,7 +1802,14 @@ def _symbol_definition_expectations(
         plain_symbol = _plain_symbol_text(symbol)
         if not plain_symbol:
             continue
-        expectations[_canonical_plain_symbol(plain_symbol)] = _variable_symbol_description(name, payload, symbol, stem)
+        expectations[_canonical_plain_symbol(plain_symbol)] = _variable_symbol_description(
+            name,
+            payload,
+            symbol,
+            stem,
+            objective_text,
+            chunk_text,
+        )
     return expectations
 
 
@@ -1448,13 +1896,6 @@ def _deterministic_numeric_verdict(
 ) -> str:
     if is_correct:
         return "correct"
-    selected_value, selected_unit = _parse_numeric_answer_choice(selected_answer_text)
-    if selected_value is None:
-        return "incorrect"
-    same_unit = _normalize_unit_key(selected_unit) == _normalize_unit_key(answer_unit)
-    if same_unit and math.isclose(selected_value, answer_value, rel_tol=0.015, abs_tol=max(abs(answer_value) * 0.002, 1e-12)):
-        if _normalize_text(selected_answer_text) != _normalize_text(correct_answer_text):
-            return "partly_correct"
     return "incorrect"
 
 
@@ -1471,11 +1912,6 @@ def _default_targeted_feedback(
         return (
             "Your answer matches the expected value and unit.",
             "Keep matching each symbol to its physical meaning before you substitute.",
-        )
-    if verdict == "partly_correct":
-        return (
-            "Your value is essentially right, but the final notation or rounding needs tightening.",
-            "Match the requested format and unit exactly in the final line.",
         )
 
     selected_value, selected_unit = _parse_numeric_answer_choice(selected_answer_text)
@@ -1497,11 +1933,23 @@ def _default_targeted_feedback(
     )
 
 
+def _extract_feedback_display_blocks(text: str) -> list[str]:
+    return [block.strip() for block in re.findall(r"\\\[(.*?)\\\]", str(text or ""), flags=re.S) if block.strip()]
+
+
+def _extract_feedback_definitions_text(text: str) -> str:
+    match = re.search(r"(Here,\s.*?\.)", _normalize_text(text), flags=re.S)
+    return match.group(1).strip() if match else ""
+
+
 def _build_numeric_feedback_context(
     *,
     stem: str,
     explanation_text: str,
     numeric_metadata: dict,
+    objective_text: str = "",
+    chunk_text: str = "",
+    objective_symbol_heuristics: dict | None = None,
 ) -> dict:
     if not isinstance(numeric_metadata, dict):
         return {}
@@ -1521,10 +1969,24 @@ def _build_numeric_feedback_context(
         tree = ast.parse(answer_expression, mode="eval")
     except SyntaxError:
         return {}
-    variable_symbols = _infer_variable_symbols(inputs, stem)
+    variable_symbols = _infer_variable_symbols(inputs, stem, objective_text, chunk_text)
+    (
+        heuristic_answer_symbol,
+        heuristic_answer_description,
+        heuristic_variable_symbols,
+        extra_definitions,
+        constant_aliases,
+    ) = _objective_heuristic_symbol_overrides(
+        inputs,
+        objective_symbol_heuristics,
+        stem,
+        objective_text,
+        chunk_text,
+    )
+    variable_symbols.update(heuristic_variable_symbols)
     used_variable_names = list(validation.get("used_variables") or inputs.keys())
-    answer_symbol = _answer_symbol_from_stem(stem, answer_unit)
-    formula_tex = answer_symbol + r" = " + _expression_to_tex(tree, variable_symbols)
+    answer_symbol = heuristic_answer_symbol or _answer_symbol_from_stem(stem, answer_unit, objective_text, chunk_text)
+    formula_tex = answer_symbol + r" = " + _expression_to_tex(tree, variable_symbols, constant_aliases=constant_aliases)
     substitution_tex = answer_symbol + r" = " + _expression_to_tex(
         tree,
         {name: _value_replacement_tex(name, payload, significant_figures) for name, payload in inputs.items()},
@@ -1536,6 +1998,9 @@ def _build_numeric_feedback_context(
         answer_unit=answer_unit,
         variable_symbols=variable_symbols,
         inputs=inputs,
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+        answer_description_override=heuristic_answer_description,
         used_variable_names=used_variable_names,
     )
     definitions_text = _symbol_definitions_text(
@@ -1544,8 +2009,29 @@ def _build_numeric_feedback_context(
         answer_unit=answer_unit,
         variable_symbols=variable_symbols,
         inputs=inputs,
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+        answer_description_override=heuristic_answer_description,
         used_variable_names=used_variable_names,
+        extra_definitions=extra_definitions,
     )
+    detailed_explanation = format_numeric_feedback_explanation(
+        stem=stem,
+        explanation_text=explanation_text,
+        numeric_metadata=numeric_metadata,
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+        objective_symbol_heuristics=objective_symbol_heuristics,
+    )
+    explanation_blocks = _extract_feedback_display_blocks(detailed_explanation)
+    if len(explanation_blocks) >= 3:
+        formula_tex = explanation_blocks[0]
+        substitution_tex = explanation_blocks[1]
+        if r"\approx" in explanation_blocks[-1]:
+            final_tex = explanation_blocks[-1]
+        parsed_definitions = _extract_feedback_definitions_text(detailed_explanation)
+        if parsed_definitions and not normalize_objective_symbol_heuristics(objective_symbol_heuristics):
+            definitions_text = parsed_definitions
     key_idea = _default_numeric_key_idea(stem, explanation_text, definitions_text)
     return {
         "answer_symbol": answer_symbol,
@@ -1567,122 +2053,250 @@ def _build_numeric_feedback_context(
     }
 
 
+def _normalize_numeric_feedback_option(raw_option: dict) -> dict:
+    if not isinstance(raw_option, dict):
+        raise NumericQuestionValidationError("Stored numeric feedback options must be objects.")
+    answer_text = _normalize_text(str(raw_option.get("answer_text", "")))
+    if not answer_text:
+        raise NumericQuestionValidationError("Stored numeric feedback options must include answer_text.")
+    is_correct = raw_option.get("is_correct")
+    if not isinstance(is_correct, bool):
+        raise NumericQuestionValidationError("Stored numeric feedback options must include a boolean is_correct.")
+    note = _normalize_text(str(raw_option.get("note", "")))
+    if not note:
+        raise NumericQuestionValidationError("Stored numeric feedback options must include a note.")
+    if len(note) > MAX_NUMERIC_FEEDBACK_NOTE_LENGTH:
+        raise NumericQuestionValidationError("Stored numeric feedback notes must stay concise.")
+    if NUMERIC_FEEDBACK_OPTION_LABEL_PATTERN.search(note):
+        raise NumericQuestionValidationError("Stored numeric feedback notes must not reference answer letters.")
+    return {
+        "answer_text": answer_text,
+        "is_correct": is_correct,
+        "note": note,
+    }
+
+
+def _normalize_numeric_feedback_math_block(value: str, label: str) -> str:
+    text = _normalize_text(str(value or ""))
+    if text.startswith(r"\[") and text.endswith(r"\]"):
+        text = text[2:-2].strip()
+    if not text:
+        raise NumericQuestionValidationError(f"Stored numeric feedback must include {label}.")
+    if NUMERIC_FEEDBACK_OPTION_LABEL_PATTERN.search(text):
+        raise NumericQuestionValidationError(f"Stored numeric feedback {label} must not reference answer letters.")
+    return text
+
+
+def _validate_numeric_feedback_payload(
+    payload: dict,
+    *,
+    correct_answer_text: str,
+    distractors: list[str],
+) -> dict:
+    if not isinstance(payload, dict):
+        raise NumericQuestionValidationError("Stored numeric feedback must be a JSON object.")
+    key_idea = _normalize_text(str(payload.get("key_idea", "")))
+    if not key_idea:
+        raise NumericQuestionValidationError("Stored numeric feedback must include key_idea.")
+    if len(key_idea) > MAX_NUMERIC_FEEDBACK_KEY_IDEA_LENGTH:
+        raise NumericQuestionValidationError("Stored numeric feedback key ideas must stay concise.")
+    formula_tex = _normalize_numeric_feedback_math_block(payload.get("formula", ""), "formula")
+    substitution_tex = _normalize_numeric_feedback_math_block(payload.get("substitution", ""), "substitution")
+    final_tex = _normalize_numeric_feedback_math_block(payload.get("final_answer", ""), "final_answer")
+
+    option_texts = [str(correct_answer_text or "").strip(), *[str(item or "").strip() for item in distractors]]
+    allowed_option_map = {_normalize_text(option): option for option in option_texts if _normalize_text(option)}
+    if len(allowed_option_map) != len(option_texts):
+        raise NumericQuestionValidationError("Stored numeric feedback requires unique answer options.")
+
+    raw_options = payload.get("options")
+    if not isinstance(raw_options, list):
+        raise NumericQuestionValidationError("Stored numeric feedback must include an options array.")
+
+    validated_by_text: dict[str, dict] = {}
+    for raw_option in raw_options:
+        option = _normalize_numeric_feedback_option(raw_option)
+        normalized_answer_text = _normalize_text(option["answer_text"])
+        matched_option_text = allowed_option_map.get(normalized_answer_text)
+        if matched_option_text is None:
+            raise NumericQuestionValidationError("Stored numeric feedback introduced an unknown answer option.")
+        if normalized_answer_text in validated_by_text:
+            raise NumericQuestionValidationError("Stored numeric feedback must cover each answer option once.")
+        option["answer_text"] = matched_option_text
+        validated_by_text[normalized_answer_text] = option
+
+    missing_option_texts = [option for option in option_texts if _normalize_text(option) not in validated_by_text]
+    if missing_option_texts:
+        raise NumericQuestionValidationError("Stored numeric feedback must cover every answer option exactly once.")
+
+    correct_options = [option for option in validated_by_text.values() if option["is_correct"]]
+    if len(correct_options) != 1:
+        raise NumericQuestionValidationError("Stored numeric feedback must mark exactly one option as correct.")
+    if correct_options[0]["answer_text"] != correct_answer_text:
+        raise NumericQuestionValidationError("Stored numeric feedback marked the wrong option as correct.")
+
+    return {
+        "version": NUMERIC_FEEDBACK_VERSION,
+        "key_idea": key_idea,
+        "formula_tex": formula_tex,
+        "substitution_tex": substitution_tex,
+        "final_tex": final_tex,
+        "options": [validated_by_text[_normalize_text(option)] for option in option_texts],
+    }
+
+
+def _stored_numeric_feedback_option(
+    numeric_metadata: dict | None,
+    *,
+    selected_answer_text: str,
+) -> tuple[dict, dict] | tuple[None, None]:
+    if not isinstance(numeric_metadata, dict):
+        return None, None
+    raw_feedback = numeric_metadata.get("feedback_v2")
+    if not isinstance(raw_feedback, dict):
+        return None, None
+    snapshot = numeric_metadata.get("output_snapshot") if isinstance(numeric_metadata.get("output_snapshot"), dict) else {}
+    correct_answer_text = str(snapshot.get("correct_answer", "")).strip()
+    distractors = [
+        str(item).strip()
+        for item in snapshot.get("distractors", [])
+        if str(item).strip()
+    ] if isinstance(snapshot.get("distractors"), list) else []
+    if not correct_answer_text or not distractors:
+        return None, None
+    try:
+        validated_feedback = _validate_numeric_feedback_payload(
+            raw_feedback,
+            correct_answer_text=correct_answer_text,
+            distractors=distractors,
+        )
+    except NumericQuestionValidationError:
+        return None, None
+
+    normalized_selected_answer = _normalize_text(selected_answer_text)
+    for option in validated_feedback["options"]:
+        if _normalize_text(option["answer_text"]) == normalized_selected_answer:
+            return validated_feedback, option
+    return None, None
+
+
 def _openai_numeric_feedback_payload(
     *,
     stem: str,
     explanation_text: str,
-    selected_answer_text: str,
-    verdict: str,
-    context: dict,
+    correct_answer_text: str,
+    distractors: list[str],
+    numeric_metadata: dict,
 ) -> dict:
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    option_lines = []
+    for option_text in [correct_answer_text, *distractors]:
+        option_lines.append(f"- {option_text}")
+    inputs = numeric_metadata.get("inputs") if isinstance(numeric_metadata.get("inputs"), dict) else {}
+    validation = numeric_metadata.get("validation") if isinstance(numeric_metadata.get("validation"), dict) else {}
+    given_lines = []
+    for name, payload in inputs.items():
+        value = payload.get("value")
+        unit = _normalize_text(str(payload.get("unit", "")))
+        given_line = f"- {name} = {value}"
+        if unit:
+            given_line += f" {unit}"
+        given_lines.append(given_line)
+    verified_expression = _normalize_text(str(validation.get("answer_expression", "")))
     prompt = f"""
-Return learner-facing calculation feedback as strict JSON.
+Return learner-facing numeric MCQ feedback as strict JSON.
 
 Rules:
-- Use the locked formula, substitution, answer, and symbol meanings provided below.
-- Never define a physics symbol with a meaning that conflicts with standard usage or with the question.
-- If a symbol is ambiguous, use words instead of introducing a new symbol.
-- Keep the tone concise, precise, and helpful.
-- If the student answer is numerically correct but notation is weak, say so.
-- If the student answer is close but the rounding or format is wrong, say so.
-- If the answer is wrong, identify the first likely break in reasoning.
-- Do not invent extra symbols.
+- Cover every answer option exactly once using the exact answer_text provided below.
+- Keep each note concise and specific to that option.
+- Mark exactly one option as correct, and it must be the actual correct answer.
+- Choose the conventional symbols that fit the question naturally.
+- `formula`, `substitution`, and `final_answer` must be LaTeX-ready maths only, without surrounding \\[ \\].
+- In `substitution`, show the numeric working clearly.
+- Do not mention option letters, answer letters, or "the correct answer is option...".
+- Base the working on the verified expression and givens below, but do not force the raw variable names into the final notation.
 
 Question:
 {stem}
 
-Student answer:
-{selected_answer_text or "No answer recorded."}
+Available numeric givens:
+{chr(10).join(given_lines) or "- No givens provided."}
 
-Deterministic verdict:
-{verdict}
+Verified calculation expression:
+{verified_expression or "Not provided."}
 
-Locked symbol meanings:
-{context.get("definitions_text") or "Use words instead of introducing symbols."}
+Verified correct answer:
+{correct_answer_text}
 
-Locked formula:
-{context["formula_tex"]}
-
-Locked substitution:
-{context["substitution_tex"]}
-
-Locked final answer:
-{context["correct_answer_text"]}
+Answer options to cover exactly once:
+{chr(10).join(option_lines)}
 
 Teacher explanation seed:
 {_normalize_text(explanation_text) or "No additional explanation provided."}
 """.strip()
-    response = client.responses.create(
-        model=getattr(settings, "OPENAI_MODEL", "gpt-4.1"),
-        instructions=(
-            "Return one valid JSON object only. "
-            "Never redefine symbols contrary to the locked context."
-        ),
-        input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "numeric_answer_feedback",
-                "strict": True,
-                "schema": NUMERIC_FEEDBACK_JSON_SCHEMA,
-            }
-        },
-        temperature=0.2,
-    )
+    try:
+        response = client.responses.create(
+            model=getattr(settings, "OPENAI_MODEL", "gpt-4.1"),
+            instructions=(
+                "Return one valid JSON object only. "
+                "Cover each answer option exactly once and choose standard symbols that suit the question."
+            ),
+            input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "numeric_answer_feedback",
+                    "strict": True,
+                    "schema": NUMERIC_FEEDBACK_JSON_SCHEMA,
+                }
+            },
+            temperature=0.2,
+        )
+    except OpenAIError as exc:
+        raise NumericQuestionValidationError(f"OpenAI request for numeric feedback failed: {exc}") from exc
     return _parse_json_object(getattr(response, "output_text", ""))
 
 
-def _normalize_numeric_feedback_payload(payload: dict, context: dict, verdict: str) -> dict:
-    targeted_feedback, common_mistake_warning = _default_targeted_feedback(
-        verdict=verdict,
-        stem=context.get("stem", ""),
-        selected_answer_text=context.get("selected_answer_text", ""),
-        answer_value=float(context["answer_value"]),
-        answer_unit=str(context["answer_unit"]),
+def _build_stored_numeric_feedback(
+    *,
+    stem: str,
+    explanation_text: str,
+    numeric_metadata: dict,
+    correct_answer_text: str,
+    distractors: list[str],
+    objective_text: str = "",
+    chunk_text: str = "",
+) -> dict:
+    raw_payload = _openai_numeric_feedback_payload(
+        stem=stem,
+        explanation_text=explanation_text,
+        correct_answer_text=correct_answer_text,
+        distractors=distractors,
+        numeric_metadata=numeric_metadata,
     )
-    merged = {
-        "verdict": verdict,
-        "correct_answer": context["correct_answer_text"],
-        "key_idea": _normalize_text(str(payload.get("key_idea", "") or context["key_idea"])),
-        "formula": context["formula_tex"],
-        "substitution": context["substitution_tex"],
-        "working": [
-            _normalize_text(item)
-            for item in payload.get("working", [])
-            if _normalize_text(item)
-        ][:4],
-        "targeted_feedback": _normalize_text(str(payload.get("targeted_feedback", "") or targeted_feedback)),
-        "common_mistake_warning": _normalize_text(
-            str(payload.get("common_mistake_warning", "") or common_mistake_warning)
-        ),
-    }
-    if not merged["key_idea"]:
-        merged["key_idea"] = context["key_idea"]
-    if not merged["targeted_feedback"]:
-        merged["targeted_feedback"] = targeted_feedback
-    return merged
+    return _validate_numeric_feedback_payload(
+        raw_payload,
+        correct_answer_text=correct_answer_text,
+        distractors=distractors,
+    )
 
 
-def _render_numeric_feedback_payload(context: dict, payload: dict) -> str:
-    lines = [
-        payload["verdict"].replace("_", " ").capitalize(),
-        f"Key idea: {payload['key_idea']}",
-    ]
-    if context.get("definitions_text"):
-        lines.append(f"Symbols: {context['definitions_text']}")
+def _render_numeric_feedback_payload(context: dict, verdict: str, *, key_idea: str, option_note: str = "") -> str:
+    formula_tex = str(context.get("formula_tex", "")).strip()
+    substitution_tex = str(context.get("substitution_tex", "")).strip()
+    final_tex = str(context.get("final_tex", "")).strip()
+    lines: list[str] = [verdict.replace("_", " ").capitalize()]
+    if verdict != "correct":
+        message = option_note or key_idea
+        if message:
+            lines.append(message)
     lines.extend(
         [
-            "Correct formula:",
-            rf"\[{payload['formula']}\]",
-            "Substitution:",
-            rf"\[{payload['substitution']}\]",
-            "Final answer:",
-            rf"\[{context['final_tex']}\]",
+            rf"\[{formula_tex}\]",
+            rf"\[{substitution_tex}\]",
+            rf"\[{final_tex}\]",
         ]
     )
-    if payload.get("common_mistake_warning"):
-        lines.append(f"Warning: {payload['common_mistake_warning']}")
     return "\n\n".join(lines)
 
 
@@ -1693,21 +2307,31 @@ def format_numeric_answer_feedback(
     numeric_metadata: dict | None,
     selected_answer_text: str,
     is_correct: bool,
+    objective_text: str = "",
+    chunk_text: str = "",
+    objective_symbol_heuristics: dict | None = None,
 ) -> str:
     context = _build_numeric_feedback_context(
         stem=stem,
         explanation_text=explanation_text,
         numeric_metadata=numeric_metadata or {},
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+        objective_symbol_heuristics=objective_symbol_heuristics,
     )
     if not context:
         explanation = format_numeric_feedback_explanation(
             stem=stem,
             explanation_text=explanation_text,
             numeric_metadata=numeric_metadata,
+            objective_text=objective_text,
+            chunk_text=chunk_text,
+            objective_symbol_heuristics=objective_symbol_heuristics,
         ) or normalize_numeric_explanation_text(explanation_text)
         if is_correct:
-            return f"Correct. {explanation}" if explanation else "Correct."
-        return explanation or "Not quite."
+            return f"Correct\n\n{explanation}" if explanation else "Correct"
+        body = explanation or "Not quite."
+        return f"Incorrect\n\n{body}"
 
     context["stem"] = stem
     context["selected_answer_text"] = selected_answer_text
@@ -1718,8 +2342,22 @@ def format_numeric_answer_feedback(
         answer_value=float(context["answer_value"]),
         answer_unit=str(context["answer_unit"]),
     )
-    normalized_payload = _normalize_numeric_feedback_payload({}, context, verdict)
-    return _render_numeric_feedback_payload(context, normalized_payload)
+    stored_feedback, selected_option = _stored_numeric_feedback_option(
+        numeric_metadata or {},
+        selected_answer_text=selected_answer_text,
+    )
+    if stored_feedback and selected_option:
+        return _render_numeric_feedback_payload(
+            {**context, "formula_tex": stored_feedback["formula_tex"], "substitution_tex": stored_feedback["substitution_tex"], "final_tex": stored_feedback["final_tex"]},
+            verdict,
+            key_idea=stored_feedback["key_idea"],
+            option_note=selected_option["note"],
+        )
+    return _render_numeric_feedback_payload(
+        context,
+        verdict,
+        key_idea=context["key_idea"],
+    )
 
 
 def _validate_unit_text(value, label: str) -> str:
@@ -1742,7 +2380,14 @@ def _render_stem_template(template: str, values: dict[str, float], units: dict[s
         raise NumericQuestionValidationError(
             "Stem template must contain each supplied variable exactly once and no unknown placeholders."
         )
-    replacements = {name: format(value, ".10g") for name, value in values.items()}
+    replacements = {
+        name: _format_number_text(
+            value,
+            _infer_stem_value_significant_figures(value),
+            display_style=_numeric_display_style(value),
+        )
+        for name, value in values.items()
+    }
     try:
         stem = _normalize_text(template.format_map(replacements))
     except (KeyError, ValueError) as exc:
@@ -1770,21 +2415,26 @@ def _degree_tex(argument: str) -> str:
     return rf"\left({argument}\right)^{{\circ}}"
 
 
-def _expression_to_tex(node, replacements: dict[str, str]) -> str:
+def _expression_to_tex(node, replacements: dict[str, str], constant_aliases: list[dict] | None = None) -> str:
     if isinstance(node, ast.Expression):
-        return _expression_to_tex(node.body, replacements)
+        return _expression_to_tex(node.body, replacements, constant_aliases=constant_aliases)
     if isinstance(node, ast.Constant):
-        return format(float(node.value), ".10g")
+        value = float(node.value)
+        for alias in constant_aliases or []:
+            approx_value = float(alias.get("approx_value"))
+            if math.isclose(value, approx_value, rel_tol=1e-9, abs_tol=max(abs(approx_value) * 1e-12, 1e-18)):
+                return str(alias.get("symbol", "") or format(value, ".10g"))
+        return format(value, ".10g")
     if isinstance(node, ast.Name):
         if node.id in PRETTY_TEX_CONSTANTS:
             return PRETTY_TEX_CONSTANTS[node.id]
         return replacements.get(node.id, _tex_escape_name(node.id))
     if isinstance(node, ast.UnaryOp):
         sign = "+" if isinstance(node.op, ast.UAdd) else "-"
-        return sign + _expression_to_tex(node.operand, replacements)
+        return sign + _expression_to_tex(node.operand, replacements, constant_aliases=constant_aliases)
     if isinstance(node, ast.BinOp):
-        left = _expression_to_tex(node.left, replacements)
-        right = _expression_to_tex(node.right, replacements)
+        left = _expression_to_tex(node.left, replacements, constant_aliases=constant_aliases)
+        right = _expression_to_tex(node.right, replacements, constant_aliases=constant_aliases)
         if isinstance(node.op, ast.Add):
             return f"{left} + {right}"
         if isinstance(node.op, ast.Sub):
@@ -1799,7 +2449,7 @@ def _expression_to_tex(node, replacements: dict[str, str]) -> str:
             return rf"{left} \bmod {right}"
         return rf"\left({left}\right)^{{{right}}}"
     if isinstance(node, ast.Call):
-        argument = _expression_to_tex(node.args[0], replacements)
+        argument = _expression_to_tex(node.args[0], replacements, constant_aliases=constant_aliases)
         if node.func.id == "sqrt":
             return rf"\sqrt{{{argument}}}"
         if node.func.id == "abs":
@@ -1834,16 +2484,6 @@ def _display_resolution(value: float, significant_figures: int) -> float:
     return 10 ** (exponent - significant_figures + 1)
 
 
-def _interleave_candidate_pools(*pools: list[float]) -> list[float]:
-    interleaved: list[float] = []
-    max_length = max((len(pool) for pool in pools), default=0)
-    for index in range(max_length):
-        for pool in pools:
-            if index < len(pool):
-                interleaved.append(pool[index])
-    return interleaved
-
-
 def _build_local_distractors(
     answer_value: float,
     answer_unit: str,
@@ -1856,7 +2496,7 @@ def _build_local_distractors(
     if answer_value == 0:
         scale = max((abs(value) for value in variables.values()), default=1.0) or 1.0
         increment = _display_resolution(scale, significant_figures)
-        linear_candidates = [
+        candidates = [
             2 * increment,
             -3 * increment,
             7 * increment,
@@ -1864,17 +2504,9 @@ def _build_local_distractors(
             17 * increment,
             -23 * increment,
         ]
-        magnitude_candidates = [
-            0.26 * scale,
-            -0.43 * scale,
-            3.4 * scale,
-            -6.8 * scale,
-            0.072 * scale,
-            -14.0 * scale,
-        ]
     else:
         increment = _display_resolution(answer_value, significant_figures)
-        linear_candidates = [
+        candidates = [
             answer_value + (2 * increment),
             answer_value - (3 * increment),
             answer_value + (7 * increment),
@@ -1882,15 +2514,6 @@ def _build_local_distractors(
             answer_value + (17 * increment),
             answer_value - (23 * increment),
         ]
-        magnitude_candidates = [
-            answer_value * 3.4,
-            answer_value * 0.26,
-            answer_value * 6.8,
-            answer_value * 0.072,
-            answer_value * 14.0,
-            answer_value * 0.018,
-        ]
-    candidates = _interleave_candidate_pools(linear_candidates, magnitude_candidates)
     correct_answer = normalize_numeric_answer_text(
         answer_value,
         answer_unit,
@@ -2139,6 +2762,17 @@ def build_numeric_question_payload(
         "output_snapshot": validated_output,
         "repair_attempts": [],
     }
+    raw_explanation_text = _normalize_text(candidate.get("explanation", ""))
+    feedback_v2 = _build_stored_numeric_feedback(
+        stem=validated_output["stem"],
+        explanation_text=raw_explanation_text,
+        numeric_metadata=metadata,
+        correct_answer_text=validated_output["correct_answer"],
+        distractors=validated_output["distractors"],
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+    )
+    metadata["feedback_v2"] = feedback_v2
     payload = {
         "question_type": "num",
         "stem": validated_output["stem"],

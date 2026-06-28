@@ -85,6 +85,8 @@ from standalone.services.content import (
     delete_learning_objective_and_resequence,
     move_course_block,
     move_learning_objective,
+    normalize_text,
+    refresh_learning_objective_symbol_heuristics,
     regenerate_block_descriptions_and_objectives,
     regenerate_course_descriptions_and_objectives,
     summarize_block_content,
@@ -1651,7 +1653,10 @@ def student_preview_action(request: HttpRequest, course_id: int, block_id: int, 
 def update_learning_objective(request: HttpRequest, objective_id: int) -> JsonResponse:
     if request.method != "POST" or not _is_teacher(request.user):
         raise Http404
-    objective = get_object_or_404(LearningObjective.objects.select_related("course"), pk=objective_id)
+    objective = get_object_or_404(
+        LearningObjective.objects.select_related("course", "block").prefetch_related("block__assets"),
+        pk=objective_id,
+    )
     _teacher_course_or_404(request.user, objective.course_id)
 
     field_name = "assistant_guidance" if "assistant_guidance" in request.POST else "text"
@@ -1667,6 +1672,15 @@ def update_learning_objective(request: HttpRequest, objective_id: int) -> JsonRe
         return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
 
     updated_objective = form.save()
+    if field_name == "text":
+        context_text = normalize_text(
+            "\n\n".join(
+                asset.extracted_text or ""
+                for asset in updated_objective.block.assets.all()
+                if asset.include_in_generation
+            )
+        )
+        updated_objective = refresh_learning_objective_symbol_heuristics(updated_objective, context_text)
     value = getattr(updated_objective, field_name)
     display_value = value or ("No assistant guidance yet." if field_name == "assistant_guidance" else "")
     return JsonResponse({"ok": True, "value": value, "display_value": display_value, "raw_value": value})

@@ -437,6 +437,7 @@ class LearningObjective(TimeStampedModel):
     position = models.PositiveSmallIntegerField(default=1)
     code = models.CharField(max_length=50)
     text = models.TextField()
+    symbol_heuristics = models.JSONField(default=dict, blank=True)
     assistant_guidance = models.TextField(blank=True)
 
     class Meta:

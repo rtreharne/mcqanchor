@@ -584,13 +584,19 @@ if (previewRoot && previewDataNode) {
     }
     const block = currentBlock();
     const unlocked = block?.metrics?.advanced_question_types_unlocked !== false;
+    const availableManualQuestionTypes = Array.isArray(block?.available_manual_question_types)
+      ? block.available_manual_question_types
+      : ["mcq", "maq", "waq"];
     quizMenuPanel.querySelectorAll("[data-quiz-type]").forEach((button) => {
       const questionType = button.dataset.quizType || "";
+      const isVisible = availableManualQuestionTypes.includes(questionType);
       const locked = isAdvancedQuestionType(questionType) && !unlocked;
       const copy = button.querySelector(".preview-quiz-menu-item-copy");
       if (copy && !copy.dataset.defaultText) {
         copy.dataset.defaultText = copy.textContent || "";
       }
+      button.hidden = !isVisible;
+      button.toggleAttribute("hidden", !isVisible);
       button.disabled = requestInFlight || locked;
       button.setAttribute("aria-disabled", button.disabled ? "true" : "false");
       button.classList.toggle("is-locked", locked);

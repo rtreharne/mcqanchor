@@ -69,8 +69,10 @@ from standalone.services.numeric_questions import (
     _evaluate_expression,
     _expression_to_tex,
     _normalize_text as normalize_numeric_text,
+    _render_stem_template,
     _validate_symbol_definitions,
     _validate_numeric_candidate,
+    build_numeric_question_payload,
     format_numeric_answer_feedback,
     format_numeric_feedback_explanation,
     objective_has_numeric_intent,
@@ -80,6 +82,7 @@ from standalone.services.projects import ensure_project_assignment
 from standalone.services.validation_flow import _pick_locked_questions, _shuffle_options, current_room_code, select_stratified_validation_questions
 from standalone.services.questions import (
     QuestionGenerationError,
+    QuestionGenerationUnavailableError,
     _create_question_pair,
     _is_source_dependent_question_stem,
     _normalize_generated_payload,
@@ -162,6 +165,76 @@ class StandaloneFlowTests(TestCase):
             checksum=f"{title.lower().replace(' ', '-')}-chunk",
         )
         return block, asset, objective, chunk
+
+    def sample_numeric_candidate_payload(self):
+        return {
+            "question_type": "num",
+            "stem_template": "An object travels {distance} m in {time} s. Calculate its speed.",
+            "variables": [
+                {"name": "distance", "value": 20, "unit": "m"},
+                {"name": "time", "value": 4, "unit": "s"},
+            ],
+            "calculation_expression": "distance / time",
+            "answer_unit": "m/s",
+            "significant_figures": 2,
+            "explanation": "Speed is distance divided by elapsed time.",
+            "difficulty": "core",
+            "further_study_questions": [
+                "How does changing time affect speed?",
+                "When should average speed be used?",
+                "How can speed be represented graphically?",
+            ],
+        }
+
+    def sample_numeric_feedback_payload(self):
+        return {
+            "key_idea": "Speed comes from dividing the distance travelled by the elapsed time.",
+            "formula": r"v = \frac{d}{t}",
+            "substitution": r"v = \frac{20}{4} = 5",
+            "final_answer": r"v \approx 5\,\mathrm{m/s}",
+            "options": [
+                {
+                    "answer_text": "5 m/s",
+                    "is_correct": True,
+                    "note": "You matched the distance-time relationship correctly and kept the unit consistent.",
+                },
+                {
+                    "answer_text": "5.2 m/s",
+                    "is_correct": False,
+                    "note": "This is slightly too high, so recheck the arithmetic after dividing the distance by the time.",
+                },
+                {
+                    "answer_text": "4.7 m/s",
+                    "is_correct": False,
+                    "note": "This is slightly too low, which suggests an arithmetic slip after the division step.",
+                },
+                {
+                    "answer_text": "5.7 m/s",
+                    "is_correct": False,
+                    "note": "Check the denominator carefully because using the wrong time value makes the speed too large.",
+                },
+            ],
+        }
+
+    def sample_numeric_metadata(self, *, feedback_payload=None):
+        metadata = {
+            "inputs": {
+                "distance": {"value": 20, "unit": "m"},
+                "time": {"value": 4, "unit": "s"},
+            },
+            "validation": {
+                "answer_expression": "distance / time",
+            },
+            "output_snapshot": {
+                "answer_value": 5.0,
+                "answer_unit": "m/s",
+                "correct_answer": "5 m/s",
+                "distractors": ["5.2 m/s", "4.7 m/s", "5.7 m/s"],
+            },
+        }
+        if feedback_payload is not None:
+            metadata["feedback_v2"] = feedback_payload
+        return metadata
 
     def create_coding_content_block(self, course, *, extension=".py", text=None):
         code_text = text or "```python\ndef double(value):\n    return value * 2\n\nresult = double(4)\n```"
@@ -480,6 +553,95 @@ class StandaloneFlowTests(TestCase):
         self.assertIn(r"\[t = \frac{5700 \times \ln\left(\frac{15.3}{3.5}\right)}{\ln\left(2\right)}\]", formatted)
         self.assertIn(r"t = 1.2 \times 10^{4}\,\mathrm{years}", formatted)
 
+    def test_format_numeric_feedback_explanation_uses_physics_conventions_from_context(self):
+        formatted = format_numeric_feedback_explanation(
+            stem="In a Young double-slit experiment, the slit separation is 0.00025 m, the screen distance is 2.0 m, and the fringe spacing is 0.004 m. Calculate the wavelength.",
+            explanation_text="Use the Young double-slit relationship to connect wavelength, slit separation, fringe spacing, and screen distance.",
+            objective_text="Apply the Young double-slit equation λ = aw/D to calculate wavelength from fringe spacing data.",
+            chunk_text="For Young double-slit interference, the wavelength λ is given by λ = aw/D where a is the slit separation, w is the fringe spacing, and D is the screen distance.",
+            numeric_metadata={
+                "inputs": {
+                    "slit_separation": {"value": 0.00025, "unit": "m"},
+                    "screen_distance": {"value": 2.0, "unit": "m"},
+                    "fringe_spacing": {"value": 0.004, "unit": "m"},
+                },
+                "validation": {
+                    "answer_expression": "(slit_separation * fringe_spacing) / screen_distance",
+                },
+                "output_snapshot": {
+                    "answer_value": 5e-7,
+                    "answer_unit": "m",
+                    "correct_answer": "5 × 10⁻⁷ m",
+                },
+            },
+        )
+
+        self.assertIn("λ is the wavelength", formatted)
+        self.assertIn("a is the slit separation", formatted)
+        self.assertIn("w is the fringe spacing", formatted)
+        self.assertIn("D is the screen distance", formatted)
+        self.assertIn(r"\[\lambda = \frac{a \times w}{D}\]", formatted)
+
+    def test_format_numeric_feedback_explanation_uses_photon_energy_conventions(self):
+        formatted = format_numeric_feedback_explanation(
+            stem="A metal surface is illuminated with light of frequency 8.5 × 10^14 Hz. The work function of the metal is 3.7 × 10^-19 J. What is the energy, in joules, of a single photon of this light?",
+            explanation_text="The energy of a photon is calculated by multiplying Planck's constant by the frequency of the light.",
+            numeric_metadata={
+                "inputs": {
+                    "frequency": {"value": 8.5e14, "unit": "Hz"},
+                },
+                "validation": {
+                    "answer_expression": "6.626e-34 * frequency",
+                },
+                "output_snapshot": {
+                    "answer_value": 6.626e-34 * 8.5e14,
+                    "answer_unit": "J",
+                    "correct_answer": "5.6 × 10⁻¹⁹ J",
+                },
+            },
+        )
+
+        self.assertIn("Using the photon-energy relationship:", formatted)
+        self.assertIn("E is the energy", formatted)
+        self.assertIn("h is Planck's constant", formatted)
+        self.assertIn("f is the frequency", formatted)
+        self.assertIn(r"\[E = h f\]", formatted)
+        self.assertIn(r"\[E = 6.626 \times 10^{-34} \times 8.5 \times 10^{14}\]", formatted)
+        self.assertIn(r"E \approx 5.6 \times 10^{-19}\,\mathrm{J}", formatted)
+
+    def test_format_numeric_feedback_explanation_uses_planck_constant_context_without_stored_heuristics(self):
+        formatted = format_numeric_feedback_explanation(
+            stem="An LED emits light with a wavelength of 6.2 × 10^-7 m and turns on when the voltage across it reaches 2.1 V. Since the elementary charge is 1.6 × 10^-19 C and the speed of light is 3.0 × 10^8 m/s, estimate the value of Planck's constant in joule-seconds.",
+            explanation_text="At threshold, the electrical energy transferred to one electron equals the photon energy, so combine eV = hc/λ and rearrange for Planck's constant.",
+            objective_text="Estimate Planck's constant from LED threshold voltage and emitted wavelength.",
+            chunk_text="For an LED at threshold, the supplied energy per electron is eV and the photon energy is hc/λ, so h = eVλ/c.",
+            numeric_metadata={
+                "inputs": {
+                    "threshold_voltage": {"value": 2.1, "unit": "V"},
+                    "wavelength": {"value": 6.2e-7, "unit": "m"},
+                    "speed_of_light": {"value": 3.0e8, "unit": "m/s"},
+                },
+                "validation": {
+                    "answer_expression": "(threshold_voltage * 1.602176634e-19 * wavelength) / speed_of_light",
+                },
+                "output_snapshot": {
+                    "answer_value": (2.1 * 1.602176634e-19 * 6.2e-7) / 3.0e8,
+                    "answer_unit": "J·s",
+                    "correct_answer": "7 × 10⁻³⁴ J·s",
+                },
+            },
+        )
+
+        self.assertIn("h is Planck's constant", formatted)
+        self.assertIn("V is the potential difference", formatted)
+        self.assertIn("λ is the wavelength", formatted)
+        self.assertIn("c is the speed of light", formatted)
+        self.assertIn("e is the elementary charge", formatted)
+        self.assertIn(r"\[h =", formatted)
+        self.assertIn(r"\lambda", formatted)
+        self.assertIn(r"\frac{", formatted)
+        self.assertIn(r"h = 7 \times 10^{-34}\,\mathrm{J}\cdot\mathrm{s}", formatted)
+
     @override_settings(OPENAI_API_KEY="")
     def test_format_numeric_answer_feedback_uses_safe_decay_symbols(self):
         feedback = format_numeric_answer_feedback(
@@ -504,19 +666,289 @@ class StandaloneFlowTests(TestCase):
             is_correct=True,
         )
 
-        self.assertIn("Correct", feedback)
-        self.assertIn("Correct formula:", feedback)
         self.assertIn(r"\[N = N_0", feedback)
         self.assertIn(r"\exp", feedback)
-        self.assertIn("Symbols: Here, N is the number of undecayed nuclei remaining", feedback)
-        self.assertIn("N₀ is the initial number of undecayed nuclei", feedback)
-        self.assertIn("λ is the decay constant", feedback)
-        self.assertIn("t is the elapsed time", feedback)
         self.assertIn(r"N \approx 1.51 \times 10^{4}", feedback)
-        self.assertNotIn("Verdict:", feedback)
-        self.assertNotIn("Targeted feedback:", feedback)
+        self.assertTrue(feedback.startswith("Correct"))
+        self.assertNotIn("Symbols:", feedback)
+        self.assertNotIn("Key idea:", feedback)
         self.assertNotIn("P is", feedback)
         self.assertNotIn("power", feedback.lower())
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_uses_photon_energy_symbols(self):
+        feedback = format_numeric_answer_feedback(
+            stem="A metal surface is illuminated with light of frequency 8.5 × 10^14 Hz. The work function of the metal is 3.7 × 10^-19 J. What is the energy, in joules, of a single photon of this light?",
+            explanation_text="The energy of a photon is calculated by multiplying Planck's constant by the frequency of the light.",
+            numeric_metadata={
+                "inputs": {
+                    "frequency": {"value": 8.5e14, "unit": "Hz"},
+                },
+                "validation": {
+                    "answer_expression": "6.626e-34 * frequency",
+                },
+                "output_snapshot": {
+                    "answer_value": 6.626e-34 * 8.5e14,
+                    "answer_unit": "J",
+                    "correct_answer": "5.6 × 10⁻¹⁹ J",
+                },
+            },
+            selected_answer_text="5.6 × 10⁻¹⁹ J",
+            is_correct=True,
+        )
+
+        self.assertIn(r"\[E = h f\]", feedback)
+        self.assertIn(r"\[E \approx 5.6 \times 10^{-19}\,\mathrm{J}\]", feedback)
+        self.assertNotIn(r"\[f = 6.626e-34 \times f\]", feedback)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_never_uses_partly_correct_label(self):
+        feedback = format_numeric_answer_feedback(
+            stem="A radio station broadcasts at a frequency of 105000000 Hz. Using Planck's constant 6.63 × 10^-34 J·s, what is the energy in joules of a single photon emitted at this frequency?",
+            explanation_text="The energy of a photon is found by multiplying Planck's constant by the frequency according to E = hf.",
+            numeric_metadata={
+                "inputs": {
+                    "frequency": {"value": 1.05e8, "unit": "Hz"},
+                },
+                "validation": {
+                    "answer_expression": "6.63e-34 * frequency",
+                },
+                "output_snapshot": {
+                    "answer_value": 6.63e-34 * 1.05e8,
+                    "answer_unit": "J",
+                    "correct_answer": "7 × 10⁻²⁶ J",
+                },
+            },
+            selected_answer_text="7.7 × 10⁻²⁶ J",
+            is_correct=False,
+        )
+
+        self.assertIn("The energy of a photon is found by multiplying Planck's constant by the frequency according to E = hf.", feedback)
+        self.assertNotIn("Partly correct", feedback)
+        self.assertNotIn("partly correct", feedback.lower())
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_uses_runtime_symbol_heuristics_for_legacy_context(self):
+        feedback = format_numeric_answer_feedback(
+            stem="An LED emits light with a wavelength of 6.2 × 10^-7 m and turns on when the voltage across it reaches 2.1 V. Since the elementary charge is 1.6 × 10^-19 C and the speed of light is 3.0 × 10^8 m/s, estimate the value of Planck's constant in joule-seconds.",
+            explanation_text="At threshold, the electrical energy transferred to one electron equals the photon energy, so combine eV = hc/λ and rearrange for Planck's constant.",
+            objective_text="Estimate Planck's constant from LED threshold voltage and emitted wavelength.",
+            chunk_text="For an LED at threshold, the supplied energy per electron is eV and the photon energy is hc/λ, so h = eVλ/c.",
+            numeric_metadata={
+                "inputs": {
+                    "threshold_voltage": {"value": 2.1, "unit": "V"},
+                    "wavelength": {"value": 6.2e-7, "unit": "m"},
+                    "speed_of_light": {"value": 3.0e8, "unit": "m/s"},
+                },
+                "validation": {
+                    "answer_expression": "(threshold_voltage * 1.602176634e-19 * wavelength) / speed_of_light",
+                },
+                "output_snapshot": {
+                    "answer_value": (2.1 * 1.602176634e-19 * 6.2e-7) / 3.0e8,
+                    "answer_unit": "J·s",
+                    "correct_answer": "7 × 10⁻³⁴ J·s",
+                },
+            },
+            selected_answer_text="7 × 10⁻³⁴ J·s",
+            is_correct=True,
+        )
+
+        self.assertIn(r"\[h =", feedback)
+        self.assertIn(r"\[h \approx 7 \times 10^{-34}\,\mathrm{J}\cdot\mathrm{s}\]", feedback)
+        self.assertNotIn("λ is Planck's constant", feedback)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_uses_kinematics_symbols_from_context(self):
+        feedback = format_numeric_answer_feedback(
+            stem="A car accelerates uniformly from 8 m/s to 20 m/s in 4 s. Calculate the displacement.",
+            explanation_text="For constant acceleration, displacement equals the average velocity multiplied by the time taken.",
+            objective_text="Use the SUVAT relationship s = ((u + v) / 2)t to calculate displacement in uniform acceleration problems.",
+            chunk_text="In constant-acceleration motion, displacement s can be found from s = ((u + v) / 2)t, where u is the initial velocity, v is the final velocity, and t is the time.",
+            numeric_metadata={
+                "inputs": {
+                    "initial_velocity": {"value": 8.0, "unit": "m/s"},
+                    "final_velocity": {"value": 20.0, "unit": "m/s"},
+                    "time": {"value": 4.0, "unit": "s"},
+                },
+                "validation": {
+                    "answer_expression": "((initial_velocity + final_velocity) / 2) * time",
+                },
+                "output_snapshot": {
+                    "answer_value": 56.0,
+                    "answer_unit": "m",
+                    "correct_answer": "56 m",
+                },
+            },
+            selected_answer_text="56 m",
+            is_correct=True,
+        )
+
+        self.assertIn(r"\[s = \frac{u + v}{2} \times t\]", feedback)
+        self.assertIn(r"\[s = \frac{8 + 20}{2} \times 4\]", feedback)
+        self.assertIn(r"\[s \approx 56\,\mathrm{m}\]", feedback)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_uses_stored_feedback_for_correct_option(self):
+        stored_feedback = self.sample_numeric_feedback_payload()
+        stored_feedback["formula"] = "v = d/t"
+        stored_feedback["substitution"] = "v = 20/4 = 5"
+        feedback = format_numeric_answer_feedback(
+            stem="An object travels 20 m in 4 s. Calculate its speed.",
+            explanation_text="Speed is distance divided by elapsed time.",
+            numeric_metadata=self.sample_numeric_metadata(feedback_payload=stored_feedback),
+            selected_answer_text="5 m/s",
+            is_correct=True,
+        )
+
+        self.assertTrue(feedback.startswith("Correct"))
+        self.assertIn(r"\[v = d/t\]", feedback)
+        self.assertIn(r"\[v = 20/4 = 5\]", feedback)
+        self.assertNotIn(r"\[v = \frac{d}{t}\]", feedback)
+        self.assertNotIn("You matched the distance-time relationship correctly", feedback)
+        self.assertNotIn("Key idea:", feedback)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_uses_stored_feedback_for_selected_distractor(self):
+        feedback = format_numeric_answer_feedback(
+            stem="An object travels 20 m in 4 s. Calculate its speed.",
+            explanation_text="Speed is distance divided by elapsed time.",
+            numeric_metadata=self.sample_numeric_metadata(feedback_payload=self.sample_numeric_feedback_payload()),
+            selected_answer_text="5.7 m/s",
+            is_correct=False,
+        )
+
+        self.assertTrue(feedback.startswith("Incorrect"))
+        self.assertIn(
+            "Check the denominator carefully because using the wrong time value makes the speed too large.",
+            feedback,
+        )
+        self.assertIn(r"\[v = \frac{d}{t}\]", feedback)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_falls_back_when_stored_feedback_is_malformed(self):
+        malformed_feedback = {
+            "key_idea": "Speed comes from dividing the distance travelled by the elapsed time.",
+            "formula": r"v = \frac{d}{t}",
+            "substitution": r"v = \frac{20}{4} = 5",
+            "final_answer": r"v \approx 5\,\mathrm{m/s}",
+            "options": [
+                {
+                    "answer_text": "5 m/s",
+                    "is_correct": True,
+                    "note": "This note should be ignored because the stored payload is incomplete.",
+                }
+            ],
+        }
+        feedback = format_numeric_answer_feedback(
+            stem="An object travels 20 m in 4 s. Calculate its speed.",
+            explanation_text="Speed is distance divided by elapsed time.",
+            numeric_metadata=self.sample_numeric_metadata(feedback_payload=malformed_feedback),
+            selected_answer_text="5 m/s",
+            is_correct=True,
+        )
+
+        self.assertTrue(feedback.startswith("Correct"))
+        self.assertNotIn("This note should be ignored", feedback)
+        self.assertNotIn("Key idea:", feedback)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_uses_centripetal_acceleration_layout(self):
+        feedback = format_numeric_answer_feedback(
+            stem="An object moves in a circle at a speed of 3.2 m/s on a path of radius 2.5 m. Calculate the centripetal acceleration.",
+            explanation_text="Centripetal acceleration is calculated by squaring the speed and dividing by the radius of the circular path.",
+            numeric_metadata={
+                "inputs": {
+                    "speed": {"value": 3.2, "unit": "m/s"},
+                    "radius": {"value": 2.5, "unit": "m"},
+                },
+                "validation": {
+                    "answer_expression": "(speed ** 2) / radius",
+                },
+                "output_snapshot": {
+                    "answer_value": (3.2 ** 2) / 2.5,
+                    "answer_unit": "m/s^2",
+                    "correct_answer": "4.1 m/s^2",
+                },
+            },
+            selected_answer_text="4.1 m/s^2",
+            is_correct=True,
+        )
+
+        self.assertTrue(feedback.startswith("Correct"))
+        self.assertIn(r"\[a = \frac{v^2}{r}\]", feedback)
+        self.assertIn(r"\[a = \frac{3.2^2}{2.5} = \frac{10.24}{2.5} = 4.096\]", feedback)
+        self.assertIn(r"\[a \approx 4.1\,\mathrm{m/s^2}\]", feedback)
+        self.assertNotIn(r"\[v = \frac{v^2}{r}\]", feedback)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_ingest_content_asset_persists_learning_objective_symbol_heuristics(self):
+        from standalone.services.content import ingest_content_asset
+
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Quantum", summary="Quantum summary", order=1)
+        BlockConfig.objects.create(block=block)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile(
+                "quantum.txt",
+                (
+                    "Calculate the energy of a photon from its frequency using Planck's constant.\n"
+                    "Use the relationship E = hf for electromagnetic radiation.\n"
+                ).encode("utf-8"),
+                content_type="text/plain",
+            ),
+            original_filename="quantum.txt",
+            extension=".txt",
+            include_in_generation=True,
+        )
+
+        ingest_content_asset(asset)
+
+        objective = asset.learning_objectives.filter(text__icontains="photon").first()
+        self.assertIsNotNone(objective)
+        self.assertEqual(objective.symbol_heuristics["answer_symbol"], "E")
+        self.assertEqual(objective.symbol_heuristics["answer_description"], "the photon energy")
+        self.assertEqual(objective.symbol_heuristics["variable_hints"][0]["symbol"], "f")
+        self.assertEqual(objective.symbol_heuristics["constant_hints"][0]["symbol"], "h")
+
+    def test_numeric_feedback_uses_stored_learning_objective_symbol_heuristics(self):
+        feedback = format_numeric_answer_feedback(
+            stem="A metal surface is illuminated with light of frequency 8.5 × 10^14 Hz. What is the energy, in joules, of a single photon of this light?",
+            explanation_text="The energy of a photon is calculated by multiplying Planck's constant by the frequency of the light.",
+            objective_text="Calculate the energy of a photon from its frequency using Planck's constant.",
+            chunk_text="Use the relationship E = hf, where E is photon energy, h is Planck's constant, and f is the frequency.",
+            objective_symbol_heuristics={
+                "answer_symbol": "E",
+                "answer_description": "the photon energy",
+                "variable_hints": [
+                    {"match_terms": ["frequency"], "symbol": "f", "description": "the frequency"},
+                ],
+                "constant_hints": [
+                    {"symbol": "h", "description": "Planck's constant", "approx_value": 6.62607015e-34},
+                ],
+            },
+            numeric_metadata={
+                "inputs": {
+                    "frequency": {"value": 8.5e14, "unit": "Hz"},
+                },
+                "validation": {
+                    "answer_expression": "6.62607015e-34 * frequency",
+                },
+                "output_snapshot": {
+                    "answer_value": 6.62607015e-34 * 8.5e14,
+                    "answer_unit": "J",
+                    "correct_answer": "5.6 × 10⁻¹⁹ J",
+                },
+            },
+            selected_answer_text="5.6 × 10⁻¹⁹ J",
+            is_correct=True,
+        )
+
+        self.assertIn(r"\[E = h f\]", feedback)
+        self.assertIn(r"\[E = 6.626 \times 10^{-34} \times 8.5 \times 10^{14}\]", feedback)
+        self.assertIn(r"\[E \approx 5.6 \times 10^{-19}\,\mathrm{J}\]", feedback)
+        self.assertNotIn("f is the required quantity", feedback)
 
     def test_validate_symbol_definitions_rejects_reserved_symbol_conflicts(self):
         self.assertTrue(
@@ -577,8 +1009,103 @@ class StandaloneFlowTests(TestCase):
 
         mock_client.assert_not_called()
         self.assertIn(r"\[N = N_0", feedback)
-        self.assertIn("N₀ is the initial number of undecayed nuclei", feedback)
         self.assertNotIn("P is power", feedback)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_build_numeric_question_payload_stores_feedback_v2(self):
+        responses = [
+            SimpleNamespace(output_text=json.dumps(self.sample_numeric_candidate_payload())),
+            SimpleNamespace(output_text=json.dumps(self.sample_numeric_feedback_payload())),
+        ]
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = responses
+            result = build_numeric_question_payload(
+                "Calculate the speed when a body travels 20 m in 4 s.",
+                "Calculate speed from distance and time.",
+                3,
+            )
+
+        feedback_v2 = result.payload["numeric_metadata"]["feedback_v2"]
+        self.assertEqual(feedback_v2["version"], "option-v2")
+        self.assertEqual(feedback_v2["key_idea"], "Speed comes from dividing the distance travelled by the elapsed time.")
+        self.assertEqual(feedback_v2["formula_tex"], r"v = \frac{d}{t}")
+        self.assertEqual(feedback_v2["substitution_tex"], r"v = \frac{20}{4} = 5")
+        self.assertEqual(feedback_v2["final_tex"], r"v \approx 5\,\mathrm{m/s}")
+        self.assertEqual(len(feedback_v2["options"]), 4)
+        self.assertEqual(feedback_v2["options"][0]["answer_text"], "5 m/s")
+        self.assertTrue(feedback_v2["options"][0]["is_correct"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_build_numeric_question_payload_rejects_feedback_with_unknown_option(self):
+        invalid_feedback = {
+            "key_idea": "Speed comes from dividing the distance travelled by the elapsed time.",
+            "formula": r"v = \frac{d}{t}",
+            "substitution": r"v = \frac{20}{4} = 5",
+            "final_answer": r"v \approx 5\,\mathrm{m/s}",
+            "options": [
+                {"answer_text": "5 m/s", "is_correct": True, "note": "Correct relationship and unit."},
+                {"answer_text": "8 m/s", "is_correct": False, "note": "This option should not exist."},
+                {"answer_text": "4.7 m/s", "is_correct": False, "note": "Arithmetic is slightly low."},
+                {"answer_text": "5.7 m/s", "is_correct": False, "note": "Arithmetic is slightly high."},
+            ],
+        }
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = [
+                SimpleNamespace(output_text=json.dumps(self.sample_numeric_candidate_payload())),
+                SimpleNamespace(output_text=json.dumps(invalid_feedback)),
+            ]
+            with self.assertRaisesMessage(
+                NumericQuestionValidationError,
+                "Stored numeric feedback introduced an unknown answer option.",
+            ):
+                build_numeric_question_payload(
+                    "Calculate the speed when a body travels 20 m in 4 s.",
+                    "Calculate speed from distance and time.",
+                    3,
+                )
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_build_numeric_question_payload_rejects_feedback_with_multiple_correct_options(self):
+        invalid_feedback = self.sample_numeric_feedback_payload()
+        invalid_feedback["options"][1]["is_correct"] = True
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = [
+                SimpleNamespace(output_text=json.dumps(self.sample_numeric_candidate_payload())),
+                SimpleNamespace(output_text=json.dumps(invalid_feedback)),
+            ]
+            with self.assertRaisesMessage(
+                NumericQuestionValidationError,
+                "Stored numeric feedback must mark exactly one option as correct.",
+            ):
+                build_numeric_question_payload(
+                    "Calculate the speed when a body travels 20 m in 4 s.",
+                    "Calculate speed from distance and time.",
+                    3,
+                )
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_build_numeric_question_payload_rejects_feedback_when_wrong_option_marked_correct(self):
+        invalid_feedback = self.sample_numeric_feedback_payload()
+        invalid_feedback["options"][0]["is_correct"] = False
+        invalid_feedback["options"][1]["is_correct"] = True
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = [
+                SimpleNamespace(output_text=json.dumps(self.sample_numeric_candidate_payload())),
+                SimpleNamespace(output_text=json.dumps(invalid_feedback)),
+            ]
+            with self.assertRaisesMessage(
+                NumericQuestionValidationError,
+                "Stored numeric feedback marked the wrong option as correct.",
+            ):
+                build_numeric_question_payload(
+                    "Calculate the speed when a body travels 20 m in 4 s.",
+                    "Calculate speed from distance and time.",
+                    3,
+                )
 
     def test_normalize_numeric_answer_text_uses_standard_form_for_scientific_notation(self):
         formatted = normalize_numeric_answer_text(5e-8, "m", 2)
@@ -590,7 +1117,25 @@ class StandaloneFlowTests(TestCase):
 
         self.assertEqual(formatted, "3000 s")
 
-    def test_local_numeric_distractors_mix_linear_and_magnitude_spread(self):
+    def test_render_stem_template_uses_standard_form_for_large_and_small_values(self):
+        stem = _render_stem_template(
+            "The speed of light is {speed_of_light} m/s and the wavelength is {wavelength} m.",
+            {"speed_of_light": 300000000, "wavelength": 4.8e-7},
+            {"speed_of_light": "m/s", "wavelength": "m"},
+        )
+
+        self.assertEqual(stem, "The speed of light is 3 × 10⁸ m/s and the wavelength is 4.8 × 10⁻⁷ m.")
+
+    def test_render_stem_template_preserves_non_zero_significant_digits_for_large_values(self):
+        stem = _render_stem_template(
+            "A radio station broadcasts at {frequency} Hz.",
+            {"frequency": 105000000},
+            {"frequency": "Hz"},
+        )
+
+        self.assertEqual(stem, "A radio station broadcasts at 1.05 × 10⁸ Hz.")
+
+    def test_local_numeric_distractors_use_nearby_linear_spread(self):
         distractors, distractor_values = _build_local_distractors(
             5e-7,
             "m",
@@ -605,13 +1150,26 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(len(set(distractor_values)), 3)
         ratios = [abs(value / 5e-7) for value in distractor_values]
         self.assertTrue(any(0.5 < ratio < 2.0 for ratio in ratios))
-        self.assertTrue(any(ratio >= 2.5 or ratio <= 0.2 for ratio in ratios))
+        self.assertTrue(all(0.5 < ratio < 2.0 for ratio in ratios))
         mantissas = [
             re.match(r"([-+]?\d+(?:\.\d+)?)\s*×\s*10", option).group(1)
             for option in distractors
             if "× 10" in option
         ]
         self.assertGreaterEqual(len(set(mantissas)), 2)
+
+    def test_local_numeric_distractors_keep_integer_answers_as_whole_number_options(self):
+        distractors, distractor_values = _build_local_distractors(
+            42,
+            "",
+            2,
+            3,
+            {"sample_size": 42, "baseline": 18},
+            display_style="decimal",
+        )
+
+        self.assertEqual(distractors, ["44", "39", "49"])
+        self.assertEqual(distractor_values, [44, 39, 49])
 
     def test_normalize_numeric_explanation_text_cleans_inline_formula_prose(self):
         explanation = normalize_numeric_explanation_text(
@@ -2506,6 +3064,43 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(response.json()["display_value"], "Explain how membrane proteins regulate transport")
         objective.refresh_from_db()
         self.assertEqual(objective.text, "Explain how membrane proteins regulate transport")
+
+    def test_inline_learning_objective_text_update_refreshes_symbol_heuristics(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Quantum", summary="Quantum summary", order=1)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile("notes.txt", b"Quantum notes", content_type="text/plain"),
+            original_filename="notes.txt",
+            extension=".txt",
+            include_in_generation=True,
+            processing_status=ContentAsset.ProcessingStatus.PROCESSED,
+            extracted_text=(
+                "Calculate the energy of a photon from its frequency using Planck's constant.\n"
+                "Use the relationship E = hf for electromagnetic radiation."
+            ),
+        )
+        objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Describe light waves",
+            symbol_heuristics={},
+        )
+        self.client.force_login(self.teacher)
+        response = self.client.post(
+            reverse("standalone:update_learning_objective", args=[objective.pk]),
+            {"text": "Calculate the energy of a photon from its frequency using Planck's constant."},
+        )
+        self.assertEqual(response.status_code, 200)
+        objective.refresh_from_db()
+        self.assertEqual(objective.symbol_heuristics["answer_symbol"], "E")
+        self.assertEqual(objective.symbol_heuristics["answer_description"], "the photon energy")
+        self.assertEqual(objective.symbol_heuristics["variable_hints"][0]["symbol"], "f")
+        self.assertEqual(objective.symbol_heuristics["constant_hints"][0]["symbol"], "h")
 
     def test_inline_learning_objective_guidance_update_saves_multiline_text(self):
         course = self.create_course()
@@ -4526,30 +5121,11 @@ print(result)""",
         chunk.text = "Calculate the speed when a body travels 20 m in 4 s."
         chunk.save(update_fields=["text"])
 
-        openai_payload = {
-            "question_type": "num",
-            "stem_template": "An object travels {distance} m in {time} s. Calculate its speed.",
-            "variables": [
-                {"name": "distance", "value": 20, "unit": "m"},
-                {"name": "time", "value": 4, "unit": "s"},
-            ],
-            "calculation_expression": "distance / time",
-            "answer_unit": "m/s",
-            "significant_figures": 2,
-            "explanation": "Speed is distance divided by elapsed time.",
-            "difficulty": "core",
-            "further_study_questions": [
-                "How does changing time affect speed?",
-                "When should average speed be used?",
-                "How can speed be represented graphically?",
-            ],
-        }
-
-        class DummyResponse:
-            output_text = json.dumps(openai_payload)
-
         with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
-            mock_client.return_value.responses.create.return_value = DummyResponse()
+            mock_client.return_value.responses.create.side_effect = [
+                SimpleNamespace(output_text=json.dumps(self.sample_numeric_candidate_payload())),
+                SimpleNamespace(output_text=json.dumps(self.sample_numeric_feedback_payload())),
+            ]
             practice, validation = generate_question_pair_for_block(block)
 
         self.assertIsNotNone(practice)
@@ -4558,9 +5134,11 @@ print(result)""",
         self.assertTrue(practice.is_numerical)
         self.assertIn("Worked solution:", practice.explanation)
         self.assertIn("\\[", practice.explanation)
+        self.assertEqual(practice.numeric_metadata["feedback_v2"]["version"], "option-v2")
         self.assertEqual(validation.question_type, QuestionBankItem.QuestionType.NUM)
         self.assertEqual(validation.numeric_metadata["script_version"], "expression-v2")
         self.assertTrue(validation.numeric_metadata["validation"]["expression_evaluated_locally"])
+        self.assertEqual(validation.numeric_metadata["feedback_v2"]["version"], "option-v2")
         self.assertTrue(validation.is_numerical)
 
     @override_settings(OPENAI_API_KEY="test-key", OPENAI_NUMERIC_MODEL="gpt-4.1")
@@ -4574,33 +5152,14 @@ print(result)""",
         chunk.text = "Calculate the speed when a body travels 20 m in 4 s."
         chunk.save(update_fields=["text"])
 
-        captured_kwargs = {}
-
-        class DummyResponse:
-            output_text = json.dumps(
-                {
-                    "question_type": "num",
-                    "stem_template": "An object travels {distance} m in {time} s. Calculate its speed.",
-                    "variables": [
-                        {"name": "distance", "value": 20, "unit": "m"},
-                        {"name": "time", "value": 4, "unit": "s"},
-                    ],
-                    "calculation_expression": "distance / time",
-                    "answer_unit": "m/s",
-                    "significant_figures": 2,
-                    "explanation": "Speed is distance divided by elapsed time.",
-                    "difficulty": "core",
-                    "further_study_questions": [
-                        "How does changing time affect speed?",
-                        "When should average speed be used?",
-                        "How can speed be represented graphically?",
-                    ],
-                }
-            )
+        captured_kwargs = []
 
         def fake_create(*args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return DummyResponse()
+            captured_kwargs.append(kwargs)
+            schema_name = kwargs["text"]["format"]["name"]
+            if schema_name == "numeric_question_specification":
+                return SimpleNamespace(output_text=json.dumps(self.sample_numeric_candidate_payload()))
+            return SimpleNamespace(output_text=json.dumps(self.sample_numeric_feedback_payload()))
 
         with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
             mock_client.return_value.responses.create.side_effect = fake_create
@@ -4608,12 +5167,13 @@ print(result)""",
 
         self.assertIsNotNone(practice)
         self.assertIsNotNone(validation)
-        self.assertEqual(captured_kwargs["model"], "gpt-4.1")
-        self.assertEqual(captured_kwargs["text"]["format"]["type"], "json_schema")
-        self.assertTrue(captured_kwargs["text"]["format"]["strict"])
-        self.assertNotIn("verbosity", captured_kwargs["text"])
+        self.assertEqual(len(captured_kwargs), 2)
+        self.assertEqual(captured_kwargs[0]["model"], "gpt-4.1")
+        self.assertEqual(captured_kwargs[0]["text"]["format"]["type"], "json_schema")
+        self.assertTrue(captured_kwargs[0]["text"]["format"]["strict"])
+        self.assertNotIn("verbosity", captured_kwargs[0]["text"])
         self.assertEqual(
-            captured_kwargs["text"]["format"]["schema"]["required"],
+            captured_kwargs[0]["text"]["format"]["schema"]["required"],
             [
                 "question_type",
                 "stem_template",
@@ -4626,6 +5186,15 @@ print(result)""",
                 "further_study_questions",
             ],
         )
+        self.assertEqual(
+            captured_kwargs[1]["text"]["format"]["schema"]["required"],
+            ["key_idea", "formula", "substitution", "final_answer", "options"],
+        )
+        feedback_prompt = captured_kwargs[1]["input"][0]["content"][0]["text"]
+        self.assertIn("Available numeric givens:", feedback_prompt)
+        self.assertIn("Verified calculation expression:", feedback_prompt)
+        self.assertNotIn("Locked symbol meanings:", feedback_prompt)
+        self.assertNotIn("Locked formula:", feedback_prompt)
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_numeric_prompt_includes_teacher_guidance(self):
@@ -4651,32 +5220,12 @@ print(result)""",
 
         captured_prompt = ""
 
-        class DummyResponse:
-            output_text = json.dumps(
-                {
-                    "question_type": "num",
-                    "stem_template": "An object travels {distance} m in {time} s. Calculate its speed.",
-                    "variables": [
-                        {"name": "distance", "value": 20, "unit": "m"},
-                        {"name": "time", "value": 4, "unit": "s"},
-                    ],
-                    "calculation_expression": "distance / time",
-                    "answer_unit": "m/s",
-                    "significant_figures": 2,
-                    "explanation": "Speed is distance divided by time.",
-                    "difficulty": "core",
-                    "further_study_questions": [
-                        "How does changing time affect speed?",
-                        "When should average speed be used?",
-                        "How can speed be represented graphically?",
-                    ],
-                }
-            )
-
         def fake_create(*args, **kwargs):
             nonlocal captured_prompt
-            captured_prompt = kwargs["input"][0]["content"][0]["text"]
-            return DummyResponse()
+            if kwargs["text"]["format"]["name"] == "numeric_question_specification":
+                captured_prompt = kwargs["input"][0]["content"][0]["text"]
+                return SimpleNamespace(output_text=json.dumps(self.sample_numeric_candidate_payload()))
+            return SimpleNamespace(output_text=json.dumps(self.sample_numeric_feedback_payload()))
 
         with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
             mock_client.return_value.responses.create.side_effect = fake_create
@@ -4686,6 +5235,44 @@ print(result)""",
         self.assertIn("Use language suitable for 10-11 year olds", captured_prompt)
         self.assertIn("Use Roman numerals in the stem", captured_prompt)
         self.assertIn("Avoid adult exam phrasing", captured_prompt)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_generate_question_pair_retries_when_numeric_feedback_generation_fails(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, _asset, _objective, chunk = self.create_preview_content_block(course)
+        chunk.text = "Calculate the speed when a body travels 20 m in 4 s."
+        chunk.save(update_fields=["text"])
+
+        invalid_feedback = {
+            "key_idea": "Speed comes from dividing the distance travelled by the elapsed time.",
+            "formula": r"v = \frac{d}{t}",
+            "substitution": r"v = \frac{20}{4} = 5",
+            "final_answer": r"v \approx 5\,\mathrm{m/s}",
+            "options": [
+                {"answer_text": "5 m/s", "is_correct": True, "note": "Correct relationship and unit."},
+                {"answer_text": "8 m/s", "is_correct": False, "note": "This option should not exist."},
+                {"answer_text": "4.7 m/s", "is_correct": False, "note": "Arithmetic is slightly low."},
+                {"answer_text": "5.7 m/s", "is_correct": False, "note": "Arithmetic is slightly high."},
+            ],
+        }
+
+        with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = [
+                SimpleNamespace(output_text=json.dumps(self.sample_numeric_candidate_payload())),
+                SimpleNamespace(output_text=json.dumps(invalid_feedback)),
+                SimpleNamespace(output_text=json.dumps(self.sample_numeric_candidate_payload())),
+                SimpleNamespace(output_text=json.dumps(self.sample_numeric_feedback_payload())),
+            ]
+            practice, validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(mock_client.return_value.responses.create.call_count, 4)
+        self.assertEqual(practice.numeric_metadata["feedback_v2"]["version"], "option-v2")
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_numeric_generation_rejects_roman_numeral_conversion_before_openai(self):
@@ -5367,6 +5954,55 @@ print(result)""",
         revisit_payload = next(item for item in revisit_quiz.json()["preview"]["blocks"] if item["id"] == block.pk)
         revisit_question = [message for message in revisit_payload["transcript"] if message["kind"] == "question"][-1]["question_id"]
         self.assertEqual(revisit_question, questions[0].pk)
+
+    def test_student_practice_default_quiz_respects_numeric_ratio_when_set_to_100_percent(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        Enrollment.objects.create(course=course, student=self.student)
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        mcq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Standard student practice MCQ?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Standard explanation.",
+            question_hash="student-practice-default-mcq-priority",
+        )
+        numeric = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.NUM,
+            stem="A body travels 20 m in 4 s. Calculate the speed.",
+            correct_answer="5 m/s",
+            distractors=["4 m/s", "8 m/s", "10 m/s"],
+            explanation="Use v = d/t.",
+            question_hash="student-practice-default-num-priority",
+            is_numerical=True,
+            numeric_metadata={"script_version": "expression-v2"},
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        block_payload = next(item for item in preview["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_id"], numeric.pk)
+        self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.NUM)
+        self.assertNotEqual(question_messages[-1]["question_id"], mcq.pk)
 
     def test_student_practice_allows_future_block_questions_when_pre_engagement_enabled(self):
         course = self.create_course()
@@ -6189,7 +6825,8 @@ print(result)""",
     def test_student_preview_forced_numeric_question_type_prefers_matching_bank_item(self):
         course = self.create_course()
         course.config.advanced_question_start_percent = 0
-        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        course.config.numeric_ratio_percent = 100
+        course.config.save(update_fields=["advanced_question_start_percent", "numeric_ratio_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         QuestionBankItem.objects.create(
             course=course,
@@ -6233,21 +6870,50 @@ print(result)""",
         preview = response.json()["preview"]
         block_payload = next(item for item in preview["blocks"] if item["id"] == block.pk)
         question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertIn(QuestionBankItem.QuestionType.NUM, block_payload["available_manual_question_types"])
         self.assertEqual(question_messages[-1]["question_id"], forced_num.pk)
         self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.NUM)
         self.assertTrue(question_messages[-1]["is_numerical"])
         self.assertEqual(question_messages[-1]["question_type_label"], "Numerical MCQ")
 
-    @override_settings(OPENAI_API_KEY="")
-    def test_student_preview_forced_numeric_question_type_shows_error_without_openai(self):
+    def test_student_preview_forced_numeric_question_type_falls_back_when_block_numeric_ratio_is_zero(self):
         course = self.create_course()
         course.config.advanced_question_start_percent = 0
-        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
-        block, _, objective, chunk = self.create_preview_content_block(course, title="Oscillations")
-        objective.text = "Calculate the maximum speed and acceleration of oscillators and evaluate conditions causing loss of contact in vibrating systems"
-        objective.save(update_fields=["text"])
-        chunk.text = "Oscillations involve amplitude, frequency, resonance, and loss of contact in vibrating systems."
-        chunk.save(update_fields=["text"])
+        course.config.numeric_ratio_percent = 100
+        course.config.save(update_fields=["advanced_question_start_percent", "numeric_ratio_percent", "updated_at"])
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        block.config.numeric_ratio_percent = 0
+        block.config.save(update_fields=["numeric_ratio_percent", "updated_at"])
+        forced_mcq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Single answer question?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows directly from this block.",
+            question_hash="forced-mcq-preview-num-disabled",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Calculate the speed for a body travelling 20 m in 4 s.",
+            question_type=QuestionBankItem.QuestionType.NUM,
+            correct_answer="5 m/s",
+            distractors=["4 m/s", "16 m/s", "10 m/s"],
+            explanation="Use \\(v = d/t\\).",
+            question_hash="forced-num-preview-disabled",
+            is_numerical=True,
+            numeric_metadata={"script_version": "v1"},
+        )
         self.client.force_login(self.teacher)
 
         response = self.client.post(
@@ -6255,6 +6921,39 @@ print(result)""",
             data=json.dumps({"question_type": QuestionBankItem.QuestionType.NUM}),
             content_type="application/json",
         )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        block_payload = next(item for item in preview["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertNotIn(QuestionBankItem.QuestionType.NUM, block_payload["available_manual_question_types"])
+        self.assertEqual(question_messages[-1]["question_id"], forced_mcq.pk)
+        self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MCQ)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_student_preview_forced_numeric_question_type_shows_error_without_openai(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.numeric_ratio_percent = 100
+        course.config.save(update_fields=["advanced_question_start_percent", "numeric_ratio_percent", "updated_at"])
+        block, _, objective, chunk = self.create_preview_content_block(course, title="Oscillations")
+        objective.text = "Calculate the maximum speed and acceleration of oscillators and evaluate conditions causing loss of contact in vibrating systems"
+        objective.save(update_fields=["text"])
+        chunk.text = "Oscillations involve amplitude, frequency, resonance, and loss of contact in vibrating systems."
+        chunk.save(update_fields=["text"])
+        self.client.force_login(self.teacher)
+
+        with patch(
+            "standalone.services.preview._fallback_question_for_block",
+            side_effect=QuestionGenerationUnavailableError(
+                "Could not generate a numerical MCQ for this block. num: Numeric generation requires OPENAI_API_KEY."
+            ),
+        ):
+            response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+                data=json.dumps({"question_type": QuestionBankItem.QuestionType.NUM}),
+                content_type="application/json",
+            )
 
         self.assertEqual(response.status_code, 200)
         preview = response.json()["preview"]
@@ -6923,6 +7622,8 @@ print(result)""",
     @override_settings(OPENAI_API_KEY="")
     def test_student_preview_numeric_answer_uses_structured_feedback_sections(self):
         course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.save(update_fields=["numeric_ratio_percent", "updated_at"])
         block, _, objective, _ = self.create_preview_content_block(course)
         question = QuestionBankItem.objects.create(
             course=course,
@@ -6971,12 +7672,60 @@ print(result)""",
         block_payload = next(item for item in answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
         feedback_messages = [message for message in block_payload["transcript"] if message["kind"] == "feedback"]
         self.assertTrue(feedback_messages)
-        self.assertIn("Correct", feedback_messages[-1]["text"])
-        self.assertIn("Correct formula:", feedback_messages[-1]["text"])
-        self.assertIn("Final answer:", feedback_messages[-1]["text"])
-        self.assertNotIn("Correct. Verdict:", feedback_messages[-1]["text"])
-        self.assertNotIn("Verdict:", feedback_messages[-1]["text"])
+        self.assertTrue(feedback_messages[-1]["text"].startswith("Correct"))
+        self.assertIn(r"\[N = N_0", feedback_messages[-1]["text"])
+        self.assertIn(r"\[N \approx 1.51 \times 10^{4}\]", feedback_messages[-1]["text"])
+        self.assertNotIn("Correct formula:", feedback_messages[-1]["text"])
+        self.assertNotIn("Final answer:", feedback_messages[-1]["text"])
         self.assertNotIn("Targeted feedback:", feedback_messages[-1]["text"])
+
+    def test_student_preview_default_quiz_respects_numeric_ratio_when_set_to_100_percent(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.maq_ratio_percent = 0
+        course.config.waq_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        mcq = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Standard MCQ question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Standard explanation.",
+            question_hash="preview-default-mcq-priority",
+        )
+        numeric = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.NUM,
+            stem="A body travels 20 m in 4 s. Calculate the speed.",
+            correct_answer="5 m/s",
+            distractors=["4 m/s", "8 m/s", "10 m/s"],
+            explanation="Use v = d/t.",
+            question_hash="preview-default-num-priority",
+            is_numerical=True,
+            numeric_metadata={"script_version": "expression-v2"},
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        block_payload = next(item for item in preview["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_id"], numeric.pk)
+        self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.NUM)
+        self.assertNotEqual(question_messages[-1]["question_id"], mcq.pk)
 
     def test_student_preview_answer_adds_progress_message_when_coverage_and_engagement_target_complete(self):
         course = self.create_course()

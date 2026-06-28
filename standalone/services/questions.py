@@ -1526,6 +1526,8 @@ def _is_retryable_numeric_validation_error(error_message: str) -> bool:
         or "stem template must contain each supplied variable" in lowered
         or "calculation expression must use at least one supplied variable" in lowered
         or "calculation expression contains unsupported syntax" in lowered
+        or "numeric feedback" in lowered
+        or "stored numeric feedback" in lowered
     )
 
 

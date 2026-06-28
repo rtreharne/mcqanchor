@@ -246,6 +246,26 @@ def _normalize_requested_question_type(question_type: str | None) -> str | None:
     return None
 
 
+def _manual_preview_question_types(block: CourseBlock) -> list[str]:
+    question_types = [QuestionBankItem.QuestionType.MCQ]
+    if int(block.question_numeric_ratio_percent or 0) > 0:
+        question_types.append(QuestionBankItem.QuestionType.NUM)
+    question_types.extend(
+        [
+            QuestionBankItem.QuestionType.MAQ,
+            QuestionBankItem.QuestionType.WAQ,
+        ]
+    )
+    return question_types
+
+
+def _manual_preview_question_type_allowed(block: CourseBlock, question_type: str | None) -> bool:
+    normalized_type = _normalize_requested_question_type(question_type)
+    if normalized_type is None:
+        return True
+    return normalized_type in _manual_preview_question_types(block)
+
+
 def _block_completed_count(course_state: dict, block: CourseBlock) -> int:
     return len([event for event in course_state.get("completed_events", []) if int(event["block_id"]) == block.pk])
 
@@ -322,6 +342,26 @@ def _effective_preview_question_type(
     force_requested_type: bool = False,
 ) -> str | None:
     normalized_type = _normalize_requested_question_type(requested_question_type)
+    if normalized_type is None:
+        ratio_targets = block.question_type_ratio_targets()
+        ranked_types = sorted(
+            ratio_targets.items(),
+            key=lambda item: (
+                -float(item[1]),
+                0 if item[0] == QuestionBankItem.QuestionType.NUM else 1 if item[0] == QuestionBankItem.QuestionType.MCQ else 2,
+            ),
+        )
+        for candidate_type, target_ratio in ranked_types:
+            if target_ratio <= 0:
+                continue
+            if candidate_type == QuestionBankItem.QuestionType.NUM and int(block.question_numeric_ratio_percent or 0) <= 0:
+                continue
+            normalized_type = candidate_type
+            break
+        if normalized_type is None:
+            normalized_type = QuestionBankItem.QuestionType.MCQ
+    if not _manual_preview_question_type_allowed(block, normalized_type):
+        normalized_type = QuestionBankItem.QuestionType.MCQ
     if force_requested_type:
         return normalized_type
     if _advanced_question_types_unlocked(course, block, course_state):
@@ -341,8 +381,9 @@ def _fallback_preview_question_types(
     ordered: list[str | None] = [
         _effective_preview_question_type(course, block, course_state, requested_question_type),
         QuestionBankItem.QuestionType.MCQ,
-        QuestionBankItem.QuestionType.NUM,
     ]
+    if QuestionBankItem.QuestionType.NUM in _manual_preview_question_types(block):
+        ordered.append(QuestionBankItem.QuestionType.NUM)
     if unlocked:
         ordered.extend(
             [
@@ -1107,6 +1148,9 @@ def _feedback_text(question: QuestionBankItem, selected_answers, is_correct: boo
             numeric_metadata=question.numeric_metadata,
             selected_answer_text=selected_answer_text,
             is_correct=is_correct,
+            objective_text=getattr(question.learning_objective, "text", ""),
+            chunk_text=getattr(question.source_chunk, "text", ""),
+            objective_symbol_heuristics=getattr(question.learning_objective, "symbol_heuristics", {}),
         )
     explanation = normalize_explanation_text(question.explanation)
     if question.is_multiple_answer():
@@ -1820,6 +1864,7 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None, pr
                 "counts_in_metrics": released or (pre_engagement_enabled and block_metrics["completed_count"] > 0),
                 "learning_objective_count": len(objectives),
                 "target_question_count": block.preview_target_question_count,
+                "available_manual_question_types": _manual_preview_question_types(block),
                 "has_pending_question": bool(pending_questions.get(str(block.pk))),
                 "transcript": _serialized_transcript(course_state, transcript),
                 "metrics": block_metrics,

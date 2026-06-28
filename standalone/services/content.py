@@ -15,6 +15,7 @@ from docx import Document
 from pptx import Presentation
 
 from standalone.models import ContentAsset, ContentChunk, LearningObjective
+from standalone.services.symbol_heuristics import derive_symbol_heuristics_for_objectives
 
 
 SUPPORTED_EXTENSIONS = {
@@ -522,10 +523,12 @@ def move_course_block(block, direction: str) -> bool:
     return True
 
 
-def _replace_block_objectives(block, source_asset: ContentAsset, objective_texts: list[str]) -> int:
+def _replace_block_objectives(block, source_asset: ContentAsset, objective_texts: list[str], context_text: str = "") -> int:
     existing = list(block.learning_objectives.order_by("position", "pk"))
+    objective_heuristics = derive_symbol_heuristics_for_objectives(objective_texts, context_text)
     created_or_updated = 0
     for index, text in enumerate(objective_texts, start=1):
+        heuristics = objective_heuristics[index - 1] if index - 1 < len(objective_heuristics) else {}
         defaults = {
             "course": block.course,
             "block": block,
@@ -533,6 +536,7 @@ def _replace_block_objectives(block, source_asset: ContentAsset, objective_texts
             "position": index,
             "code": f"{block.order}.{index}",
             "text": text,
+            "symbol_heuristics": heuristics,
         }
         if index <= len(existing):
             objective = existing[index - 1]
@@ -542,7 +546,7 @@ def _replace_block_objectives(block, source_asset: ContentAsset, objective_texts
                     setattr(objective, field, value)
                     changed = True
             if changed:
-                objective.save(update_fields=["course", "block", "source_asset", "position", "code", "text", "updated_at"])
+                objective.save(update_fields=["course", "block", "source_asset", "position", "code", "text", "symbol_heuristics", "updated_at"])
             created_or_updated += 1
             continue
 
@@ -553,6 +557,14 @@ def _replace_block_objectives(block, source_asset: ContentAsset, objective_texts
         objective.delete()
 
     return created_or_updated
+
+
+def refresh_learning_objective_symbol_heuristics(objective: LearningObjective, context_text: str = "") -> LearningObjective:
+    heuristics = derive_symbol_heuristics_for_objectives([objective.text], context_text or "")[0]
+    if objective.symbol_heuristics != heuristics:
+        objective.symbol_heuristics = heuristics
+        objective.save(update_fields=["symbol_heuristics", "updated_at"])
+    return objective
 
 
 def refresh_course_summary_from_blocks(course) -> bool:
@@ -592,7 +604,7 @@ def regenerate_block_descriptions_and_objectives(block, progress_callback=None) 
         progress_callback(85)
     block.summary = block_summary
     block.save(update_fields=["summary", "updated_at"])
-    objective_count = _replace_block_objectives(block, assets[0], objectives)
+    objective_count = _replace_block_objectives(block, assets[0], objectives, combined_text)
     refresh_course_summary_from_blocks(block.course)
     if progress_callback:
         progress_callback(100)
@@ -677,6 +689,7 @@ def ingest_content_asset(asset: ContentAsset) -> None:
     objective_budget = _objective_budget_for_text(extracted_text, minimum=4, maximum=8)
     _, objectives = summarize_block_content(extracted_text, max_items=objective_budget)
     objectives = [text for text in objectives if text]
+    objective_heuristics = derive_symbol_heuristics_for_objectives(objectives, extracted_text)
     for index, objective in enumerate(objectives, start=1):
         LearningObjective.objects.create(
             course=asset.block.course,
@@ -685,4 +698,5 @@ def ingest_content_asset(asset: ContentAsset) -> None:
             position=index,
             code=f"{asset.block.order}.{index}",
             text=objective,
+            symbol_heuristics=objective_heuristics[index - 1] if index - 1 < len(objective_heuristics) else {},
         )
