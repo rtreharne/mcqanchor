@@ -429,14 +429,10 @@ if (previewRoot && previewDataNode) {
     if (flagObjectiveSelect) {
       flagObjectiveSelect.innerHTML = "";
       const objectives = Array.isArray(block.learning_objectives) ? block.learning_objectives : [];
-      if (flagSheetState.learningObjectiveId) {
-        if (flagObjectiveField) {
-          flagObjectiveField.hidden = true;
-        }
-      } else {
-        if (flagObjectiveField) {
-          flagObjectiveField.hidden = false;
-        }
+      if (flagObjectiveField) {
+        flagObjectiveField.hidden = objectives.length === 0;
+      }
+      if (objectives.length) {
         const placeholderOption = document.createElement("option");
         placeholderOption.value = "";
         placeholderOption.textContent = "Choose a learning objective";
@@ -447,6 +443,9 @@ if (previewRoot && previewDataNode) {
           option.textContent = `${objective.code} ${objective.text}`;
           flagObjectiveSelect.appendChild(option);
         });
+        flagObjectiveSelect.value = flagSheetState.learningObjectiveId
+          ? String(flagSheetState.learningObjectiveId)
+          : "";
       }
     }
     syncFlagSheetState();

@@ -54,6 +54,7 @@ from standalone.models import (
 )
 from standalone.tasks import run_block_creation_processing, run_block_regeneration, run_course_import_block_creation
 from standalone.services.content import chunk_text, summarize_block_content
+from standalone.services.guidance import build_generation_guidance_prompt
 from standalone.services.pdf_import import analyze_pdf_chapters, _select_outline_items, _toc_boundaries_from_ocr
 from standalone.services.preview import PREVIEW_SESSION_KEY
 from standalone.services.course_imports import course_import_work_is_active, run_course_import_worker_once
@@ -700,6 +701,49 @@ class StandaloneFlowTests(TestCase):
 
         self.assertEqual(tex, r"\cos\left(60^{\circ}\right)")
         self.assertNotIn("radians", tex)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_generation_prompt_includes_relevant_block_corrections_from_other_objectives(self):
+        course = self.create_course()
+        block, asset, objective, chunk = self.create_preview_content_block(course)
+        objective.text = "Calculate source speed from a Doppler wavelength shift"
+        objective.save(update_fields=["text", "updated_at"])
+        chunk.text = "Observed wavelength and rest wavelength can be used to estimate recession speed with the speed of light."
+        chunk.save(update_fields=["text", "updated_at"])
+        related_objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=2,
+            code="1.2",
+            text="Explain observed and rest wavelength notation in Doppler shift questions",
+        )
+        unrelated_objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=3,
+            code="1.3",
+            text="Interpret Roman numerals in historical numbering systems",
+        )
+        LearningObjectiveCorrection.objects.create(
+            learning_objective=related_objective,
+            created_by=self.teacher,
+            instruction="Use λ for observed wavelength, λ₀ for rest wavelength, and c for the speed of light.",
+            question_stem_snapshot="Light shifts from 500 nm to 505 nm. Estimate the source speed.",
+        )
+        LearningObjectiveCorrection.objects.create(
+            learning_objective=unrelated_objective,
+            created_by=self.teacher,
+            instruction="Use Roman numerals directly in stems and options.",
+            question_stem_snapshot="Which Arabic numeral matches XIV?",
+        )
+
+        prompt = build_generation_guidance_prompt(course, block=block, objective=objective)
+
+        self.assertIn("Related block correction notes:", prompt)
+        self.assertIn("Use λ for observed wavelength, λ₀ for rest wavelength, and c for the speed of light.", prompt)
+        self.assertNotIn("Use Roman numerals directly in stems and options.", prompt)
 
     @override_settings(OPENAI_API_KEY="")
     def test_pdf_import_detects_chapters_from_page_headings(self):

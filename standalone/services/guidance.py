@@ -5,6 +5,7 @@ from standalone.models import Course, CourseBlock, LearningObjective
 
 GUIDANCE_CORRECTION_LIMIT = 4
 GUIDANCE_CHAT_OBJECTIVE_LIMIT = 3
+GUIDANCE_RELATED_BLOCK_CORRECTION_LIMIT = 4
 
 
 def sanitize_assistant_guidance(text: str) -> str:
@@ -91,6 +92,61 @@ def _objective_correction_lines(objective: LearningObjective | None, *, limit: i
     return lines
 
 
+def _correction_line(correction) -> str:
+    instruction = sanitize_assistant_guidance(correction.instruction)
+    if not instruction:
+        return ""
+    stem_snapshot = re.sub(r"\s+", " ", str(correction.question_stem_snapshot or "").strip())
+    if stem_snapshot:
+        return f"{instruction} Example flagged question: {stem_snapshot[:180]}"
+    return instruction
+
+
+def _related_block_correction_lines(
+    block: CourseBlock | None,
+    target_text: str,
+    *,
+    exclude_objective_ids: set[int] | None = None,
+    limit: int = GUIDANCE_RELATED_BLOCK_CORRECTION_LIMIT,
+) -> list[str]:
+    if block is None:
+        return []
+    target_keywords = _keyword_set(f"{block.title} {target_text}")
+    if not target_keywords:
+        return []
+
+    exclude_objective_ids = exclude_objective_ids or set()
+    ranked: list[tuple[int, int, str]] = []
+    for objective in block.learning_objectives.all():
+        if objective.pk in exclude_objective_ids:
+            continue
+        objective_keywords = _keyword_set(objective.text)
+        for correction in objective.corrections.all():
+            line = _correction_line(correction)
+            if not line:
+                continue
+            correction_keywords = _keyword_set(f"{objective.text} {line}")
+            overlap = len(target_keywords & correction_keywords)
+            objective_overlap = len(target_keywords & objective_keywords)
+            score = max(overlap, objective_overlap)
+            if score <= 0:
+                continue
+            ranked.append((score, correction.pk, line))
+
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    related_lines: list[str] = []
+    seen: set[str] = set()
+    for _score, _correction_id, line in ranked:
+        normalized = line.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        related_lines.append(line)
+        if len(related_lines) >= limit:
+            break
+    return related_lines
+
+
 def _objective_prompt_block(objective: LearningObjective) -> str:
     parts: list[str] = []
     objective_guidance = _objective_guidance(objective)
@@ -124,6 +180,16 @@ def build_generation_guidance_prompt(
         objective_block = _objective_prompt_block(objective)
         if objective_block:
             sections.append(f"Learning-objective guidance:\n{objective_block}")
+        related_block_corrections = _related_block_correction_lines(
+            block,
+            objective.text,
+            exclude_objective_ids={objective.pk},
+        )
+        if related_block_corrections:
+            sections.append(
+                "Related block correction notes:\n"
+                + "\n".join(f"- {line}" for line in related_block_corrections)
+            )
     if not sections:
         return ""
     return (
@@ -173,6 +239,16 @@ def build_chat_guidance_prompt(course: Course, block: CourseBlock, question_text
     objective_sections = [section for section in (_objective_prompt_block(objective) for objective in matched_objectives) if section]
     if objective_sections:
         sections.append("Matched learning-objective guidance:\n" + "\n\n".join(objective_sections))
+    related_block_corrections = _related_block_correction_lines(
+        block,
+        question_text,
+        exclude_objective_ids={objective.pk for objective in matched_objectives},
+    )
+    if related_block_corrections:
+        sections.append(
+            "Related block correction notes:\n"
+            + "\n".join(f"- {line}" for line in related_block_corrections)
+        )
 
     if not sections:
         return ""
